@@ -98,7 +98,9 @@ pytest
 Add or update tests with every fix and every new rule; tests run without a
 GPU or ComfyUI (synthetic sprites, temporary folders, FastAPI's test
 client). For UI changes, look at the page in a browser (Playwright and
-Chromium are available) before calling it done.
+Chromium are available) before calling it done, and rebuild the README
+screenshots (`python3 docs/screenshots/make_screenshots.py`) when a page
+they show changes.
 
 ## Conventions
 

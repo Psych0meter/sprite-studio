@@ -33,6 +33,20 @@ web app and a set of command-line tools.
 - **Any NVIDIA card**: PyTorch build, training precision and memory savers
   chosen from the card; time estimates measured on yours.
 
+## Screenshots
+
+The sprites below are simple shapes drawn by a script, and the results are
+mock-ups: they show the interface, not what a trained model makes.
+
+| | |
+|---|---|
+| ![Models: a model's sprites sorted into groups and kinds](docs/screenshots/models.png) | ![Generate: remaster, describe or sketch a sprite](docs/screenshots/generate.png) |
+| **Models**: sprites sorted into groups and kinds | **Generate**: remaster, describe or sketch |
+| ![Results: variants next to the original, with picks](docs/screenshots/results.png) | ![Palettes: colours and tuning put on what is generated](docs/screenshots/palettes.png) |
+| **Results**: variants next to the original | **Palettes**: colours and tuning |
+
+`python3 docs/screenshots/make_screenshots.py` rebuilds them.
+
 ## Requirements
 
 - Linux (Debian 12/13 or Ubuntu 22.04+), on a machine or in a container
