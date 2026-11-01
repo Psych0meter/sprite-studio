@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+webapp/.venv/
+
+# Local data and secrets (never commit sprites, LoRAs or results)
+*.safetensors
+*.ckpt
+output/
+.env
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
