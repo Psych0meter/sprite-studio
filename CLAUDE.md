@@ -77,6 +77,12 @@ Co-Authored-By: ...          (the attribution lines the session provides)
   section dated, the compare links at the bottom updated) and
   `chore(release): bump version to X.Y.Z`. Before 1.0.0, a new feature
   bumps the minor version, fixes alone the patch version.
+- Publishing is automatic: once both commits are on `main` and CI is green,
+  push an annotated tag `vX.Y.Z` on the last one. `release.yml` checks that
+  the tag matches `VERSION` and is on `main`, reruns the checks, and creates
+  the GitHub release with the changelog section as notes and a source
+  archive with its checksum. A tag with a suffix (`v0.2.0-rc.1`) makes a
+  pre-release.
 
 ## Checks
 

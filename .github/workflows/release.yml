@@ -1,0 +1,66 @@
+name: Release
+
+# Publishes a GitHub release when a tag vX.Y.Z (or vX.Y.Z-rc.1...) is pushed.
+# The notes are the tag's section of CHANGELOG.md.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Tag matches VERSION
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match VERSION (${version})"
+            exit 1
+          fi
+
+      - name: Tag is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main \
+            || { echo "::error::${GITHUB_REF_NAME} is not on main"; exit 1; }
+
+      - name: Checks
+        run: |
+          pip install -e ".[dev]" shellcheck-py
+          ruff check . && ruff format --check .
+          shellcheck scripts/*.sh webapp/run.sh
+          for f in webapp/static/*.js; do node --check "$f"; done
+          pytest
+
+      - name: Release notes
+        run: python3 scripts/changelog_section.py "${GITHUB_REF_NAME}" > notes.md
+
+      - name: Source archive
+        run: |
+          name="sprite-studio-${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="${name}/" -o "${name}.tar.gz" "${GITHUB_SHA}"
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "${GITHUB_REF_NAME}" in *-*) flags="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" ${flags} --verify-tag \
+            --title "Sprite Studio ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md \
+            sprite-studio-*.tar.gz sprite-studio-*.tar.gz.sha256

@@ -98,6 +98,9 @@ pytest
 The same checks run on every push (GitHub Actions). Conventions are in
 [CLAUDE.md](CLAUDE.md); the design in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+Releases are published by GitHub Actions when a `vX.Y.Z` tag is pushed
+(see the release rules in [CLAUDE.md](CLAUDE.md)).
+
 ## Licence
 
 Sprite Studio is released under the [MIT licence](LICENSE).
