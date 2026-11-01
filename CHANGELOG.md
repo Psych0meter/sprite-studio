@@ -51,6 +51,7 @@ repository: models, LoRAs, palettes, results and settings are kept.
   and the sudo rule to stop ComfyUI during training.
 - **Project tooling**: README, user guide, installation and architecture
   documents, pytest suite, Ruff, ShellCheck and GitHub Actions checks.
+- **Licence**: Sprite Studio is released under the MIT licence.
 
 ### Changed
 

@@ -98,9 +98,11 @@ pytest
 The same checks run on every push (GitHub Actions). Conventions are in
 [CLAUDE.md](CLAUDE.md); the design in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Models and licences
+## Licence
 
-Sprite Studio downloads Stable Diffusion 1.5 (and SDXL on request), released
+Sprite Studio is released under the [MIT licence](LICENSE).
+
+It downloads Stable Diffusion 1.5 (and SDXL on request), released
 under the CreativeML OpenRAIL-M licence and the CreativeML Open RAIL++-M
 licence respectively. Check their terms before commercial use of what you
 generate. ComfyUI (GPL-3.0) and kohya sd-scripts (Apache-2.0) are installed
