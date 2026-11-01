@@ -1,0 +1,2462 @@
+#!/usr/bin/env python3
+"""Sprite Studio: a web front end for the sprite generator.
+
+Wraps the command-line tools of scripts/ (pxmake.sh, pxbatch.sh,
+pxmatrix.sh, train_lora.sh, pxmodel.py, pxtool.py) behind one page: models,
+training sets, LoRA training, generation, batches, palettes, LoRA
+comparisons, and a viewer to pick and compare the results. The scripts stay the single source of truth; the
+app only builds their command lines, runs them as jobs and reads what they
+write.
+
+  ./run.sh                     (creates the venv on first start)
+  http://<container>:8189
+
+The GPU is shared, so GPU jobs (generation, batches, comparisons,
+training) run one at a time from a queue; training sets are built at once
+on the CPU. Training needs ComfyUI stopped: the app stops it and starts it
+again around the run (sudo rule, see run.sh).
+
+Settings: environment variables (SG_DATA, PX_INPUT, PX_GAME, PX_OUTPUT,
+PX_COMFY_URL, COMFY, PX_LORA_HOME, SG_SCRIPTS, SG_WEB_STATE, SG_WEB_PORT,
+SG_WEB_PASSWORD) give the defaults; the
+Settings page overrides them (saved in ~/.spritegen-web/settings.json).
+SG_WEB_PASSWORD, when set, asks for it (any user name) in the browser.
+"""
+
+from __future__ import annotations
+
+import base64
+import contextlib
+import csv
+import datetime as dt
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from collections import deque
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+HERE = Path(__file__).resolve().parent
+SCRIPTS = Path(os.environ.get("SG_SCRIPTS", HERE.parent / "scripts")).resolve()
+VERSION = next((f.read_text().strip() for f in (HERE.parent / "VERSION",) if f.exists()), "dev")
+STATE_DIR = Path(os.environ.get("SG_WEB_STATE", Path.home() / ".spritegen-web"))
+LOG_DIR = STATE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+sys.path.insert(0, str(SCRIPTS))
+
+import pxmodel  # noqa: E402  (the sprite models: scripts/pxmodel.py)
+
+
+def pm():
+    """pxmodel, pointed at the folders of the current settings."""
+    st = settings()
+    pxmodel.HOME = st["lora_home"]
+    pxmodel.ROOTS.clear()
+    pxmodel.ROOTS.update(sources())
+    return pxmodel
+
+
+def sources() -> dict:
+    """The named folders sprites are imported from: input, game, and the ones
+    added in Settings ("name=path" lines)."""
+    st = settings()
+    out = {"input": st["px_input"], "game": st["px_game"]}
+    for line in (st.get("sources") or "").splitlines():
+        name, _, path = line.partition("=")
+        if name.strip() and path.strip():
+            out[re.sub(r"[^\w-]", "_", name.strip())] = path.strip()
+    return out
+
+
+def body_model(b: dict) -> str:
+    """The model a request is for."""
+    if not b.get("model"):
+        raise HTTPException(400, "choose a model")
+    return b["model"]
+
+
+def model_cfg(mid: str) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]{1,40}", mid or ""):
+        raise HTTPException(400, "a model id is lowercase letters, digits and _")
+    try:
+        return pm().load(mid)
+    except SystemExit as e:
+        raise HTTPException(404, str(e)) from None
+
+
+BASES = {"sd15": {"label": "SD 1.5", "suffix": ""}, "sdxl": {"label": "SDXL", "suffix": "_xl"}}
+
+
+def model_ok(m: str | None) -> str:
+    return m if m in BASES else "sd15"
+
+
+# --------------------------------------------------------------------------
+# settings and small persistent state
+
+
+DATA = Path(os.environ.get("SG_DATA", Path.home() / "sprites"))
+DEFAULTS = {
+    "px_input": os.environ.get("PX_INPUT", str(DATA / "input")),
+    "px_game": os.environ.get("PX_GAME", str(DATA / "game")),
+    "px_output": os.environ.get("PX_OUTPUT", str(DATA / "output")),
+    "comfy_url": os.environ.get("PX_COMFY_URL", "http://127.0.0.1:8188"),
+    "comfy_dir": os.environ.get("COMFY", str(Path.home() / "ComfyUI")),
+    "lora_home": os.environ.get("PX_LORA_HOME", str(Path.home() / "lora")),
+    "comfy_service": "comfyui",
+    "train_stops_comfy": "auto",  # auto: only on cards under 15 GB; always; never
+    "sources": "",  # more source folders: name=path, one per line
+}
+_lock = threading.RLock()
+
+
+def _load(name: str, default: Any) -> Any:
+    try:
+        return json.loads((STATE_DIR / name).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def _save(name: str, data: Any) -> None:
+    tmp = STATE_DIR / (name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1))
+    tmp.replace(STATE_DIR / name)
+
+
+def settings() -> dict:
+    s = dict(DEFAULTS)
+    s.update({k: v for k, v in _load("settings.json", {}).items() if k in DEFAULTS and v})
+    return s
+
+
+def P(key: str) -> Path:
+    return Path(settings()[key])
+
+
+def roots() -> list[Path]:
+    s = settings()
+    return (
+        [Path(s[k]).resolve() for k in ("px_output", "lora_home") if s.get(k)]
+        + [Path(v).resolve() for v in sources().values()]
+        + [Path(s["comfy_dir"]).resolve() / "models" / "loras"]
+    )
+
+
+def safe_path(p: str) -> Path:
+    """A path the browser may read: under one of the data folders."""
+    try:
+        rp = Path(p).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "bad path") from None
+    for r in roots():
+        if rp == r or r in rp.parents:
+            return rp
+    raise HTTPException(403, "outside the data folders")
+
+
+def job_env() -> dict:
+    s = settings()
+    env = dict(os.environ)
+    env.update(
+        PX_INPUT=s["px_input"],
+        PX_GAME=s["px_game"],
+        PX_OUTPUT=s["px_output"],
+        PX_COMFY_URL=s["comfy_url"],
+        COMFY=s["comfy_dir"],
+        PX_LORA_HOME=s["lora_home"],
+        PYTHONUNBUFFERED="1",
+        PYTHONWARNINGS="ignore",
+    )
+    env["PATH"] = f"{SCRIPTS}:{env.get('PATH', '')}"
+    return env
+
+
+# --------------------------------------------------------------------------
+# jobs: GPU jobs one at a time from a queue, CPU jobs at once
+
+
+class Jobs:
+    def __init__(self) -> None:
+        self.jobs: dict[str, dict] = {}
+        self.queue: deque[str] = deque()
+        self.procs: dict[str, subprocess.Popen] = {}
+        self.cv = threading.Condition(_lock)
+        for j in _load("jobs.json", []):
+            if j["status"] in ("running", "queued"):
+                j["status"] = "interrupted"
+                j["error"] = "the web app was restarted while this job was " + (
+                    "running" if j.get("started") else "waiting"
+                )
+            self.jobs[j["id"]] = j
+        threading.Thread(target=self._gpu_worker, daemon=True).start()
+
+    def persist(self) -> None:
+        items = sorted(self.jobs.values(), key=lambda j: j["created"])[-300:]
+        _save("jobs.json", items)
+
+    def submit(
+        self,
+        kind: str,
+        title: str,
+        cmd: list[str],
+        *,
+        lane: str = "gpu",
+        env: dict | None = None,
+        out: str | None = None,
+        meta: dict | None = None,
+    ) -> dict:
+        jid = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+        job = {
+            "id": jid,
+            "kind": kind,
+            "title": title,
+            "lane": lane,
+            "cmd": cmd,
+            "env": env or {},
+            "out": out,
+            "meta": meta or {},
+            "status": "queued",
+            "created": time.time(),
+            "started": None,
+            "ended": None,
+            "returncode": None,
+            "error": None,
+            "log": str(LOG_DIR / f"{jid}.log"),
+        }
+        with self.cv:
+            self.jobs[jid] = job
+            if lane == "gpu":
+                self.queue.append(jid)
+                self.cv.notify_all()
+            else:
+                threading.Thread(target=self._run, args=(jid,), daemon=True).start()
+            self.persist()
+        return job
+
+    def _gpu_worker(self) -> None:
+        while True:
+            with self.cv:
+                while not self.queue:
+                    self.cv.wait()
+                jid = self.queue.popleft()
+            self._run(jid)
+
+    def _log(self, job: dict, text: str) -> None:
+        with open(job["log"], "a") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+
+    def _run(self, jid: str) -> None:
+        job = self.jobs[jid]
+        with self.cv:
+            if job["status"] != "queued":
+                return
+            job["status"] = "running"
+            job["started"] = time.time()
+            self.persist()
+        stopped_comfy = False
+        try:
+            if job["meta"].get("needs_free_gpu") and must_free_gpu():
+                stopped_comfy = self._free_gpu(job)
+            elif job["kind"] in ("generate", "batch", "matrix") and not comfy_status()["up"]:
+                # ComfyUI may be starting again after a training run
+                self._log(job, "waiting for ComfyUI to answer (up to 3 minutes)")
+                for _ in range(90):
+                    if job["status"] == "cancelled" or comfy_status()["up"]:
+                        break
+                    time.sleep(2)
+                else:
+                    raise RuntimeError("ComfyUI is not running: start it on the Overview page, then run this job again")
+                if job["status"] == "cancelled":
+                    return
+            env = job_env()
+            env.update(job["env"])
+            self._log(job, "$ " + " ".join(_quote(c) for c in job["cmd"]))
+            with open(job["log"], "a") as fh:
+                p = subprocess.Popen(
+                    job["cmd"],
+                    stdout=fh,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    cwd=str(SCRIPTS),
+                    start_new_session=True,
+                )
+                self.procs[jid] = p
+                rc = p.wait()
+            job["returncode"] = rc
+            if job["status"] == "cancelled":
+                pass
+            elif rc == 0:
+                job["status"] = "done"
+            elif rc == 4 and job.get("kind") in ("batch", "matrix"):
+                # Some sprites failed, the rest is usable: done, with the reason shown.
+                job["status"] = "done"
+                tail = read_log(job, 60000)
+                m = re.search(r"^failed: (\d+) of", tail, re.M)
+                n = int(m.group(1)) if m else len(re.findall(r"^\s*failed: ", tail, re.M))
+                job["error"] = f"{n} {'render' if job['kind'] == 'matrix' else 'sprite'}(s) failed: " + (
+                    log_error(job) or "see the log"
+                )
+            else:
+                job["status"] = "failed"
+                job["error"] = log_error(job) or f"exited with code {rc}: see the log"
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            job["status"] = "failed"
+            job["error"] = str(e)
+            self._log(job, f"error: {e}")
+        finally:
+            self.procs.pop(jid, None)
+            if stopped_comfy:
+                ok, msg = comfy_service("start")
+                self._log(job, "ComfyUI started again" if ok else f"could not start ComfyUI: {msg}")
+            job["ended"] = time.time()
+            with self.cv:
+                self.persist()
+
+    def _free_gpu(self, job: dict) -> bool:
+        if not comfy_status()["up"]:
+            self._log(job, "ComfyUI is not running: the GPU is free")
+            return False
+        self._log(job, "stopping ComfyUI to free the GPU memory for training")
+        ok, msg = comfy_service("stop")
+        if not ok:
+            raise RuntimeError(
+                "ComfyUI holds the GPU and the app could not stop it (" + msg + "). "
+                "Stop it yourself (systemctl stop comfyui) or add the sudo rule from run.sh."
+            )
+        for _ in range(30):
+            if not comfy_status()["up"]:
+                break
+            time.sleep(1)
+        time.sleep(3)
+        return True
+
+    def cancel(self, jid: str) -> dict:
+        with self.cv:
+            job = self.jobs.get(jid)
+            if not job:
+                raise HTTPException(404, "no such job")
+            if job["status"] == "queued":
+                if jid in self.queue:
+                    self.queue.remove(jid)
+                job["status"] = "cancelled"
+                job["ended"] = time.time()
+                self.persist()
+                return job
+            if job["status"] != "running":
+                return job
+            job["status"] = "cancelled"
+            p = self.procs.get(jid)
+        if p:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(p.pid, signal.SIGTERM)
+
+            def kill_later() -> None:
+                time.sleep(10)
+                if p.poll() is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(p.pid, signal.SIGKILL)
+
+            threading.Thread(target=kill_later, daemon=True).start()
+        self._log(job, "cancelled by the user")
+        return job
+
+    def view(self, job: dict, with_progress: bool = True) -> dict:
+        v = {k: job[k] for k in job if k not in ("env",)}
+        v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
+        if with_progress:
+            v["progress"] = progress(job)
+        return v
+
+
+def _quote(s: str) -> str:
+    return s if re.fullmatch(r"[\w@%+=:,./-]+", s) else "'" + s.replace("'", "'\\''") + "'"
+
+
+def log_error(job: dict) -> str:
+    """The most telling error line at the end of a log, for the job's summary."""
+    lines = [ln.strip() for ln in re.split(r"[\r\n]", read_log(job, 30000)) if ln.strip()]
+    for pat in (
+        r"^error: ",
+        r"^FAILED: ",
+        r"^[A-Za-z_.]*(Error|Exception): ",
+        r"^(FAILED|not found|no references|unknown)",
+    ):
+        hits = [ln for ln in lines if re.search(pat, ln) and "CalledProcessError" not in ln]
+        if hits:
+            return hits[-1][:400]
+    return ""
+
+
+def read_log(job: dict, tail: int = 0) -> str:
+    try:
+        with open(job["log"], "rb") as fh:
+            if tail:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - tail))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+STEP_RE = re.compile(r"steps:\s*(\d+)%\|[^|]*\|\s*(\d+)/(\d+)\s*\[([\d:]+)<([\d:?]+)[^\]]*?(?:avr_loss=([\d.]+))?\]")
+EPOCH_RE = re.compile(r"epoch (\d+)/(\d+)")
+
+
+def progress(job: dict) -> dict:
+    """What the job's log says about how far it is."""
+    kind, meta = job["kind"], job["meta"]
+    if job["status"] == "queued":
+        return {"fraction": 0, "text": "waiting for the GPU"}
+    if kind == "train":
+        text = read_log(job)
+        pieces = re.split(r"[\r\n]", text)
+        loss, step, total, elapsed, remaining = [], 0, 0, "", ""
+        for piece in pieces:
+            m = STEP_RE.search(piece)
+            if m:
+                step, total = int(m.group(2)), int(m.group(3))
+                elapsed, remaining = m.group(4), m.group(5)
+                if m.group(6):
+                    loss.append((step, float(m.group(6))))
+        epochs = EPOCH_RE.findall(text)
+        ep = f"epoch {epochs[-1][0]} of {epochs[-1][1]}" if epochs else ""
+        # thin the loss curve to ~200 points
+        if len(loss) > 200:
+            k = len(loss) / 200
+            loss = [loss[int(i * k)] for i in range(200)] + [loss[-1]]
+        frac = step / total if total else 0
+        parts = [
+            p for p in (ep, f"step {step} of {total}" if total else "", f"{remaining} left" if remaining else "") if p
+        ]
+        return {"fraction": frac, "text": ", ".join(parts) or "starting", "loss": loss, "elapsed": elapsed}
+    if kind == "batch":
+        text = read_log(job)
+        n = len(re.findall(r"^=== \d{4}-", text, re.M))
+        total = meta.get("total") or 0
+        last = re.findall(r"^=== \S+ \S+ (\S+)", text, re.M)
+        return {
+            "fraction": min(1, max(0, n - 1) / total) if total else 0,
+            "text": f"sprite {n} of {total}" + (f": {last[-1]}" if last else "") if total else f"{n} sprites",
+        }
+    if kind == "matrix":
+        text = read_log(job)
+        m = re.findall(r"=== \[(\d+)/(\d+)\]", text)
+        if m:
+            i, t = map(int, m[-1])
+            return {"fraction": (i - 1) / t, "text": f"cell {i} of {t}"}
+        return {"fraction": 0, "text": "starting"}
+    if kind == "generate":
+        text = read_log(job, 20000)
+        n = meta.get("count", 1)
+        done = len(re.findall(r"\] seed=\d+", text))
+        cleaned = len(re.findall(r"sprite standard:", text))
+        frac = (done + cleaned) / (2 * n) if n else 0
+        return {"fraction": frac, "text": f"{done} of {n} rendered" + (f", {cleaned} cleaned" if cleaned else "")}
+    return {"fraction": 1 if job["status"] == "done" else 0, "text": ""}
+
+
+# --------------------------------------------------------------------------
+# ComfyUI
+
+
+def comfy_status() -> dict:
+    url = settings()["comfy_url"]
+    try:
+        with urllib.request.urlopen(url + "/system_stats", timeout=2) as r:
+            data = json.loads(r.read())
+        dev = (data.get("devices") or [{}])[0]
+        return {
+            "up": True,
+            "url": url,
+            "device": dev.get("name", "").split(" : ")[0].replace("cuda:0 ", ""),
+            "vram_total": dev.get("vram_total"),
+            "vram_free": dev.get("vram_free"),
+            "version": data.get("system", {}).get("comfyui_version"),
+        }
+    except (OSError, ValueError, urllib.error.URLError):
+        return {"up": False, "url": url}
+
+
+def gpu_memory_mb() -> int:
+    g = gpu_info()
+    if g:
+        return g["mem_total"]
+    c = comfy_status()
+    return int((c.get("vram_total") or 0) / 1048576)
+
+
+def must_free_gpu() -> bool:
+    """Whether training has to stop ComfyUI: on cards with less than 15 GB
+    both do not fit (setting train_stops_comfy: auto / always / never)."""
+    mode = settings().get("train_stops_comfy", "auto")
+    if mode in ("always", "never"):
+        return mode == "always"
+    mem = gpu_memory_mb()
+    return not mem or mem < 15000
+
+
+def speed() -> dict:
+    """How fast this machine is, from the logs of finished jobs: seconds per
+    rendered image, and minutes per training run (per base model)."""
+    per_image, train = [], {}
+    with _lock:
+        jobs = sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
+    for j in jobs:
+        if j["status"] != "done":
+            continue
+        if j["kind"] in ("generate", "batch", "matrix") and len(per_image) < 200:
+            per_image += [int(x) for x in re.findall(r"\] seed=\d+\s+(\d+) s", read_log(j, 200000))][-50:]
+        elif j["kind"] == "train" and j.get("started") and j.get("ended"):
+            train.setdefault(model_ok(j["meta"].get("model")), (j["ended"] - j["started"]) / 60)
+    per_image.sort()
+    return {
+        "sec_per_image": per_image[len(per_image) // 2] if len(per_image) >= 3 else None,
+        "train_minutes": {k: round(v) for k, v in train.items()},
+    }
+
+
+def comfy_service(action: str) -> tuple[bool, str]:
+    name = settings()["comfy_service"]
+    try:
+        r = subprocess.run(["sudo", "-n", "systemctl", action, name], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    msg = (r.stderr or r.stdout).strip()
+    if r.returncode and "password" in msg:
+        msg = "sudo asks for a password: the sudo rule from run.sh is missing"
+    return r.returncode == 0, msg
+
+
+def gpu_info() -> dict | None:
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        out = (
+            subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            .stdout.strip()
+            .splitlines()[0]
+        )
+        name, used, total, util, temp = [x.strip() for x in out.split(",")]
+        return {"name": name, "mem_used": int(used), "mem_total": int(total), "util": int(util), "temp": int(temp)}
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        return None
+
+
+# --------------------------------------------------------------------------
+# files on disk
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+    except OSError:
+        pass
+    return None
+
+
+def sprite_list(root: Path, sub: str = "", recursive: bool = False) -> list[dict]:
+    base = root / sub if sub else root
+    if not base.is_dir():
+        return []
+    files = sorted(base.rglob("*.png") if recursive else base.glob("*.png"))
+    out = []
+    for f in files:
+        if "/rooms/" in str(f):
+            continue
+        w_h = png_size(f) or (0, 0)
+        out.append({"path": str(f), "name": f.stem, "rel": str(f.relative_to(root)), "w": w_h[0], "h": w_h[1]})
+    return out
+
+
+VARIANT_SKIP = {"orig", "init", "sketch"}
+
+
+def is_variant(f: Path) -> bool:
+    """A generated sprite, not one of the job's working files."""
+    return not (f.stem in VARIANT_SKIP or f.stem.startswith("init_") or f.stem.endswith("_x4"))
+
+
+def result_set(folder: Path) -> dict:
+    """One generation folder (pxmake.sh layout: job.txt, raw/, variants)."""
+    job_txt = (folder / "job.txt").read_text(errors="replace") if (folder / "job.txt").exists() else ""
+    head = dict(re.findall(r"(\w+)=(\S+)", job_txt.splitlines()[0])) if job_txt else {}
+    prompt = what = ""
+    for line in job_txt.splitlines():
+        if line.startswith("prompt: "):
+            prompt = line[8:]
+        elif line.startswith("what: ") or line.startswith("extra: "):
+            what = line.split(": ", 1)[1]
+    variants = []
+    for f in sorted(folder.glob("*.png")):
+        if not is_variant(f):
+            continue
+        m = re.search(r"_s(\d+)$", f.stem)
+        wh = png_size(f) or (0, 0)
+        variants.append(
+            {
+                "path": str(f),
+                "name": f.stem,
+                "seed": m.group(1) if m else "",
+                "w": wh[0],
+                "h": wh[1],
+                "raw": next((str(r) for r in (folder / "raw").glob(f"*_s{m.group(1)}_*.png")), "") if m else "",
+            }
+        )
+    orig = folder / "orig.png"
+    if "faction" in head and "group" not in head:  # job files of the first generator versions
+        head["group"] = head["faction"]
+    if "category" in head and "model" not in head:
+        head["model"] = head["category"]
+    init = head.get("init", "none")
+    target = Path(init).stem if init not in ("none", "") and orig.exists() else head.get("name", folder.name)
+    return {
+        "target": target,
+        "path": str(folder),
+        "name": head.get("name", folder.name),
+        "orig": str(orig) if orig.exists() else "",
+        "orig_size": png_size(orig) if orig.exists() else None,
+        "variants": variants,
+        "prompt": prompt,
+        "what": what,
+        "params": head,
+        "done": (folder / ".done").exists(),
+        "mtime": folder.stat().st_mtime,
+    }
+
+
+def _variants(d: Path) -> list[Path]:
+    return [v for v in d.glob("*.png") if is_variant(v)]
+
+
+def scan_results() -> list[dict]:
+    """Every result folder; "empty" ones (nothing rendered, e.g. every sprite failed) are flagged."""
+    out_root = P("px_output")
+    items = []
+    if not out_root.is_dir():
+        return items
+    for d in out_root.iterdir():
+        if not d.is_dir() or d.name in ("uploads", "picked") or d.name.startswith("."):
+            continue
+        try:
+            mtime = d.stat().st_mtime
+        except OSError:
+            continue
+        if d.name.startswith("batch-"):
+            sets = [s.parent for s in d.glob("*/*/job.txt")]
+            made = [s for s in sets if _variants(s)]
+            classes = sorted({s.parent.name for s in sets})
+            cover = next((str(v) for s in made for v in s.glob("*_s*.png") if not v.stem.endswith("_x4")), "")
+            items.append(
+                {
+                    "type": "batch",
+                    "path": str(d),
+                    "title": d.name[6:],
+                    "count": len(made),
+                    "tried": len(sets),
+                    "classes": classes,
+                    "mtime": max([mtime] + [s.stat().st_mtime for s in sets]),
+                    "cover": cover,
+                    "empty": not made,
+                }
+            )
+        elif d.name.startswith("matrix-"):
+            sheets = sorted(str(s) for s in d.glob("sheet_*.png"))
+            made = any(_variants(c) for c in d.glob("*/*/") if c.is_dir())
+            items.append(
+                {
+                    "type": "matrix",
+                    "path": str(d),
+                    "title": d.name[7:],
+                    "count": len(sheets),
+                    "mtime": mtime,
+                    "cover": sheets[0] if sheets and made else "",
+                    "empty": not made,
+                }
+            )
+        elif (d / "job.txt").exists():
+            vs = _variants(d)
+            head = (d / "job.txt").read_text(errors="replace").splitlines()[0]
+            name = (re.search(r"name=(\S+)", head) or [None, d.name])[1]
+            kind = (re.search(r"(?:kind|category)=(\S+)", head) or [None, ""])[1]
+            items.append(
+                {
+                    "type": "single",
+                    "path": str(d),
+                    "title": name,
+                    "kind": kind,
+                    "count": len(vs),
+                    "mtime": mtime,
+                    "cover": str(sorted(vs)[0]) if vs else "",
+                    "done": (d / ".done").exists(),
+                    "empty": not vs,
+                }
+            )
+    busy = busy_outputs()
+    for i in items:
+        i["busy"] = any(i["path"] == b or b.startswith(i["path"] + "/") for b in busy)
+        if i["busy"]:
+            i["empty"] = False  # still rendering
+    items.sort(key=lambda i: -i["mtime"])
+    return items
+
+
+def busy_outputs() -> list[str]:
+    """Output folders of the queued and running jobs."""
+    return [
+        str(Path(j["out"]).resolve())
+        for j in JOBS.jobs.values()
+        if j.get("out") and j["status"] in ("queued", "running")
+    ]
+
+
+def results_bin() -> Path:
+    return P("px_output") / ".bin"
+
+
+def delete_result(path: str) -> str:
+    """Moves a result folder (a run, a batch, a LoRA test, or one sprite inside a batch) to the bin."""
+    p = safe_path(path)
+    out_root = P("px_output").resolve()
+    if p == out_root or out_root not in p.parents or not p.is_dir():
+        raise HTTPException(400, f"not a result folder: {path}")
+    rel = p.relative_to(out_root)
+    if rel.parts[0] in ("uploads", "picked") or rel.parts[0].startswith("."):
+        raise HTTPException(400, f"{rel.parts[0]} is not a result")
+    if len(rel.parts) > 1 and not rel.parts[0].startswith(("batch-", "matrix-")):
+        raise HTTPException(400, "only whole results, or one sprite of a batch, can be deleted")
+    for b in busy_outputs():
+        if b == str(p) or b.startswith(str(p) + "/") or str(p).startswith(b + "/"):
+            raise HTTPException(409, f"a job is still writing to {rel}: cancel it first (Jobs page)")
+    dst = results_bin() / f"{time.time_ns()}_{rel.parts[-1]}"  # sorts in deletion order
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(p), str(dst))
+    (dst / ".origin").write_text(str(rel))
+    if len(rel.parts) == 3 and rel.parts[0].startswith("batch-"):
+        refresh_batch_sheet(out_root / rel.parts[0], rel.parts[1])
+    with _lock:
+        picks = _load("picks.json", {})
+        gone = [k for k in picks if k == str(p) or k.startswith(str(p) + "/")]
+        for k in gone:
+            picks.pop(k)
+        if gone:
+            _save("picks.json", picks)
+    return str(rel)
+
+
+def refresh_batch_sheet(batch: Path, cls: str) -> None:
+    """Rebuilds a batch's comparison sheet for one kind after a sprite left or came back."""
+    sheet = batch / f"sheet_{cls}.png"
+    sets = sorted(str(d) + "/" for d in (batch / cls).glob("*/") if d.is_dir()) if (batch / cls).is_dir() else []
+    if not sets:
+        sheet.unlink(missing_ok=True)
+        return
+    subprocess.run(
+        [sys.executable, "-W", "ignore", str(SCRIPTS / "pxtool.py"), "sheet", str(sheet), *sets],
+        capture_output=True,
+        timeout=120,
+    )
+
+
+def _du(p: Path) -> int:
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+
+
+# --------------------------------------------------------------------------
+# training runs on disk
+
+
+SAMPLE_RE = re.compile(r"_(?:e(\d{6})|(\d{6}))_(\d{2})_\d+")
+
+
+def train_info(cat: str, model: str = "sd15") -> dict:
+    c = model_cfg(cat)
+    sfx = BASES[model]["suffix"]
+    name = c["trigger"] + sfx
+    home = P("lora_home") / cat
+    data, out = home / ("dataset" + sfx), home / ("output" + sfx)
+    info: dict[str, Any] = {
+        "category": cat,
+        "trigger": c["trigger"],
+        "name": name,
+        "model": model,
+        "home": str(home),
+        "data_dir": str(data),
+    }
+    rows = []
+    img_dir = next(iter(sorted((data / "img").glob(f"*_{c['trigger']}"))), None) if (data / "img").is_dir() else None
+    if img_dir:
+        for f in sorted(img_dir.glob("*.png")):
+            txt = f.with_suffix(".txt")
+            rows.append({"id": f.stem, "image": str(f), "caption": txt.read_text().strip() if txt.exists() else ""})
+    info["dataset"] = {
+        "exists": bool(rows),
+        "count": len(rows),
+        "repeats": int(img_dir.name.split("_")[0]) if img_dir else None,
+        "sheet": str(data / "sheet.png") if (data / "sheet.png").exists() else "",
+        "rows": rows,
+        "mtime": (data / "sheet.png").stat().st_mtime if (data / "sheet.png").exists() else None,
+    }
+    ckpts = []
+    if out.is_dir():
+        for f in sorted(out.glob(f"{name}*.safetensors")):
+            m = re.search(r"-(\d+)$", f.stem)
+            ckpts.append(
+                {
+                    "path": str(f),
+                    "name": f.name,
+                    "epoch": int(m.group(1)) if m else None,
+                    "size": f.stat().st_size,
+                    "mtime": f.stat().st_mtime,
+                }
+            )
+    info["checkpoints"] = ckpts
+    grid: dict[int, dict[int, str]] = {}
+    prompts = []
+    if (out / "sample_prompts.txt").exists():
+        prompts = [p.split(" --n ")[0] for p in (out / "sample_prompts.txt").read_text().splitlines() if p.strip()]
+    for f in sorted((out / "sample").glob("*.png")) if (out / "sample").is_dir() else []:
+        m = SAMPLE_RE.search(f.stem)
+        if not m:
+            continue
+        ep = int(m.group(1)) if m.group(1) else -int(m.group(2))  # step-based samples: negative keys
+        grid.setdefault(int(m.group(3)), {})[ep] = str(f)
+    info["samples"] = {
+        "prompts": prompts,
+        "grid": {str(k): {str(e): v for e, v in sorted(row.items())} for k, row in grid.items()},
+    }
+    loras = lora_dir()
+    info["installed"] = (
+        [
+            {"name": f.name, "mtime": f.stat().st_mtime, "size": f.stat().st_size}
+            for f in sorted(loras.glob(f"{c['trigger']}*.safetensors"))
+            if ("_xl" in f.stem) == (model == "sdxl")
+        ]
+        if loras.is_dir()
+        else []
+    )
+    return info
+
+
+def sdxl_ready() -> bool:
+    """The SDXL base model is there, whole (a download in progress is smaller)."""
+    f = P("comfy_dir") / "models" / "checkpoints" / "sd_xl_base_1.0.safetensors"
+    return f.is_file() and f.stat().st_size > 6_000_000_000
+
+
+def lora_dir() -> Path:
+    return P("comfy_dir") / "models" / "loras"
+
+
+def lora_info(name: str, rec: dict | None = None) -> dict:
+    """One LoRA file in ComfyUI: there or not, and where it came from when the app installed it."""
+    f = lora_dir() / name
+    out: dict[str, Any] = {"name": name, "installed": f.is_file(), "xl": "_xl" in Path(name).stem}
+    if not out["installed"]:
+        return out
+    st = f.stat()
+    out.update(size=st.st_size, mtime=st.st_mtime)
+    r = (rec if rec is not None else _load("installed.json", {})).get(name)
+    if r and r.get("size") == st.st_size and abs(r.get("mtime", 0) - st.st_mtime) < 2:
+        out.update(
+            {k: r.get(k) for k in ("model", "checkpoint", "epoch", "final", "trained")}, installed_at=r.get("installed")
+        )
+    return out
+
+
+def model_loras(m: dict) -> dict:
+    """The LoRA files of a model in ComfyUI: the default one (<trigger>.safetensors, what generation
+    uses), its SDXL twin, and the extra ones added to compare (<trigger>_*.safetensors)."""
+    rec = _load("installed.json", {})
+    default = lora_info(m["trigger"] + ".safetensors", rec)
+    xl = lora_info(m["trigger"] + "_xl.safetensors", rec)
+    names = sorted(f.name for f in lora_dir().glob(m["trigger"] + "_*.safetensors")) if lora_dir().is_dir() else []
+    extra = [lora_info(n, rec) for n in names if n != xl["name"]]
+    return {"default": default, "xl": xl, "extra": extra, "dir_ok": lora_dir().is_dir()}
+
+
+def require_lora(m: dict, chosen: str = "") -> None:
+    """Refuses a render job up front when its LoRA isn't in ComfyUI (every image would fail)."""
+    if not lora_dir().is_dir():
+        return  # ComfyUI's folder isn't visible from here: let the job tell
+    name = chosen or m["trigger"] + ".safetensors"
+    if not (lora_dir() / name).is_file():
+        raise HTTPException(
+            400,
+            f"No LoRA installed for {m['label']}: {name} isn't in ComfyUI's models/loras. "
+            "Train the model, then on the Train page pick an epoch and click Use.",
+        )
+
+
+# --------------------------------------------------------------------------
+# the web app
+
+app = FastAPI(title="Sprite Studio", version=VERSION, docs_url=None, redoc_url=None)
+JOBS = Jobs()
+PASSWORD = os.environ.get("SG_WEB_PASSWORD", "")
+
+
+@app.middleware("http")
+async def no_stale_pages(request: Request, call_next):
+    """The page and its script are always checked again, so a new version of
+    the app shows after a restart without a forced reload."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@app.middleware("http")
+async def auth(request: Request, call_next):
+    if PASSWORD:
+        h = request.headers.get("authorization", "")
+        ok = False
+        if h.startswith("Basic "):
+            try:
+                ok = secrets.compare_digest(base64.b64decode(h[6:]).decode().split(":", 1)[1], PASSWORD)
+            except (ValueError, IndexError):
+                ok = False
+        if not ok:
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Sprite Studio"'})
+    return await call_next(request)
+
+
+def body_get(b: dict, key: str, default: Any = None, kind: type = str) -> Any:
+    v = b.get(key, default)
+    if v in (None, ""):
+        return default
+    try:
+        return kind(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{key}: not a valid {kind.__name__}") from None
+
+
+def name_ok(s: str) -> str:
+    s = re.sub(r"[^\w.-]+", "_", s.strip())[:80]
+    if not s:
+        raise HTTPException(400, "empty name")
+    return s
+
+
+@app.get("/api/status")
+def api_status():
+    with _lock:
+        running = [JOBS.view(j) for j in JOBS.jobs.values() if j["status"] == "running"]
+        queued = [JOBS.view(j, False) for jid in JOBS.queue if (j := JOBS.jobs.get(jid))]
+    return {
+        "comfy": comfy_status(),
+        "gpu": gpu_info(),
+        "running": running,
+        "queued": queued,
+        "time": time.time(),
+        "version": VERSION,
+    }
+
+
+@app.post("/api/comfy/{action}")
+def api_comfy(action: str):
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(400, "unknown action")
+    ok, msg = comfy_service(action)
+    if not ok:
+        raise HTTPException(500, msg or f"systemctl {action} failed")
+    return {"ok": True}
+
+
+@app.get("/api/catalog")
+def api_catalog():
+    loras = []
+    if lora_dir().is_dir():
+        loras = [
+            {"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime}
+            for f in sorted(lora_dir().glob("*.safetensors"))
+        ]
+    return {
+        "models": models_summary(),
+        "projects": [x["name"] for x in project_list() if x["name"]],
+        "sources": sources(),
+        "speed": speed(),
+        "gpu_mb": gpu_memory_mb(),
+        "loras": loras,
+        "settings": settings(),
+    }
+
+
+# ---- projects: a name on each model (one per game); empty ones are kept in projects.json
+
+
+def project_list() -> list[dict]:
+    names = set(_load("projects.json", {"names": []}).get("names", []))
+    models: dict[str, list[str]] = {}
+    for m in models_summary():
+        models.setdefault(m.get("project") or "", []).append(m["id"])
+        if m.get("project"):
+            names.add(m["project"])
+    out = [{"name": n, "models": sorted(models.get(n, []))} for n in sorted(names, key=str.lower)]
+    if models.get(""):
+        out.append({"name": "", "models": sorted(models[""])})
+    return out
+
+
+def project_name(v: Any) -> str:
+    n = re.sub(r"\s+", " ", str(v or "")).strip()[:60]
+    if not n:
+        raise HTTPException(400, "give the project a name")
+    return n
+
+
+def _set_project_names(add: str = "", drop: str = "") -> None:
+    with _lock:
+        d = _load("projects.json", {"names": []})
+        names = [x for x in d.get("names", []) if x != drop]
+        if add and add not in names:
+            names.append(add)
+        _save("projects.json", {"names": names})
+
+
+@app.get("/api/projects")
+def api_projects():
+    return project_list()
+
+
+@app.post("/api/projects")
+async def api_project_create(request: Request):
+    name = project_name((await request.json()).get("name"))
+    if any(p["name"].lower() == name.lower() for p in project_list()):
+        raise HTTPException(400, f"a project {name} exists already")
+    _set_project_names(add=name)
+    return project_list()
+
+
+@app.post("/api/projects/rename")
+async def api_project_rename(request: Request):
+    """Renames a project (its models follow); renaming onto an existing one merges them."""
+    b = await request.json()
+    old, new = str(b.get("old") or ""), project_name(b.get("new"))
+    p = pm()
+    for mid in p.list_models():
+        try:
+            m = p.load(mid)
+        except SystemExit:
+            continue
+        if (m.get("project") or "") == old:
+            m["project"] = new
+            p.save(m)
+    _set_project_names(add=new, drop=old)
+    return project_list()
+
+
+@app.post("/api/projects/delete")
+async def api_project_delete(request: Request):
+    """Removes a project; its models move to another project ("move_to", "" = no project), never deleted."""
+    b = await request.json()
+    name, dest = str(b.get("name") or ""), str(b.get("move_to") or "")
+    if not name:
+        raise HTTPException(400, "which project?")
+    if dest == name:
+        raise HTTPException(400, "move the models to another project")
+    p = pm()
+    for mid in p.list_models():
+        try:
+            m = p.load(mid)
+        except SystemExit:
+            continue
+        if (m.get("project") or "") == name:
+            m["project"] = dest
+            p.save(m)
+    _set_project_names(drop=name)
+    if dest:
+        _set_project_names(add=dest)
+    return project_list()
+
+
+@app.get("/api/sprites")
+def api_sprites(root: str = "input", sub: str = ""):
+    if root == "input":
+        return sprite_list(P("px_input"))
+    if root == "game":
+        if sub and ".." in sub:
+            raise HTTPException(400, "bad folder")
+        return sprite_list(P("px_game"), sub, recursive=not sub)
+    raise HTTPException(400, "root is input or game")
+
+
+@app.get("/api/file")
+def api_file(path: str = ""):
+    if not path:
+        raise HTTPException(404, "no file")
+    p = safe_path(path)
+    if not p.is_file():
+        raise HTTPException(404, "no such file")
+    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/info")
+def api_info(path: str):
+    p = safe_path(path)
+    import numpy as np
+    from PIL import Image
+    from scipy import ndimage
+
+    a = np.array(Image.open(p).convert("RGBA"))
+    alpha = a[..., 3] > 0
+    cols = len(np.unique(a[alpha][:, :3], axis=0)) if alpha.any() else 0
+    _, parts = ndimage.label(alpha)
+    return {
+        "w": a.shape[1],
+        "h": a.shape[0],
+        "colours": int(cols),
+        "parts": int(parts),
+        "standard": cols <= 64 and a.shape[0] % 8 == 0 and a.shape[1] % 8 == 0,
+    }
+
+
+@app.post("/api/upload")
+async def api_upload(request: Request):
+    b = await request.json()
+    m = re.match(r"data:image/png;base64,(.+)", b.get("data", ""))
+    if not m:
+        raise HTTPException(400, "send a PNG image")
+    folder = P("px_output") / "uploads"
+    folder.mkdir(parents=True, exist_ok=True)
+    f = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name_ok(b.get('name', 'sketch.png'))}"
+    if f.suffix != ".png":
+        f = f.with_suffix(".png")
+    f.write_bytes(base64.b64decode(m.group(1)))
+    return {"path": str(f)}
+
+
+# ---- jobs
+
+
+@app.get("/api/jobs")
+def api_jobs():
+    with _lock:
+        return [JOBS.view(j, j["status"] == "running") for j in sorted(JOBS.jobs.values(), key=lambda j: -j["created"])]
+
+
+@app.get("/api/jobs/{jid}")
+def api_job(jid: str):
+    j = JOBS.jobs.get(jid)
+    if not j:
+        raise HTTPException(404, "no such job")
+    v = JOBS.view(j)
+    if j.get("out") and j["kind"] == "generate" and Path(j["out"]).is_dir():
+        v["result"] = result_set(Path(j["out"]))
+    return v
+
+
+@app.get("/api/jobs/{jid}/log", response_class=PlainTextResponse)
+def api_job_log(jid: str, tail: int = 60000):
+    j = JOBS.jobs.get(jid)
+    if not j:
+        raise HTTPException(404, "no such job")
+    text = read_log(j, tail)
+    # tqdm redraws one line with \r: keep only the last state of each line
+    return "\n".join(line.split("\r")[-1] for line in text.split("\n"))
+
+
+@app.post("/api/jobs/{jid}/cancel")
+def api_job_cancel(jid: str):
+    return JOBS.view(JOBS.cancel(jid), False)
+
+
+@app.post("/api/jobs/{jid}/retry")
+def api_job_retry(jid: str):
+    j = JOBS.jobs.get(jid)
+    if not j:
+        raise HTTPException(404, "no such job")
+    cmd = list(j["cmd"])
+    out = j["out"]
+    if j["kind"] == "generate" and "--out" in cmd:
+        out = re.sub(r"_\d{8}-\d{6}$", "", out) + f"_{dt.datetime.now():%Y%m%d-%H%M%S}"
+        cmd[cmd.index("--out") + 1] = out
+    return JOBS.submit(j["kind"], j["title"], cmd, lane=j["lane"], env=j["env"], out=out, meta=j["meta"])
+
+
+@app.delete("/api/jobs")
+def api_jobs_clear():
+    with _lock:
+        for jid in [k for k, j in JOBS.jobs.items() if j["status"] not in ("running", "queued")]:
+            j = JOBS.jobs.pop(jid)
+            with contextlib.suppress(OSError):
+                os.unlink(j["log"])
+        JOBS.persist()
+    return {"ok": True}
+
+
+def lora_env(b: dict) -> dict:
+    env = {}
+    if b.get("lora"):
+        env["PX_LORA"] = name_ok(b["lora"])
+    if b.get("strength") not in (None, ""):
+        env["PX_LORA_STRENGTH"] = str(body_get(b, "strength", 1.0, float))
+    return env
+
+
+@app.post("/api/generate")
+async def api_generate(request: Request):
+    b = await request.json()
+    count = body_get(b, "count", 4, int)
+    if not 1 <= count <= 32:
+        raise HTTPException(400, "between 1 and 32 images")
+    stamp = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
+    m = model_cfg(body_model(b))
+    group = next((g for g in m["groups"] if g["id"] == b.get("group")), None)
+    if not group:
+        raise HTTPException(400, "choose a group")
+    kind = next((k for k in m["kinds"] if k["id"] == b.get("kind")), None)
+    if m["kinds"] and not kind:
+        raise HTTPException(400, "choose a kind")
+    require_lora(m, name_ok(b["lora"]) if b.get("lora") else "")
+    name = name_ok(b.get("name") or f"{kind['id'] if kind else m['id']}_{group['id']}")
+    out = str(P("px_output") / f"{name}_{stamp}")
+    cmd = [
+        str(SCRIPTS / "pxmake.sh"),
+        "--model",
+        m["id"],
+        "--group",
+        group["id"],
+        "-n",
+        str(count),
+        "--name",
+        name,
+        "--out",
+        out,
+    ]
+    if kind:
+        cmd += ["--kind", kind["id"]]
+    if b.get("refs_kind"):
+        cmd += ["--refs-kind", name_ok(b["refs_kind"])]
+    if (b.get("extra") or "").strip():
+        cmd += ["--extra", b["extra"].strip()]
+    if b.get("keep_green") is True:
+        cmd.append("--keep-green")
+    if b.get("no_tidy"):
+        cmd.append("--no-tidy")
+    if b.get("palette"):
+        cmd += ["--palette", palette_ref(b["palette"])]
+    if b.get("fill") not in (None, ""):
+        cmd += ["--fill", str(fill_value(b["fill"]))]
+    title = (
+        f"{m['label']}: {group['label']}"
+        + (f" {kind['label'].lower()}" if kind else "")
+        + (f", {b['extra'].strip()}" if (b.get("extra") or "").strip() else "")
+    )
+    start = b.get("start") or "none"
+    if start == "sprite":
+        if not b.get("init"):
+            raise HTTPException(400, "pick the sprite to start from")
+        cmd += ["--init", str(safe_path(b["init"]))]
+        if b.get("mask"):
+            cmd += ["--mask", str(safe_path(b["mask"]))]
+    elif start == "sketch":
+        if not b.get("sketch"):
+            raise HTTPException(400, "upload a sketch")
+        cmd += ["--sketch", str(safe_path(b["sketch"]))]
+    if start in ("sprite", "sketch") and b.get("denoise") not in (None, ""):
+        cmd += ["--denoise", str(body_get(b, "denoise", 0.6, float))]
+    if b.get("colours"):
+        cmd += ["--colours", b["colours"].strip()]
+    if b.get("seed") not in (None, ""):
+        cmd += ["--seed", str(body_get(b, "seed", 0, int))]
+    if b.get("size") not in (None, ""):
+        size = body_get(b, "size", 64, int)
+        if size % 8 or not 8 <= size <= 1024:
+            raise HTTPException(400, "size: a multiple of 8, up to 1024")
+        cmd += ["--size", str(size)]
+    if b.get("mirror") in ("auto", "none", "left", "right"):
+        cmd += ["--mirror", b["mirror"]]
+    if b.get("mask"):
+        title = "Touch-up: " + title
+    job = JOBS.submit("generate", title, cmd, env=lora_env(b), out=out, meta={"count": count, "request": b})
+    return job
+
+
+@app.post("/api/batch/plan")
+async def api_batch_plan(request: Request):
+    b = await request.json()
+    cmd = batch_cmd(b) + ["--dry-run"]
+    r = subprocess.run(cmd, capture_output=True, text=True, env=job_env(), cwd=str(SCRIPTS), timeout=60)
+    lines = r.stdout.splitlines()
+    todo = [re.search(r"--name (\S+)", ln).group(1) for ln in lines if ln.startswith("would run:") and "--name" in ln]
+    m = re.search(r"already done: (\d+)", r.stdout)
+    skipped = [ln.strip()[9:] for ln in lines if ln.strip().startswith("skipped:")]
+    return {"todo": todo, "done": int(m.group(1)) if m else 0, "skipped": skipped, "error": r.stderr.strip()[-500:]}
+
+
+def batch_cmd(b: dict) -> list[str]:
+    m = model_cfg(body_model(b))
+    cmd = [
+        str(SCRIPTS / "pxbatch.sh"),
+        "--model",
+        m["id"],
+        "--tag",
+        name_ok(b.get("tag") or dt.date.today().strftime("%Y%m%d")),
+    ]
+    groups = [g["id"] for g in m["groups"] if g["id"] in (b.get("groups") or [])]
+    kinds = [k["id"] for k in m["kinds"] if k["id"] in (b.get("kinds") or [])]
+    if groups:
+        cmd += ["--groups", ",".join(groups)]
+    if kinds:
+        cmd += ["--kinds", ",".join(kinds)]
+    cmd += ["-n", str(body_get(b, "count", 2, int))]
+    if b.get("mode") == "invent":
+        n = body_get(b, "invent", 4, int)
+        if not 1 <= n <= 50:
+            raise HTTPException(400, "between 1 and 50 new sprites per group and kind")
+        cmd += ["--invent", str(n)]
+        ideas = [x.strip().replace("|", "/") for x in str(b.get("ideas") or "").splitlines() if x.strip()]
+        if ideas:
+            cmd += ["--ideas", "|".join(ideas)]
+    if b.get("denoise") not in (None, ""):
+        cmd += ["--denoise", str(body_get(b, "denoise", 0.7, float))]
+    if b.get("palette"):
+        cmd += ["--palette", palette_ref(b["palette"])]
+    if b.get("fill") not in (None, ""):
+        cmd += ["--fill", str(fill_value(b["fill"]))]
+    return cmd
+
+
+def fill_value(v: Any) -> int:
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "fill is a percentage, 50 to 100 (0: the render's own scale)") from None
+    if n and not 50 <= n <= 100:
+        raise HTTPException(400, "fill is 50 to 100 % (0: the render's own scale)")
+    return n
+
+
+@app.post("/api/batch")
+async def api_batch(request: Request):
+    b = await request.json()
+    require_lora(model_cfg(body_model(b)), name_ok(b["lora"]) if b.get("lora") else "")
+    plan = await api_batch_plan(request)
+    cmd = batch_cmd(b)
+    tag = cmd[cmd.index("--tag") + 1]
+    out = str(P("px_output") / f"batch-{tag}")
+    return JOBS.submit(
+        "batch", f"Batch {tag}", cmd, env=lora_env(b), out=out, meta={"total": len(plan["todo"]), "request": b}
+    )
+
+
+@app.post("/api/matrix")
+async def api_matrix(request: Request):
+    b = await request.json()
+    loras = [name_ok(x) for x in b.get("loras") or []]
+    if not loras:
+        raise HTTPException(400, "choose at least one LoRA")
+    strengths = " ".join(str(float(s)) for s in re.split(r"[ ,]+", str(b.get("strengths") or "1.0")) if s)
+    tag = name_ok(b.get("tag") or f"{dt.datetime.now():%Y%m%d-%H%M}")
+    labels = [re.sub(r"\.safetensors$", "", x) for x in loras]
+    m = model_cfg(body_model(b))
+    env = {
+        "MODEL": m["id"],
+        "LORAS": " ".join(f"{ln}:{f}" for ln, f in zip(labels, loras, strict=False)),
+        "STRENGTHS": strengths,
+        "TAG": tag,
+        "SEED": str(body_get(b, "seed", 1000, int)),
+    }
+    out = str(P("px_output") / f"matrix-{tag}")
+    return JOBS.submit(
+        "matrix",
+        f"LoRA comparison: {m['label']} {tag}",
+        [str(SCRIPTS / "pxmatrix.sh")],
+        env=env,
+        out=out,
+        meta={"request": b},
+    )
+
+
+# ---- training
+
+
+@app.get("/api/train/{cat}")
+def api_train(cat: str, model: str = "sd15"):
+    model_cfg(cat)
+    model = model_ok(model)
+    info = train_info(cat, model)
+    info["sdxl_ready"] = sdxl_ready()
+    with _lock:
+        jobs = [
+            JOBS.view(j)
+            for j in sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
+            if j["kind"] in ("train", "dataset", "setup")
+            and j["meta"].get("category") in (cat, None)
+            and model_ok(j["meta"].get("model")) == model
+        ][:5]
+    info["jobs"] = jobs
+    return info
+
+
+@app.post("/api/train/{cat}/dataset")
+async def api_train_dataset(cat: str, request: Request):
+    mcfg = model_cfg(cat)
+    b = await request.json()
+    model = model_ok(b.get("model"))
+    env = {"CATEGORY": cat, "MODEL": model}
+    if b.get("repeats"):
+        env["REPEATS"] = str(body_get(b, "repeats", 0, int))
+    return JOBS.submit(
+        "dataset",
+        f"Training set: {mcfg['label']}",
+        [str(SCRIPTS / "train_lora.sh"), "dataset"],
+        lane="cpu",
+        env=env,
+        meta={"category": cat, "model": model},
+    )
+
+
+@app.post("/api/train/{cat}/start")
+async def api_train_start(cat: str, request: Request):
+    mcfg = model_cfg(cat)
+    b = await request.json()
+    model = model_ok(b.get("model"))
+    if not train_info(cat, model)["dataset"]["exists"]:
+        raise HTTPException(400, "build the training set first")
+    if model == "sdxl" and not sdxl_ready():
+        raise HTTPException(
+            400,
+            "the SDXL model is not downloaded yet: click Download it at the top of the page, "
+            "wait for that job to finish (Jobs), then train",
+        )
+    env = {"CATEGORY": cat, "MODEL": model}
+    for key, kind in (("EPOCHS", int), ("DIM", int), ("LR", float)):
+        if b.get(key.lower()) not in (None, ""):
+            env[key] = str(body_get(b, key.lower(), None, kind))
+    if b.get("precision") in ("auto", "no", "fp16", "bf16"):
+        env["PRECISION"] = b["precision"]
+    title = f"Training: {mcfg['label']}" + (" (SDXL)" if model == "sdxl" else "")
+    return JOBS.submit(
+        "train",
+        title,
+        [str(SCRIPTS / "train_lora.sh"), "train"],
+        env=env,
+        meta={"category": cat, "model": model, "needs_free_gpu": True, "request": b},
+    )
+
+
+@app.post("/api/train/setup-sdxl")
+def api_setup_sdxl():
+    """Downloads the SDXL base model (about 7 GB) with train_lora.sh setup."""
+    return JOBS.submit(
+        "setup",
+        "Download the SDXL model",
+        [str(SCRIPTS / "train_lora.sh"), "setup"],
+        lane="cpu",
+        env={"MODEL": "sdxl"},
+        meta={"model": "sdxl"},
+    )
+
+
+@app.put("/api/train/{cat}/caption")
+async def api_train_caption(cat: str, request: Request):
+    b = await request.json()
+    info = train_info(cat, model_ok(b.get("model")))
+    row = next((r for r in info["dataset"]["rows"] if r["id"] == b.get("id")), None)
+    if not row:
+        raise HTTPException(404, "no such image")
+    caption = " ".join((b.get("caption") or "").split())
+    trig = model_cfg(cat)["trigger"]
+    if not caption.startswith(trig):
+        raise HTTPException(400, f"a caption starts with the trigger word {trig}")
+    Path(row["image"]).with_suffix(".txt").write_text(caption + "\n")
+    csv_path = Path(info["data_dir"]) / "captions.csv"
+    rows = [(r["id"], caption if r["id"] == row["id"] else r["caption"]) for r in info["dataset"]["rows"]]
+    with open(csv_path, "w", newline="") as fh:
+        csv.writer(fh).writerows([("id", "caption")] + rows)
+    return {"ok": True}
+
+
+@app.post("/api/train/{cat}/install")
+async def api_train_install(cat: str, request: Request):
+    b = await request.json()
+    src = safe_path(b.get("checkpoint", ""))
+    if src.suffix != ".safetensors" or not src.is_file():
+        raise HTTPException(400, "not a checkpoint")
+    name = name_ok(b.get("as") or model_cfg(cat)["trigger"])
+    if not name.endswith(".safetensors"):
+        name += ".safetensors"
+    lora_dir().mkdir(parents=True, exist_ok=True)
+    dst = lora_dir() / name
+    shutil.copy2(src, dst)
+    m = re.search(r"-(\d+)$", src.stem)
+    with _lock:
+        rec = _load("installed.json", {})
+        rec[name] = {
+            "model": cat,
+            "checkpoint": src.name,
+            "epoch": int(m.group(1)) if m else None,
+            "final": not m,
+            "trained": src.stat().st_mtime,
+            "installed": time.time(),
+            "size": dst.stat().st_size,
+            "mtime": dst.stat().st_mtime,
+        }
+        _save("installed.json", rec)
+    return {"installed": name, "lora": lora_info(name)}
+
+
+# ---- models (pxmodel.py): groups, kinds, sprites
+
+
+def models_summary() -> list[dict]:
+    out = []
+    p = pm()
+    for mid in p.list_models():
+        try:
+            m = p.load(mid)
+        except SystemExit:
+            continue
+        sd = Path(p.sprites_dir(mid))
+        out.append(
+            {
+                k: m[k]
+                for k in (
+                    "id",
+                    "label",
+                    "trigger",
+                    "size",
+                    "repeats",
+                    "colour_words",
+                    "colours_from",
+                    "tail",
+                    "project",
+                )
+            }
+            | {
+                "groups": [
+                    {k: g.get(k, "") for k in ("id", "label", "words", "enabled", "palette")} for g in m["groups"]
+                ],
+                "kinds": [
+                    {k: kk.get(k, 0) for k in ("id", "label", "words", "size", "denoise", "fill")} for kk in m["kinds"]
+                ],
+                "sprites": len(list(sd.glob("*.png"))) if sd.is_dir() else 0,
+                "saved": (Path(p.model_dir(mid)) / "model.json").exists(),
+                "lora": model_loras(m),
+            }
+        )
+    return out
+
+
+def triggers_in_use(but: str = "") -> dict:
+    """trigger word -> model id, for every model but one: two models must not
+    share a trigger, their LoRA files would overwrite each other."""
+    p = pm()
+    out = {}
+    for mid in p.list_models():
+        if mid == but:
+            continue
+        with contextlib.suppress(SystemExit):
+            out[p.load(mid)["trigger"]] = mid
+    return out
+
+
+def free_trigger(want: str, mid: str) -> str:
+    used = triggers_in_use(mid)
+    base = re.sub(r"[^a-z0-9]", "", want.lower())[:24] or "px" + re.sub(r"[^a-z0-9]", "", mid)[:20]
+    t, n = base, 2
+    while t in used:
+        t, n = f"{base}{n}", n + 1
+    return t
+
+
+def check_model(m: dict) -> None:
+    for key in ("groups", "kinds"):
+        ids = [x.get("id", "") for x in m.get(key, [])]
+        for i in ids:
+            if not re.fullmatch(r"[a-z0-9_]{1,40}", i):
+                raise HTTPException(400, f"{key}: '{i}' is not a valid id (lowercase letters, digits, _)")
+        if len(set(ids)) != len(ids):
+            raise HTTPException(400, f"{key}: two have the same id")
+        for x in m.get(key, []):
+            for f in ("pattern", "name_pattern"):
+                try:
+                    re.compile(x.get(f) or "")
+                except re.error as e:
+                    raise HTTPException(400, f"{x.get('id')}: {f} is not a valid pattern ({e})") from None
+    if not re.fullmatch(r"[a-z][a-z0-9]{2,30}", m.get("trigger", "")):
+        raise HTTPException(400, "the trigger word is lowercase letters and digits, one word (pxunit)")
+    other = triggers_in_use(m.get("id", "")).get(m["trigger"])
+    if other:
+        raise HTTPException(400, f"the trigger word {m['trigger']} is already the model {other}'s: choose another")
+    try:
+        re.compile(m.get("batch_skip") or "")
+    except re.error as e:
+        raise HTTPException(400, f"batch_skip is not a valid pattern ({e})") from None
+
+
+@app.get("/api/models")
+def api_models():
+    return models_summary()
+
+
+@app.get("/api/models/{mid}")
+def api_model(mid: str):
+    m = model_cfg(mid)
+    p = pm()
+    ss = p.sprites(m)
+    for s in ss:
+        g = next((g for g in m["groups"] if g["id"] == s["group"]), None)
+        k = next((k for k in m["kinds"] if k["id"] == s["kind"]), None)
+        s["caption"] = p.caption(m, g, k, s["words"], "<colours>") if g else ""
+    try:
+        previews = p.auto_previews(m)
+    except SystemExit:
+        previews = []
+    template = next((k for k, t in p.template_sets().items() if mid in t["models"]), None)
+    return {
+        "model": m,
+        "sprites": ss,
+        "auto_previews": previews,
+        "template": template,
+        "saved": (Path(p.model_dir(mid)) / "model.json").exists(),
+        "dir": p.model_dir(mid),
+    }
+
+
+@app.put("/api/models/{mid}")
+async def api_model_save(mid: str, request: Request):
+    old = model_cfg(mid)
+    b = await request.json()
+    m = dict(old)
+    for k in (
+        "label",
+        "trigger",
+        "colour_words",
+        "colours_from",
+        "tail",
+        "size",
+        "repeats",
+        "groups",
+        "kinds",
+        "batch_skip",
+        "previews",
+        "imports",
+        "negative",
+        "project",
+        "relight",
+        "fill",
+    ):
+        if k in b:
+            m[k] = b[k]
+    m = pm().normalise(m, mid)
+    m["sprites"] = old["sprites"]
+    check_model(m)
+    pm().save(m)
+    return api_model(mid)
+
+
+@app.post("/api/models")
+async def api_model_create(request: Request):
+    b = await request.json()
+    mid = (b.get("id") or "").strip()
+    if not re.fullmatch(r"[a-z0-9_]{1,40}", mid):
+        raise HTTPException(400, "the id is lowercase letters, digits and _ (it names the model's folder)")
+    p = pm()
+    if (Path(p.model_dir(mid)) / "model.json").exists():
+        raise HTTPException(400, f"a model {mid} already exists")
+    if b.get("template"):
+        sid, _, tid = b["template"].partition("/")
+        if tid not in p.template_sets().get(sid, {}).get("models", {}):
+            raise HTTPException(400, "no such template")
+        m = p.from_template(sid, tid, mid, b.get("project") or None)
+        m["label"] = b.get("label") or m["label"]
+    elif b.get("copy"):
+        base = model_cfg(b["copy"])
+        m = p.normalise(dict(base, sprites={}), mid)
+        m["label"] = b.get("label") or mid
+        keep = [g for g in m["groups"] if g["id"] in (b.get("groups") or [])]
+        if keep:  # a model for some groups only
+            m["groups"] = keep
+            m["repeats"] = 0  # about 300 steps per epoch for its fewer sprites
+            m["previews"] = []
+            m["imports"] = [dict(r, only_grouped=True) for r in m["imports"]]
+    else:
+        m = p.normalise(
+            {"label": b.get("label") or mid, "groups": [{"id": "main", "label": "Main", "words": "", "pattern": "."}]},
+            mid,
+        )
+    m["trigger"] = free_trigger(
+        b.get("trigger") or ("px" + re.sub(r"[^a-z0-9]", "", mid) if b.get("template") else m.get("trigger", "")), mid
+    )
+    if not b.get("copy") and not b.get("template"):
+        m["imports"] = []
+    if b.get("project"):
+        m["project"] = b["project"].strip()[:60]
+    check_model(m)
+    p.save(m)
+    return api_model(mid)
+
+
+@app.get("/api/templates")
+def api_templates():
+    p = pm()
+    have = set(p.list_models())
+    return [
+        {
+            "id": sid,
+            "label": t.get("label", sid),
+            "description": t.get("description", ""),
+            "models": [
+                {"id": mid, "label": mm.get("label", mid), "trigger": mm.get("trigger", ""), "exists": mid in have}
+                for mid, mm in t["models"].items()
+            ],
+        }
+        for sid, t in p.template_sets().items()
+    ]
+
+
+@app.post("/api/templates/{sid}/add")
+async def api_template_add(sid: str, request: Request):
+    """Adds a template set's models that do not exist yet."""
+    p = pm()
+    t = p.template_sets().get(sid)
+    if not t:
+        raise HTTPException(404, "no such template set")
+    b = await request.json()
+    made = []
+    for mid in t["models"]:
+        if (b.get("models") and mid not in b["models"]) or (Path(p.model_dir(mid)) / "model.json").exists():
+            continue
+        p.save(p.from_template(sid, mid, project=b.get("project") or None))
+        made.append(mid)
+    return {"created": made}
+
+
+@app.get("/api/models/{mid}/export")
+def api_model_export(mid: str):
+    m = model_cfg(mid)
+    data = {
+        "label": m["label"],
+        "description": f"Exported from Sprite Studio ({m['project'] or 'no project'})",
+        "models": {mid: {k: v for k, v in m.items() if k not in ("id", "sprites")}},
+    }
+    return Response(
+        json.dumps(data, indent=1),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{mid}.json"'},
+    )
+
+
+@app.post("/api/models/import")
+async def api_model_import_file(request: Request):
+    """Creates models from an exported file ({models: {id: model}}); with
+    "save_template", also keeps the file as a template set."""
+    b = await request.json()
+    data = b.get("data") or {}
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, dict) or not models:
+        raise HTTPException(400, 'not a Sprite Studio model file (it needs a "models" object)')
+    p = pm()
+    made = []
+    for mid, mm in models.items():
+        new_id = name_ok(b.get("id") or mid).lower()
+        if (Path(p.model_dir(new_id)) / "model.json").exists():
+            raise HTTPException(400, f"a model {new_id} already exists: give another id")
+        m = p.normalise(dict(mm, sprites={}), new_id)
+        m["trigger"] = free_trigger(m["trigger"], new_id)
+        if b.get("project"):
+            m["project"] = b["project"].strip()[:60]
+        check_model(m)
+        p.save(m)
+        made.append(new_id)
+    if b.get("save_template"):
+        folder = Path(p.HOME) / ".templates"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{name_ok(b.get('template_name') or made[0])}.json").write_text(json.dumps(data, indent=1))
+    return {"created": made}
+
+
+@app.post("/api/models/{mid}/upload-zip")
+async def api_model_upload_zip(mid: str, request: Request):
+    """The PNG files of a zip archive, into the model's sprites; sub-folder
+    names become a prefix when asked (icons/map/x.png -> map_x.png)."""
+    import io
+    import zipfile
+
+    m = model_cfg(mid)
+    b = await request.json()
+    mm = re.match(r"data:[^;]*;base64,(.+)", b.get("data", ""))
+    if not mm:
+        raise HTTPException(400, "send a zip file")
+    try:
+        z = zipfile.ZipFile(io.BytesIO(base64.b64decode(mm.group(1))))
+    except zipfile.BadZipFile:
+        raise HTTPException(400, "not a zip file") from None
+    folder = Path(pm().sprites_dir(mid))
+    folder.mkdir(parents=True, exist_ok=True)
+    saved, skipped = [], []
+    for info in z.infolist():
+        parts = [x for x in info.filename.split("/") if x]
+        if (
+            info.is_dir()
+            or not parts
+            or not parts[-1].lower().endswith(".png")
+            or "__MACOSX" in parts
+            or parts[-1].startswith(".")
+        ):
+            continue
+        prefix = "_".join(parts[-2:-1]) + "_" if b.get("folders") and len(parts) > 1 else ""
+        name = re.sub(r"[^\w.-]+", "_", prefix + parts[-1])
+        dst = folder / name
+        if dst.exists() and not b.get("overwrite"):
+            skipped.append(name)
+            continue
+        if info.file_size > 20_000_000:
+            skipped.append(name + " (too big)")
+            continue
+        dst.write_bytes(z.read(info))
+        saved.append(name)
+        if b.get("group"):
+            m["sprites"].setdefault(name, {})["group"] = b["group"]
+    pm().save(m)
+    return {"saved": saved, "skipped": skipped}
+
+
+@app.post("/api/models/{mid}/reset")
+async def api_model_reset(mid: str, request: Request):
+    """Back to the built-in settings of this model (groups, kinds, words...),
+    keeping its sprites and what was set by hand on them; with "keep" the
+    listed fields stay as they are."""
+    p = pm()
+    sid = next((k for k, t in p.template_sets().items() if mid in t["models"]), None)
+    if not sid:
+        raise HTTPException(400, "this model does not come from a template")
+    old = model_cfg(mid)
+    b = await request.json()
+    m = p.from_template(sid, mid, project=old["project"])
+    m["sprites"] = old["sprites"]
+    for k in b.get("keep") or []:
+        if k in old:
+            m[k] = old[k]
+    p.save(m)
+    return api_model(mid)
+
+
+@app.delete("/api/models/{mid}")
+def api_model_delete(mid: str):
+    model_cfg(mid)
+    src = Path(pm().model_dir(mid))
+    if not src.exists():
+        raise HTTPException(400, "this built-in model has nothing saved to delete")
+    dst = Path(pm().HOME) / ".deleted" / f"{mid}-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return {"moved_to": str(dst)}
+
+
+@app.post("/api/models/{mid}/upload")
+async def api_model_upload(mid: str, request: Request):
+    m = model_cfg(mid)
+    b = await request.json()
+    p = pm()
+    folder = Path(p.sprites_dir(mid))
+    folder.mkdir(parents=True, exist_ok=True)
+    saved, skipped = [], []
+    for f in b.get("files") or []:
+        mm = re.match(r"data:image/png;base64,(.+)", f.get("data", ""))
+        name = re.sub(r"[^\w.-]+", "_", Path(f.get("name", "")).name)
+        if not mm or not name.lower().endswith(".png"):
+            skipped.append(f.get("name", "?") + " (not a PNG)")
+            continue
+        dst = folder / name
+        if dst.exists() and not b.get("overwrite"):
+            skipped.append(name + " (already there)")
+            continue
+        dst.write_bytes(base64.b64decode(mm.group(1)))
+        saved.append(name)
+        if b.get("group"):
+            m["sprites"].setdefault(name, {})["group"] = b["group"]
+        if b.get("kind"):
+            m["sprites"].setdefault(name, {})["kind"] = b["kind"]
+    p.save(m)
+    return {"saved": saved, "skipped": skipped}
+
+
+@app.post("/api/models/{mid}/import")
+async def api_model_import(mid: str, request: Request):
+    m = model_cfg(mid)
+    b = await request.json()
+    rules = None
+    if b.get("glob"):
+        if ".." in b["glob"] or b.get("root") not in sources():
+            raise HTTPException(400, "choose a source folder (Settings) and a pattern inside it")
+        rules = [
+            {
+                "root": b["root"],
+                "glob": b["glob"],
+                "prefix": name_ok(b["prefix"]) if b.get("prefix") else "",
+                "group": b.get("group") or None,
+            }
+        ]
+    elif not m["imports"]:
+        raise HTTPException(400, "this model has no import rules: give a folder and a pattern")
+    done = pm().import_sprites(m, rules, overwrite=bool(b.get("overwrite")))
+    pm().save(m)
+    return {"imported": done}
+
+
+@app.get("/api/models/{mid}/lighting")
+def api_model_lighting(mid: str):
+    """Light direction of each sprite, read from its shading."""
+    m = model_cfg(mid)
+    out = []
+    for s in pm().sprites(m):
+        top, left = pm().light_direction(s["path"])
+        out.append({"name": s["name"], "top": round(top, 2), "left": round(left, 2)})
+    return out
+
+
+@app.post("/api/models/{mid}/sprites")
+async def api_model_sprites(mid: str, request: Request):
+    """Sets group / kind / words / exclude of some sprites by hand (null:
+    back to the automatic choice)."""
+    m = model_cfg(mid)
+    b = await request.json()
+    names = b.get("names") or []
+    for n in names:
+        ov = m["sprites"].setdefault(n, {})
+        for k in ("group", "kind", "words", "exclude"):
+            if k in b:
+                if b[k] is None:
+                    ov.pop(k, None)
+                else:
+                    ov[k] = b[k]
+        if not ov:
+            m["sprites"].pop(n, None)
+    pm().save(m)
+    return {"ok": True}
+
+
+@app.delete("/api/models/{mid}/sprites")
+async def api_model_sprites_delete(mid: str, request: Request):
+    m = model_cfg(mid)
+    b = await request.json()
+    folder = Path(pm().sprites_dir(mid))
+    trash = folder / ".trash"
+    trash.mkdir(exist_ok=True)
+    for n in b.get("names") or []:
+        f = folder / Path(n).name
+        if f.is_file():
+            shutil.move(str(f), str(trash / f.name))
+        m["sprites"].pop(Path(n).name, None)
+    pm().save(m)
+    return {"ok": True}
+
+
+# ---- results
+
+
+@app.get("/api/results")
+def api_results():
+    return scan_results()
+
+
+@app.post("/api/results/delete")
+async def api_results_delete(request: Request):
+    """Body: {"paths": [...]} or {"empty": true} (every result with nothing in it)."""
+    b = await request.json()
+    paths = list(b.get("paths") or [])
+    if b.get("empty"):
+        paths += [i["path"] for i in scan_results() if i["empty"]]
+    if not paths:
+        raise HTTPException(400, "nothing to delete")
+    done = [delete_result(x) for x in dict.fromkeys(paths)]
+    return {"deleted": done, "bin": bin_info()}
+
+
+def bin_info() -> dict:
+    b = results_bin()
+    items = [d for d in b.iterdir() if d.is_dir()] if b.is_dir() else []
+    return {"count": len(items), "bytes": sum(_du(d) for d in items), "path": str(b)}
+
+
+@app.get("/api/results/bin")
+def api_results_bin():
+    return bin_info()
+
+
+@app.post("/api/results/bin/restore")
+async def api_results_restore(request: Request):
+    """Puts back the last deleted results (body: {"count": n}, default 1)."""
+    b = await request.json()
+    items = (
+        sorted((d for d in results_bin().iterdir() if d.is_dir()), key=lambda d: d.name)
+        if results_bin().is_dir()
+        else []
+    )
+    restored = []
+    for d in items[-max(1, int(b.get("count", 1))) :]:
+        origin = d / ".origin"
+        if not origin.exists():
+            continue
+        rel = Path(origin.read_text().strip())
+        dst = P("px_output") / rel
+        if dst.exists():
+            continue
+        origin.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(d), str(dst))
+        restored.append(str(rel))
+        if len(rel.parts) == 3 and rel.parts[0].startswith("batch-"):
+            refresh_batch_sheet(P("px_output") / rel.parts[0], rel.parts[1])
+    return {"restored": restored, "bin": bin_info()}
+
+
+@app.post("/api/results/bin/empty")
+def api_results_bin_empty():
+    b = results_bin()
+    if b.is_dir():
+        shutil.rmtree(b)
+    return bin_info()
+
+
+# ---- palettes: colours (and a tuning) put on what is generated; files in
+# <training folder>/.palettes/<id>.json, read by pxmake.sh too.
+
+PAL_ID = re.compile(r"[a-z0-9_]{1,60}")
+
+
+def pal_dir() -> Path:
+    return Path(pm().palettes_dir())
+
+
+def palette_ref(ref: str) -> str:
+    """A palette chosen in a form: "none", or the id of a saved one."""
+    if ref == "none":
+        return ref
+    if not PAL_ID.fullmatch(ref or "") or not (pal_dir() / f"{ref}.json").is_file():
+        raise HTTPException(400, f"no palette {ref}")
+    return ref
+
+
+def clean_palette(b: dict, pid: str) -> dict:
+    cols = [str(c).lower() for c in (b.get("colours") or [])]
+    for c in cols:
+        if not re.fullmatch(r"#[0-9a-f]{6}", c):
+            raise HTTPException(400, f"not a colour: {c} (#rrggbb)")
+    if len(cols) > 256:
+        raise HTTPException(400, "256 colours at most")
+    w = [max(0, int(x)) for x in (b.get("weights") or [])]
+    tune = {
+        k: max(
+            -180 if k == "hue" else -100, min(180 if k == "hue" else 100, float((b.get("tune") or {}).get(k, 0) or 0))
+        )
+        for k in pm().pxtool.TUNE_KEYS + ("light",)
+    }
+    mode = b.get("mode") or ("snap" if cols else "tune")
+    if mode not in ("tune", "snap", "match"):
+        raise HTTPException(400, "mode is tune, snap or match")
+    if mode != "tune" and not cols:
+        raise HTTPException(400, "Snap and Match need colours: add some (Take colours from…) or choose Tuning only")
+    return {
+        "id": pid,
+        "label": (b.get("label") or pid).strip()[:80],
+        "colours": cols,
+        "weights": w if len(w) == len(cols) else [],
+        "tune": tune,
+        "mode": mode,
+        "words": bool(b.get("words")),
+        "source": str(b.get("source") or "")[:300],
+    }
+
+
+def save_palette(pal: dict) -> dict:
+    pal_dir().mkdir(parents=True, exist_ok=True)
+    f = pal_dir() / f"{pal['id']}.json"
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(pal, indent=1))
+    tmp.replace(f)
+    return pal | {"mtime": f.stat().st_mtime}
+
+
+def read_palette(pid: str) -> dict:
+    if not PAL_ID.fullmatch(pid):
+        raise HTTPException(400, "a palette id is lowercase letters, digits and _")
+    f = pal_dir() / f"{pid}.json"
+    if not f.is_file():
+        raise HTTPException(404, f"no palette {pid}")
+    return pm().pxtool.load_palette(str(f)) | {"id": pid, "mtime": f.stat().st_mtime}
+
+
+def palette_users(pid: str) -> list[str]:
+    out = []
+    for mid in pm().list_models():
+        try:
+            m = pm().load(mid)
+        except SystemExit:
+            continue
+        out += [f"{m['label']}: {g['label']}" for g in m["groups"] if g.get("palette") == pid]
+    return out
+
+
+def free_palette_id(base: str) -> str:
+    base = re.sub(r"[^a-z0-9_]+", "_", base.lower()).strip("_")[:50] or "palette"
+    pid, n = base, 2
+    while (pal_dir() / f"{pid}.json").exists():
+        pid, n = f"{base}_{n}", n + 1
+    return pid
+
+
+@app.get("/api/palettes")
+def api_palettes():
+    out = []
+    for f in sorted(pal_dir().glob("*.json")) if pal_dir().is_dir() else []:
+        try:
+            out.append(read_palette(f.stem) | {"used_by": palette_users(f.stem)})
+        except HTTPException:
+            continue
+    return out
+
+
+@app.get("/api/palettes/{pid}")
+def api_palette(pid: str):
+    return read_palette(pid) | {"used_by": palette_users(pid)}
+
+
+@app.put("/api/palettes/{pid}")
+async def api_palette_save(pid: str, request: Request):
+    if not PAL_ID.fullmatch(pid):
+        raise HTTPException(400, "a palette id is lowercase letters, digits and _")
+    return save_palette(clean_palette(await request.json(), pid))
+
+
+@app.delete("/api/palettes/{pid}")
+def api_palette_delete(pid: str):
+    read_palette(pid)
+    for mid in pm().list_models():  # groups using it go back to no palette
+        try:
+            m = pm().load(mid)
+        except SystemExit:
+            continue
+        if any(g.get("palette") == pid for g in m["groups"]):
+            for g in m["groups"]:
+                if g.get("palette") == pid:
+                    g["palette"] = ""
+            pm().save(m)
+    (pal_dir() / f"{pid}.json").unlink()
+    return {"ok": True}
+
+
+@app.post("/api/palettes/extract")
+async def api_palette_extract(request: Request):
+    """A palette from sprites: a model's group (and kind), or given files."""
+    b = await request.json()
+    paths = [str(safe_path(x)) for x in b.get("paths") or []]
+    label = b.get("label") or ""
+    if b.get("batch"):
+        files, what = sprite_set({"batch": b["batch"], "group": b.get("group") or ""})
+        paths += files
+        label = label or what.replace("the results of batch ", "Batch ")
+    elif b.get("model"):
+        m = model_cfg(b["model"])
+        ss = [
+            x
+            for x in pm().sprites(m)
+            if (not b.get("group") or x["group"] == b["group"]) and (not b.get("kind") or x["kind"] == b["kind"])
+        ]
+        paths += [x["path"] for x in ss]
+        g = next((g for g in m["groups"] if g["id"] == b.get("group")), None)
+        label = label or " ".join(x for x in [m["label"], g["label"] if g else ""] if x)
+    if not paths:
+        raise HTTPException(400, "no sprite to take colours from")
+    n = max(2, min(64, body_get(b, "n", 32, int)))
+    pal = pm().pxtool.extract_palette(paths, n)
+    label = label or Path(paths[0]).stem
+    pid = free_palette_id(b.get("id") or label)
+    src = f"{len(paths)} sprite(s)" + (
+        f" of {label}" if b.get("model") or b.get("batch") else f": {', '.join(Path(x).name for x in paths[:3])}"
+    )
+    return save_palette(clean_palette(pal | {"label": label, "source": src}, pid))
+
+
+def sprite_set(spec: dict) -> tuple[list[str], str]:
+    """Sprites named by a form: {"model", "group", "kind", "others": true (every group but that one)},
+    {"batch": <a batch folder>} (its results), or {"paths": [...]}. Returns them and a label."""
+    if spec.get("batch"):
+        d = safe_path(spec["batch"])
+        files = [str(f) for f in sorted(d.glob("*/*/*.png")) if is_variant(f)]
+        if spec.get("group"):  # only the sprites made for that group (from each job.txt)
+            keep = []
+            for f in files:
+                jt = Path(f).parent / "job.txt"
+                head = jt.read_text(errors="replace").splitlines()[0] if jt.exists() else ""
+                if re.search(r"\bgroup=" + re.escape(spec["group"]) + r"\b", head):
+                    keep.append(f)
+            files = keep
+        return files, f"the results of batch {d.name[6:]}" + (f" ({spec['group']})" if spec.get("group") else "")
+    if spec.get("model"):
+        m = model_cfg(spec["model"])
+        g = spec.get("group") or ""
+        ss = [
+            x
+            for x in pm().sprites(m)
+            if not x["exclude"]
+            and (not g or (x["group"] != g if spec.get("others") else x["group"] == g))
+            and (not spec.get("kind") or x["kind"] == spec["kind"])
+        ]
+        gl = next((x["label"] for x in m["groups"] if x["id"] == g), g)
+        what = (
+            f"{m['label']}, every group but {gl}"
+            if g and spec.get("others")
+            else f"{m['label']}: {gl}"
+            if g
+            else f"every sprite of {m['label']}"
+        )
+        return [x["path"] for x in ss], what
+    return [str(safe_path(x)) for x in spec.get("paths") or []], "the chosen sprites"
+
+
+@app.post("/api/palettes/autotune")
+async def api_palette_autotune(request: Request):
+    """The tuning that gives some sprites ("sprites") the mean light, contrast and saturation of others
+    ("reference"); nothing is saved. Body: {"sprites": spec, "reference": spec, "hue": n} (sprite_set)."""
+    b = await request.json()
+    src, src_label = sprite_set(b.get("sprites") or {})
+    ref, ref_label = sprite_set(b.get("reference") or {})
+    if not src:
+        raise HTTPException(400, f"no sprite in {src_label}")
+    if not ref:
+        raise HTTPException(400, f"no sprite in {ref_label}")
+    tx = pm().pxtool
+    px, rpx = tx._opaque_pixels(src), tx._opaque_pixels(ref)
+    target = tx.colour_stats(rpx)
+    tune = tx.auto_tune(px, target, float(b.get("hue") or 0))
+    return {
+        "tune": tune,
+        "before": tx.colour_stats(px),
+        "after": tx.colour_stats(tx.tune_rgb(px, tune)),
+        "target": target,
+        "sprites": len(src),
+        "reference": len(ref),
+        "what": f"{src_label} made to look like {ref_label}",
+    }
+
+
+@app.post("/api/palettes/colours")
+async def api_palette_colours(request: Request):
+    """The colours of some sprites (sprite_set), merged down to n, for a palette being edited; nothing saved."""
+    b = await request.json()
+    paths, what = sprite_set(b.get("sprites") or {})
+    if not paths:
+        raise HTTPException(400, f"no sprite in {what}")
+    pal = pm().pxtool.extract_palette(paths, max(2, min(64, body_get(b, "n", 32, int))))
+    return {"colours": pal["colours"], "weights": pal["weights"], "what": f"{len(paths)} sprite(s): {what}"}
+
+
+@app.post("/api/palettes/import")
+async def api_palette_import(request: Request):
+    """A palette file sent as a data URL: .json, .hex (Lospec), .gpl (GIMP), or an image (its colours)."""
+    import tempfile
+
+    b = await request.json()
+    mm = re.match(r"data:[^;]*;base64,(.+)", b.get("data", ""))
+    name = Path(b.get("name") or "palette.hex").name
+    ext = Path(name).suffix.lower()
+    if not mm or ext not in (".json", ".hex", ".txt", ".gpl", ".png", ".gif", ".bmp"):
+        raise HTTPException(400, "send a .hex, .gpl, .json or image file")
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / ("palette" + ext)
+        f.write_bytes(base64.b64decode(mm.group(1)))
+        try:
+            pal = pm().pxtool.load_palette(str(f))
+        except Exception as e:  # noqa: BLE001 - a bad file: say so
+            raise HTTPException(400, f"could not read {name}: {e}") from None
+    if not pal.get("colours"):
+        raise HTTPException(400, f"no colour found in {name}")
+    pid = free_palette_id(b.get("id") or Path(name).stem)
+    return save_palette(
+        clean_palette(
+            pal | {"label": pal.get("label") if ext == ".json" else Path(name).stem, "source": f"imported from {name}"},
+            pid,
+        )
+    )
+
+
+@app.get("/api/palettes/{pid}/export")
+def api_palette_export(pid: str, format: str = "hex"):
+    pal = read_palette(pid)
+    if format == "json":
+        data, mt = (
+            json.dumps({k: pal[k] for k in ("id", "label", "colours", "weights", "tune", "mode", "words")}, indent=1),
+            "application/json",
+        )
+    elif format in ("hex", "gpl", "png"):
+        data = pm().pxtool.export_palette(pal, format)
+        mt = "image/png" if format == "png" else "text/plain"
+    else:
+        raise HTTPException(400, "format is hex, gpl, png or json")
+    return Response(data, media_type=mt, headers={"Content-Disposition": f'attachment; filename="{pid}.{format}"'})
+
+
+@app.post("/api/palettes/apply")
+async def api_palette_apply(request: Request):
+    """Recolours sprites with a palette (saved, or as edited: body "palette"), next to the originals:
+    <name>_pal-<id>.png. Body: {"paths": [...], "id": ..., "palette": {...}}."""
+    b = await request.json()
+    pal = clean_palette(b["palette"], b.get("id") or "edit") if b.get("palette") else read_palette(b.get("id", ""))
+    out_root = P("px_output").resolve()
+    made = []
+    for x in b.get("paths") or []:
+        src = safe_path(x)
+        if src.suffix != ".png" or not src.is_file():
+            raise HTTPException(400, f"not a sprite: {x}")
+        # Results are recoloured next to themselves; any other sprite (a game sprite, a model's) into
+        # the output folder's recoloured/, never over the original.
+        folder = src.parent if out_root in src.parents else out_root / "recoloured"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = re.sub(r"_pal-[a-z0-9_]+$", "", src.stem)
+        dst = folder / f"{stem}_pal-{pal['id']}.png"
+        pm().pxtool.recolour(str(src), str(dst), pal)
+        made.append(str(dst))
+    return {"files": made}
+
+
+@app.get("/api/results/detail")
+def api_result_detail(path: str):
+    p = safe_path(path)
+    if not p.is_dir():
+        raise HTTPException(404, "no such folder")
+    if p.name.startswith("batch-"):
+        sets = []
+        for cls in sorted(d for d in p.iterdir() if d.is_dir()):
+            for s in sorted(d for d in cls.iterdir() if (d / "job.txt").exists()):
+                r = result_set(s)
+                r["class"] = cls.name
+                sets.append(r)
+        sheets = sorted(str(s) for s in p.glob("sheet_*.png"))
+        return {"type": "batch", "path": str(p), "title": p.name[6:], "sets": sets, "sheets": sheets}
+    if p.name.startswith("matrix-"):
+        subjects = []
+        for subj in sorted(d for d in p.iterdir() if d.is_dir()):
+            cells = [result_set(c) for c in sorted(subj.iterdir()) if (c / "job.txt").exists()]
+            sheet = p / f"sheet_{subj.name}.png"
+            subjects.append({"name": subj.name, "cells": cells, "sheet": str(sheet) if sheet.exists() else ""})
+        return {"type": "matrix", "path": str(p), "title": p.name[7:], "subjects": subjects}
+    r = result_set(p)
+    r["type"] = "single"
+    return r
+
+
+@app.get("/api/picks")
+def api_picks():
+    return _load("picks.json", {})
+
+
+@app.post("/api/picks")
+async def api_pick(request: Request):
+    b = await request.json()
+    p = str(safe_path(b.get("path", "")))
+    with _lock:
+        picks = _load("picks.json", {})
+        if b.get("picked"):
+            picks[p] = {"as": name_ok(b.get("as") or Path(p).stem), "time": time.time()}
+        else:
+            picks.pop(p, None)
+        _save("picks.json", picks)
+    return picks
+
+
+@app.post("/api/picks/export")
+def api_picks_export():
+    picks = _load("picks.json", {})
+    dest = P("px_output") / "picked"
+    dest.mkdir(parents=True, exist_ok=True)
+    done = []
+    for path, info in picks.items():
+        src = Path(path)
+        if src.exists():
+            shutil.copy2(src, dest / f"{info['as']}.png")
+            done.append(info["as"])
+    return {"folder": str(dest), "files": sorted(done)}
+
+
+# ---- settings
+
+
+@app.get("/api/settings")
+def api_settings():
+    s = settings()
+    checks = {}
+    for k in ("px_input", "px_game", "px_output", "comfy_dir", "lora_home"):
+        path = Path(s[k])
+        checks[k] = "ok" if path.is_dir() else "missing"
+        if k == "px_output" and path.is_dir() and not os.access(path, os.W_OK):
+            checks[k] = "read-only"
+    sudo = (
+        subprocess.run(["sudo", "-n", "-l", "systemctl", "stop", s["comfy_service"]], capture_output=True, text=True)
+        if shutil.which("sudo")
+        else None
+    )
+    return {
+        "settings": s,
+        "defaults": DEFAULTS,
+        "checks": checks,
+        "scripts": str(SCRIPTS),
+        "can_control_comfy": bool(sudo and sudo.returncode == 0),
+        "scripts_found": {
+            n: (SCRIPTS / n).exists() for n in ("pxmake.sh", "pxbatch.sh", "pxmatrix.sh", "train_lora.sh")
+        },
+    }
+
+
+@app.put("/api/settings")
+async def api_settings_put(request: Request):
+    b = await request.json()
+    saved = _load("settings.json", {})
+    for k in DEFAULTS:
+        if k in b:
+            v = str(b[k]).strip()
+            if v and v != DEFAULTS[k]:
+                saved[k] = v
+            else:
+                saved.pop(k, None)
+    _save("settings.json", saved)
+    return api_settings()
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, exc: HTTPException):
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+
+
+app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=os.environ.get("SG_WEB_HOST", "0.0.0.0"),
+        port=int(os.environ.get("SG_WEB_PORT", "8189")),
+        log_level="warning",
+    )

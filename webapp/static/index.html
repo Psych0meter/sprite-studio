@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprite Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cpath fill='%23f0b13c' d='M3 0h2v1H3zM2 1h4v2H2zM1 3h6v2H1zM0 5h3v2H0zM5 5h3v2H5zM3 5h2v1H3z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" aria-label="Sections">
+    <a class="brand" href="#/">
+      <svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true"><path fill="currentColor" d="M3 0h2v1H3zM2 1h4v2H2zM1 3h6v2H1zM0 5h3v2H0zM5 5h3v2H5zM3 5h2v1H3z"/></svg>
+      <span>Sprite Studio</span>
+    </a>
+    <div id="project-picker" class="project-picker"></div>
+    <a href="#/" data-route="">Overview</a>
+    <a href="#/generate" data-route="generate">Generate</a>
+    <a href="#/results" data-route="results">Results</a>
+    <a href="#/compare" data-route="compare">Compare <span class="count" id="tray-count"></span></a>
+    <div class="rail-gap"></div>
+    <a href="#/models" data-route="models">Models</a>
+    <a href="#/train" data-route="train">Train</a>
+    <a href="#/batch" data-route="batch">Batch</a>
+    <a href="#/palettes" data-route="palettes">Palettes</a>
+    <a href="#/loras" data-route="loras">Compare LoRAs</a>
+    <div class="rail-gap"></div>
+    <a href="#/jobs" data-route="jobs">Jobs <span class="count" id="queue-count"></span></a>
+    <a href="#/settings" data-route="settings">Settings</a>
+  </nav>
+  <div class="body">
+    <header class="topbar">
+      <div id="gpu-line" class="gpu-line">Connecting…</div>
+      <div id="active-job" class="active-job"></div>
+    </header>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal" class="modal" hidden></div>
+<script src="palette.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
