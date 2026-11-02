@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Releases**: pushing a `vX.Y.Z` tag publishes a GitHub release with the
   changelog notes and a source archive.
 
+### Fixed
+
+- **Training**: SDXL training no longer runs an 8 GB card out of memory when
+  it renders the preview images (hours in, at the end of epoch 2, after the
+  checkpoint was saved). Under 12 GB SDXL saves its checkpoints without
+  previews; try them with Compare LoRAs.
+
 ## [0.1.0] - 2026-11-01
 
 First release as a standalone project. Installations made from the earlier

@@ -152,9 +152,9 @@ train() {
 		--gradient_checkpointing --cache_latents --sdpa
 		--noise_offset 0.05 --flip_aug --seed 42
 		--max_data_loader_n_workers 2 --persistent_data_loader_workers
-		--sample_prompts "$OUT/sample_prompts.txt" --sample_every_n_epochs 2 --sample_sampler euler_a
 		--logging_dir "$OUT/logs"
 	)
+	local samples=(--sample_prompts "$OUT/sample_prompts.txt" --sample_every_n_epochs 2 --sample_sampler euler_a)
 	if [ "$MODEL" = sdxl ]; then
 		# SDXL: only the UNet is trained, the text encoders' outputs are
 		# computed once, Adafactor (small optimiser state). Mixed precision
@@ -167,6 +167,16 @@ train() {
 			[ "$prec" = bf16 ] && full=(--full_bf16) || full=(--full_fp16)
 		fi
 		echo "GPU memory ${vram} MB${full:+, weights kept in half precision (${full[*]})}"
+		# The preview renders decode a 1024 px image with the VAE in full
+		# precision (--no_half_vae), which needs more than 1 GB on top of the
+		# training state: it ran an 8 GB card out of memory after hours of
+		# training. Below 12 GB the checkpoints are saved without previews
+		# (try them with Compare LoRAs, which renders them in ComfyUI).
+		if [ "$vram" -ge 12000 ]; then
+			common+=("${samples[@]}")
+		else
+			echo "No preview renders during training on this card (not enough memory): compare the checkpoints with Compare LoRAs"
+		fi
 		export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 		"$VENV/bin/accelerate" launch --num_cpu_threads_per_process 2 sdxl_train_network.py "${common[@]}" \
 			--network_train_unet_only --cache_text_encoder_outputs --no_half_vae \
@@ -178,12 +188,13 @@ train() {
 			exit "$rc"
 		}
 	else
+		common+=("${samples[@]}")
 		"$VENV/bin/accelerate" launch --num_cpu_threads_per_process 2 train_network.py "${common[@]}" \
 			--mixed_precision "$prec" --learning_rate "$LR" --unet_lr "$LR" --text_encoder_lr 5e-5 \
 			--optimizer_type AdamW
 	fi
 	echo "checkpoints: $OUT/$NAME-0000NN.safetensors (every 2 epochs) and $OUT/$NAME.safetensors (last)"
-	echo "previews:    $OUT/sample/"
+	[ -d "$OUT/sample" ] && echo "previews:    $OUT/sample/"
 }
 
 install() {

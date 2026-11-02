@@ -1223,7 +1223,7 @@ routes.train = async (main, parts) => {
       loraNote(modelById(cat), info.name + ".safetensors", true));
     const used = loraFor(modelById(cat), info.name + ".safetensors").info.checkpoint;
     if (!info.checkpoints.length) {
-      s3.append(h("p", { class: "muted" }, "Checkpoints and their previews appear here during training, every 2 epochs."));
+      s3.append(h("p", { class: "muted" }, "Checkpoints and their previews appear here during training, every 2 epochs. SDXL on a card under 12 GB saves the checkpoints without previews: try them on Compare LoRAs."));
     } else {
       s3.append(h("p", { class: "small muted" }, "Each column is one checkpoint, each row one test prompt (things the game does not have, to see the style rather than copies). Pick the earliest column that looks right: later ones tend to copy the training set."));
       const grid = info.samples.grid;

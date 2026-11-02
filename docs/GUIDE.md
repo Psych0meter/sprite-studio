@@ -184,8 +184,11 @@ an earlier epoch. 1500 to 4000 steps in total suit a style LoRA of about
 **SDXL on 8 GB**: only the UNet is trained, the text encoders' outputs are
 cached, the weights are kept in half precision under 16 GB, Adafactor,
 rank 16. It fits with almost nothing to spare; on cards without fast half
-precision (GTX 10 and older) it is very slow, and SD 1.5 is the better
-choice.
+precision (GTX 10 and older) it is very slow (about 30 seconds a step on a
+GTX 1080, so 2400 steps take most of a day), and SD 1.5 is the better
+choice. Under 12 GB no preview images are rendered during training (the
+render ran an 8 GB card out of memory); the checkpoints are still saved
+every 2 epochs, so compare them with Compare LoRAs.
 
 ## 5. Generating
 
