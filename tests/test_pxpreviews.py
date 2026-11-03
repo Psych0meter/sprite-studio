@@ -3,6 +3,7 @@
 import http.server
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def run(tmp_path, env, url, **extra):
         shutil.copytree(SCRIPTS, scripts)
         (scripts / "pxcomfy.py").write_text(STUB)
     e = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin:/usr/local/bin",  # python3 with Pillow, as the tests
         "HOME": str(tmp_path),
         "PX_LORA_HOME": str(env["lora"]),
         "PX_INPUT": str(env["input"]),
