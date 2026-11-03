@@ -132,6 +132,7 @@ const ICONS = {
   compare: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.3" d="M2 3h5v10H2zM9 3h5v10H9z"/></svg>',
   palette: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.3" d="M8 1.8C4.5 1.8 1.8 4.4 1.8 7.7c0 3.3 2.6 6.4 5.6 6.4 1.2 0 1.3-1 .8-1.7-.5-.8 0-1.8 1-1.8h1.7c1.9 0 3.3-1.5 3.3-3.3 0-3-2.8-5.5-6.2-5.5z"/><circle cx="5" cy="7" r="1" fill="currentColor"/><circle cx="7.5" cy="4.6" r="1" fill="currentColor"/><circle cx="10.6" cy="5.6" r="1" fill="currentColor"/></svg>',
   brush: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M13.5 2.5 7 9M7 9c-1.5-1-3.5 0-3.5 2 0 1-.5 2-1.5 2.5 2.5.5 5 0 5-2.5"/></svg>',
+  tune: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M2 4.5h12M2 11.5h12"/><circle cx="10.5" cy="4.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/><circle cx="5.5" cy="11.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/></svg>',
   redo: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M12.5 6.5A5 5 0 1 0 13 10M12.8 2.5v4h-4"/></svg>',
   download: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg>',
   x: '<svg viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.5" d="M4 4l8 8M12 4l-8 8"/></svg>',
@@ -466,6 +467,7 @@ function tile(v, opts = {}) {
     opts.refresh && opts.refresh();
   }, inTray));
   if (opts.touchup) tools.append(iconBtn("brush", "Touch up: repaint only the parts you mark", () => opts.touchup(v)));
+  if (opts.cleanup && v.raw) tools.append(iconBtn("tune", "Clean up again: colours, edge, outline, symmetry, palette", () => opts.cleanup(v)));
   if (opts.recolour) tools.append(iconBtn("palette", "Recolour with a palette", () => opts.recolour(v)));
   if (opts.remaster) tools.append(iconBtn("redo", "Generate again from this one", () => opts.remaster(v)));
   el.append(stage, h("div", { class: "cap" }, h("span", { class: "name", title: v.label || v.name }, v.label || v.name), tools));
@@ -539,6 +541,90 @@ async function recolourDialog(v, done) {
   m.append(box);
   m.hidden = false;
   draw();
+}
+
+
+/** Clean up one variant again from its saved raw render: the raw render next to the result, the clean-up's
+ *  settings as sliders, a live preview (nothing is written until "Keep it"). */
+const CLEAN_DEFAULTS = { palette: "job", mirror: "auto", colours: 64, edge: 50, outline: true, tidy: true, min_part: 0.4, key_tol: 70, keep_green: "auto" };
+
+async function cleanupDialog(v, set, done) {
+  await loadPalettes();
+  const m = $("#modal");
+  const f = Object.assign({}, CLEAN_DEFAULTS);
+  let ticket = 0, timer = null, lastImage = "";
+  const preview = h("div", { class: "pal-stage " + ltClass(), style: { minHeight: "120px", display: "inline-block" } }, h("span", { class: "muted small" }, "Working…"));
+  const note = h("div", { class: "small muted", style: { marginTop: "8px", minHeight: "1.2em" } });
+  const keepBtn = h("button", { class: "btn primary", disabled: true }, "Keep it as a new variant");
+  const body = () => ({ path: v.path, palette: f.palette, mirror: f.mirror, colours: f.colours, edge: f.edge / 100, outline: f.outline,
+    tidy: f.tidy, min_part: f.min_part / 100, key_tol: f.key_tol, keep_green: f.keep_green === "on" ? true : f.keep_green === "off" ? false : "auto" });
+  const run = async () => {
+    const mine = ++ticket;
+    note.textContent = "Working…";
+    try {
+      const r = await api("/results/cleanup", { body: body() });
+      if (mine !== ticket) return;
+      lastImage = r.image;
+      const z = Math.max(1, Math.floor(320 / Math.max(v.w || 128, v.h || 128)));
+      preview.innerHTML = "";
+      preview.append(h("img", { class: "px", src: r.image, style: { width: (v.w || 128) * z + "px", imageRendering: "pixelated" } }));
+      note.textContent = r.notes || "";
+      keepBtn.disabled = false;
+    } catch (e) {
+      if (mine !== ticket) return;
+      note.textContent = e.message;
+      keepBtn.disabled = true;
+    }
+  };
+  const later = () => { clearTimeout(timer); timer = setTimeout(run, 250); };
+  const slider = (key, label, min, max, step, unit, hint) => {
+    const out = h("span", { class: "small", style: { minWidth: "56px", textAlign: "right" } }, f[key] + unit);
+    const inp = h("input", { type: "range", min, max, step, value: f[key], title: hint, style: { width: "100%" },
+      oninput: (e) => { f[key] = Number(e.target.value); out.textContent = f[key] + unit; later(); } });
+    return h("div", { class: "field" }, h("label", { title: hint }, label),
+      h("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, h("span", { style: { flex: 1, display: "flex" } }, inp), out), h("div", { class: "hint" }, hint));
+  };
+  const select = (key, label, opts, hint) => h("div", { class: "field" }, h("label", {}, label),
+    h("select", { onchange: (e) => { f[key] = e.target.value; later(); } }, opts.map(([val, l]) => h("option", { value: val, selected: val === f[key] }, l))),
+    hint ? h("div", { class: "hint" }, hint) : null);
+  const check = (key, label, hint) => h("label", { class: "check", title: hint, style: { display: "flex", margin: "6px 0" } },
+    h("input", { type: "checkbox", checked: f[key], onchange: (e) => { f[key] = e.target.checked; later(); } }), label);
+  const jobPal = (set && set.params && set.params.palette && set.params.palette !== "none") ? set.params.palette.split("/").pop().replace(/\.json$/, "") : "";
+  const controls = h("div", { style: { flex: "1 1 300px", minWidth: "280px" } });
+  const drawControls = () => {
+    controls.innerHTML = "";
+    controls.append(
+      select("palette", "Palette", [["job", jobPal ? `As generated (${jobPal})` : "As generated (none)"], ["none", "No palette: the render's own colours"],
+        ...S.palettes.map((p) => [p.id, p.label])], "The palette maps every pixel onto its colours: it is the biggest change from the raw render."),
+      select("mirror", "Symmetry", [["auto", "Like the original"], ["none", "None"], ["left", "Left half mirrored"], ["right", "Right half mirrored"]],
+        "Mirroring copies one half onto the other and drops what differs left and right."),
+      slider("colours", "Colours at most", 2, 64, 1, "", "Fewer colours: flatter, more graphic. 64 is the standard's limit."),
+      slider("edge", "Edge", 20, 80, 5, " %", "How much of a pixel's block must be hull to draw it. Lower: a fuller silhouette; higher: a thinner one."),
+      slider("min_part", "Loose specks", 0, 5, 0.1, " %", "Separate bits smaller than this share of the hull are dropped."),
+      slider("key_tol", "Background tolerance", 20, 140, 5, "", "How close to the green a pixel must be to count as background. Higher removes more fringe, and may eat green-tinted hull."),
+      check("tidy", "Tidy lone pixels", "A pixel that matches none of its neighbours takes theirs."),
+      check("outline", "Dark outline", "A dark line around the silhouette (glowing edges are kept)."),
+      select("keep_green", "Greens of its own", [["auto", "Detect"], ["on", "Keep them"], ["off", "Treat as background"]]),
+      h("button", { class: "btn sm ghost", style: { marginTop: "6px" }, onclick: () => { Object.assign(f, CLEAN_DEFAULTS); drawControls(); later(); } }, "Reset the settings"));
+  };
+  keepBtn.onclick = async () => {
+    const r = await attempt(() => api("/results/cleanup", { body: Object.assign(body(), { save: true }) }));
+    if (r) { toast("Saved as " + base(r.file)); closeModal(); done && done(); }
+  };
+  const box = h("div", { class: "modal-box", style: { maxWidth: "1180px", maxHeight: "92vh", overflow: "auto" } },
+    h("div", { class: "row between", style: { marginBottom: "12px" } }, h("strong", {}, "Clean up again: " + (v.label || v.name)),
+      h("div", { class: "row" }, keepBtn, h("button", { class: "btn sm ghost", onclick: () => { clearTimeout(timer); ticket++; closeModal(); } }, "Close"))),
+    h("p", { class: "small muted", style: { marginTop: 0, maxWidth: "80ch" } },
+      "The model's render is read again with these settings: no new rendering, nothing changes until you keep it. The new sprite is saved next to this one as <name>_c<number>."),
+    h("div", { class: "row", style: { gap: "24px", alignItems: "flex-start", flexWrap: "wrap" } },
+      h("div", { style: { flex: "0 0 auto" } }, h("div", { class: "label" }, "Raw render"), h("div", { class: "pal-stage " + ltClass(), style: { display: "inline-block" } }, h("img", { src: fileUrl(v.raw), style: { width: "320px", maxWidth: "100%" } }))),
+      h("div", { style: { flex: "0 0 auto", maxWidth: "340px" } }, h("div", { class: "label" }, "Result"), preview, note),
+      controls));
+  m.innerHTML = "";
+  m.append(box);
+  m.hidden = false;
+  drawControls();
+  run();
 }
 
 // ---------------------------------------------------------------- jobs UI
@@ -882,7 +968,7 @@ routes.generate = async (main, _parts, params) => {
       box.append(h("div", { class: "panel-head" }, h("h2", {}, "Result"), h("a", { class: "btn sm", href: "#/results?path=" + encodeURIComponent(r.path) }, "Open in Results")));
       box.append(h("div", { class: "sprite-row" },
         r.orig ? tile({ path: r.orig, name: "original", w: r.orig_size && r.orig_size[0], h: r.orig_size && r.orig_size[1] }, { orig: true, refresh: drawR }) : null,
-        r.variants.map((v) => tile(v, { pickAs: r.target, refresh: drawR, remaster: remasterFrom, touchup: (x) => touchUp(x, r) }))));
+        r.variants.map((v) => tile(v, { pickAs: r.target, refresh: drawR, remaster: remasterFrom, touchup: (x) => touchUp(x, r), cleanup: (x) => cleanupDialog(x, r, drawR) }))));
       if (!r.variants.length) box.append(h("div", { class: "note bad" }, "No sprite came out of this run: see the log."));
     };
     drawR();
@@ -1011,6 +1097,7 @@ routes.results = async (main, _parts, params) => {
       h("div", { class: "sprite-row" },
         s.orig ? tile({ path: s.orig, name: "original", w: s.orig_size && s.orig_size[0], h: s.orig_size && s.orig_size[1] }, { orig: true, refresh: redraw }) : null,
         s.variants.map((v) => tile(v, { pickAs, refresh: redraw, remaster: remaster(s), touchup: (x) => touchUp(x, s),
+          cleanup: (x) => cleanupDialog(x, s, async () => { items = await api("/results"); drawList(); drawView(); }),
           recolour: (x) => recolourDialog(x, async () => { items = await api("/results"); drawList(); drawView(); }) })),
         !s.variants.length ? h("span", { class: "muted small" }, item.busy && !s.done ? "being rendered: they appear here when the job finishes this sprite" : "no variants") : null));
     const drawBody = () => {

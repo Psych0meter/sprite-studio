@@ -4,6 +4,7 @@
   pxtool.py describe <sprite>... [--glows] [--neutral]   colour words for the prompt
   pxtool.py init     <sprite> <out.png> [--size 64] [--mask MASK] [--canvas 512]
   pxtool.py post     <render.png> <out.png> [--size 128] [--grid INIT.json] [--mirror auto --orig SPRITE]
+                     [--max-colours 64] [--edge 0.5] [--no-outline] [--min-part 0.004] [--key-tol 70]
                      [--keep-green] [--no-tidy] [--keep-mask MASK --base SPRITE] [--legacy --margin 2]
   pxtool.py sheet    <out.png> <folder>... [--cell 160]
   pxtool.py palette-extract | palette-apply | palette-autotune | palette-words | palette-export
@@ -99,7 +100,7 @@ def palette_of(cnt, max_colours=64):
         gw = sum(math.sqrt(n) for n in glow.values())
         tw = gw + sum(math.sqrt(n) for n in rest.values())
         k_glow = 0 if not glow else int(np.clip(round(max_colours * 2 * gw / max(tw, 1)), 6, 20))
-        k_glow = min(k_glow, len(glow))
+        k_glow = min(k_glow, len(glow), max_colours // 2)
         cols = _quantize(glow, k_glow) + _quantize(rest, max_colours - k_glow)
     return sorted(set(cols), key=lambda c: sum(c))[:max_colours]
 
@@ -580,12 +581,19 @@ def prepare_init(src, dst, key=KEY, canvas=512, size=None, mask=None):
 
 
 def _snap(rgb, pal):
-    """Nearest palette colour for every pixel (weighted RGB distance)."""
+    """Nearest palette colour for every pixel (weighted RGB distance). Each distinct colour is looked up once:
+    a render has far fewer colours than pixels, and the clean-up is re-run live while settings are dragged."""
     flat = rgb.reshape(-1, 3).astype(np.int32)
+    codes = (flat[:, 0] << 16) | (flat[:, 1] << 8) | flat[:, 2]
+    uniq, first, inv = np.unique(codes, return_index=True, return_inverse=True)
     p = pal.astype(np.int32)
     wts = np.array([3, 4, 2])
-    d = (((flat[:, None, :] - p[None, :, :]) ** 2) * wts).sum(-1)
-    return p[d.argmin(1)].reshape(rgb.shape).astype(np.uint8)
+    out = np.empty((len(uniq), 3), np.uint8)
+    for i in range(0, len(uniq), 4096):
+        u = flat[first[i : i + 4096]]
+        d = (((u[:, None, :] - p[None, :, :]) ** 2) * wts).sum(-1)
+        out[i : i + 4096] = p[d.argmin(1)]
+    return out[inv.reshape(-1)].reshape(rgb.shape)
 
 
 def _key_like(rgb, key, tol, min_sat=0.3):
@@ -624,7 +632,7 @@ def _symmetric(path, threshold=0.9):
     return (a & m).sum() / max(1, (a | m).sum()) >= threshold
 
 
-def _tidy(canvas, pal):
+def _tidy(canvas, pal, outline=True):
     """Pixel-art tidying at the final size: lone pixels that match none of
     their 8 neighbours take the neighbourhood's colour (the speckle the
     model leaves), and the edge of the silhouette gets a dark outline, as in
@@ -647,6 +655,8 @@ def _tidy(canvas, pal):
                 if c.max() >= 3:
                     best = int(v[c.argmax()])
                     out[y, x, :3] = (best >> 16 & 255, best >> 8 & 255, best & 255)
+    if not outline:
+        return out
     darkest = pal[np.argmin(_luma(pal))]
     inner = ndimage.binary_erosion(alpha)
     edge = alpha & ~inner
@@ -656,10 +666,11 @@ def _tidy(canvas, pal):
     return out
 
 
-def _grid_sample(rgb, fg, pal, g, search=True):
+def _grid_sample(rgb, fg, pal, g, search=True, edge=0.5):
     """One sprite pixel per k x k block of the render, on the grid of the
     init image (or of the training images): opaque when most of the block
-    is hull, coloured by the block's most common (palette-snapped) colour.
+    is hull (edge: the share, 0.5 by default), coloured by the block's most
+    common (palette-snapped) colour.
     The model may draw its pixels a little off that grid, so the phase that
     makes the blocks the most uniform is used."""
     k, w, h = g["k"], g["w"], g["h"]
@@ -693,7 +704,7 @@ def _grid_sample(rgb, fg, pal, g, search=True):
             if y0 < 0 or x0 < 0 or y0 + k > H or x0 + k > W:
                 continue
             m = fg[y0 : y0 + k, x0 : x0 + k]
-            if m.mean() < 0.5:
+            if m.mean() < edge:
                 continue
             c = codes[y0 : y0 + k, x0 : x0 + k][m]
             v, cnts = np.unique(c, return_counts=True)
@@ -762,6 +773,9 @@ def post(
     base=None,
     palette=None,
     fill=0,
+    colours=64,
+    outline=True,
+    edge=0.5,
 ):
     """keep_green: the sprite has green parts of its own (an acid weapon...):
     only the green reached from the border is background, green inside the
@@ -774,7 +788,12 @@ def post(
     stays the base sprite. fill: 50 to 100, the share of the size x size
     canvas the sprite's longest side takes (100: edge to edge); the drawing
     is cropped from the render and pixelated at that size, so it is neither
-    cut by the canvas nor lost in empty space. 0: the render's own scale."""
+    cut by the canvas nor lost in empty space. 0: the render's own scale.
+    Fine-tuning: min_part (loose parts dropped, share of the hull), key_tol
+    (how far from the key green a pixel is still background), colours (the
+    most the sprite keeps, 2 to 64), edge (0.2 to 0.8: the share of a block
+    that must be hull to draw its pixel; lower = a fuller silhouette),
+    outline (the dark edge line; tidy=False drops it too)."""
     a = np.array(Image.open(src).convert("RGBA"))
     rgb = a[..., :3]
     if mirror == "auto":
@@ -819,7 +838,8 @@ def post(
     # group's colours and contrast, the clean-up only keeps them.
     cols, counts = np.unique(rgb[fg], axis=0, return_counts=True)
     cnt = Counter({tuple(int(v) for v in c): int(n) for c, n in zip(cols, counts, strict=False)})
-    pal = np.array(palette_of(cnt, 64)) if cnt else np.array([[0, 0, 0]])
+    colours = max(2, min(64, int(colours or 64)))
+    pal = np.array(palette_of(cnt, colours)) if cnt else np.array([[0, 0, 0]])
 
     if fg.sum() < 64:
         print(f"{dst}: no sprite found in {src} (only background), skipped")
@@ -842,7 +862,7 @@ def post(
                 g = json.load(fh)
         else:
             g = grid_for(size, size, canvas=fg.shape[0])
-        canvas = _grid_sample(rgb, fg, pal, g)
+        canvas = _grid_sample(rgb, fg, pal, g, edge=max(0.1, min(0.9, float(edge))))
         if not (canvas[..., 3] > 0).any():
             print(f"{dst}: nothing on the sprite grid in {src}, skipped")
             return
@@ -857,7 +877,7 @@ def post(
         canvas = _legacy_fit(rgb, fg, pal, size, margin, mirror)
         ow = size
     if tidy:
-        canvas = _tidy(canvas, pal)
+        canvas = _tidy(canvas, pal, outline)
     # Last pass at the final size: any pixel still green is background
     # fringe; on the edge it goes, inside it takes the colour of the nearest
     # clean hull pixel.
@@ -939,6 +959,10 @@ def main():
     )
     o.add_argument("--orig", default=None, help="the sprite being redone (for --mirror auto)")
     o.add_argument("--no-tidy", action="store_true", help="no lone-pixel clean-up and no outline")
+    o.add_argument("--no-outline", action="store_true", help="keep the lone-pixel clean-up, no dark outline")
+    o.add_argument("--key-tol", type=int, default=70, help="how far from the key green a pixel is still background")
+    o.add_argument("--max-colours", type=int, default=64, help="the most colours the sprite keeps (2 to 64)")
+    o.add_argument("--edge", type=float, default=0.5, help="share of a block that must be hull to draw its pixel")
     o.add_argument("--margin", type=int, default=2, help="empty pixels around the sprite (icons: 0)")
     o.add_argument(
         "--keep-green", action="store_true", help="keep green inside the sprite (only the border green is background)"
@@ -1010,6 +1034,10 @@ def main():
             a.dst,
             size=a.size,
             min_part=a.min_part,
+            key_tol=a.key_tol,
+            colours=a.max_colours,
+            outline=not a.no_outline,
+            edge=a.edge,
             mirror=a.mirror,
             orig=a.orig,
             tidy=not a.no_tidy,

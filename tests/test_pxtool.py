@@ -106,3 +106,27 @@ def test_post_fill_sets_the_longest_side(tmp_path):
         a = np.array(Image.open(dst))
         ys, xs = np.nonzero(a[..., 3])
         assert max(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1) == round(64 * fill / 100)
+
+
+def test_post_tuning_colours_outline_and_edge(tmp_path):
+    src = render(tmp_path / "render.png")
+    a = np.array(Image.open(src))
+    hull = a[..., 1] != 255
+    a[hull] = np.stack([a[hull][:, 0]] * 3, axis=-1)  # grey hull: no glow, so the outline shows
+    Image.fromarray(a).save(src)
+
+    def make(name, **kw):
+        dst = tmp_path / name
+        pxtool.post(str(src), str(dst), size=64, margin=0, **kw)
+        return np.array(Image.open(dst))
+
+    def ncolours(a):
+        return len(np.unique(a[a[..., 3] > 0][:, :3], axis=0))
+
+    assert ncolours(make("few.png", colours=3)) <= 3
+    assert ncolours(make("many.png", colours=64)) >= ncolours(make("few2.png", colours=3))
+    # without the outline the edge keeps the hull's own colours: not all of it is the darkest colour
+    plain, outlined = make("plain.png", outline=False), make("outlined.png", outline=True)
+    assert not np.array_equal(plain, outlined)
+    # a lower edge threshold draws a fuller silhouette than a higher one
+    assert (make("lo.png", edge=0.2)[..., 3] > 0).sum() >= (make("hi.png", edge=0.8)[..., 3] > 0).sum()

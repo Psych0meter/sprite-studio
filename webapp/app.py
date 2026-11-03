@@ -29,6 +29,7 @@ import base64
 import contextlib
 import csv
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -37,6 +38,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -617,7 +619,7 @@ def result_set(folder: Path) -> dict:
     for f in sorted(folder.glob("*.png")):
         if not is_variant(f):
             continue
-        m = re.search(r"_s(\d+)$", f.stem)
+        m = re.search(r"_s(\d+)(?:_c\d+)?$", f.stem)
         wh = png_size(f) or (0, 0)
         variants.append(
             {
@@ -2338,6 +2340,128 @@ async def api_palette_apply(request: Request):
         pm().pxtool.recolour(str(src), str(dst), pal)
         made.append(str(dst))
     return {"files": made}
+
+
+# ---- clean up again: the clean-up (pxtool.post) re-run on a variant's saved raw render, with its settings
+# changed. No GPU, no ComfyUI: the render is already on disk.
+
+_clean_lock = threading.Lock()
+CLEAN_SEED = re.compile(r"_s(\d+)(?:_c\d+)?$")
+
+
+def _has_green(img_path: Path) -> bool:
+    """The sprite has greens of its own (as pxmake.sh checks): more than 2% of it is clearly green."""
+    import numpy as np
+    from PIL import Image
+
+    a = Image.open(img_path).convert("RGBA")
+    hsv = np.array(a.convert("RGB").convert("HSV")).astype(float)
+    solid = np.array(a)[..., 3] > 127
+    if not solid.any():
+        return False
+    h, sat, val = hsv[..., 0] * 360 / 255, hsv[..., 1], hsv[..., 2]
+    green = solid & (sat > 64) & (val > 64) & (abs(h - 120) < 40)
+    return green.sum() / solid.sum() > 0.02
+
+
+def cleanup_inputs(b: dict) -> dict:
+    """What a clean-up of one variant needs, from its folder and the settings asked for."""
+    src = safe_path(b.get("path", ""))
+    m = CLEAN_SEED.search(src.stem)
+    if src.suffix != ".png" or not src.is_file() or not m:
+        raise HTTPException(400, "this sprite has no saved render to clean up again")
+    folder = src.parent
+    raw = next(iter(sorted((folder / "raw").glob(f"*_s{m.group(1)}_*.png"))), None)
+    if not raw:
+        raise HTTPException(404, "the raw render of this sprite is no longer there")
+    result = result_set(folder)
+    head = result["params"]
+    if head.get("mask", "none") != "none":
+        raise HTTPException(400, "a touch-up cannot be cleaned up again: redo it from the Generate page")
+    size = png_size(src)
+    if not size or not size[0]:
+        raise HTTPException(400, "unreadable sprite")
+    orig = folder / "orig.png"
+    grid = folder / "init.png.json"
+
+    def num(key: str, default: float, lo: float, hi: float, kind: type = float) -> Any:
+        v = body_get(b, key, default, kind)
+        return kind(max(lo, min(hi, v)))
+
+    pal = b.get("palette", "job")
+    if pal == "job":
+        pal = head.get("palette", "none")
+        if pal in ("none", ""):
+            pal = None
+        elif not Path(pal).is_file():  # a job file may name the palette by its id
+            pal = str(pal_dir() / f"{palette_ref(Path(pal).stem)}.json")
+    elif pal == "none":
+        pal = None
+    else:
+        pal = str(pal_dir() / f"{palette_ref(pal)}.json")
+    green = b.get("keep_green", "auto")
+    if green == "auto":
+        green = "glowing green" in result["prompt"] or (orig.is_file() and _has_green(orig))
+    fill = body_get(b, "fill", None, int)
+    if fill is None and head.get("fill", "0") not in ("0", ""):
+        fill = int(head["fill"]) if head["fill"].isdigit() else 0
+    mirror = b.get("mirror", "auto")
+    if mirror not in ("auto", "none", "left", "right"):
+        raise HTTPException(400, "symmetry is auto, none, left or right")
+    return {
+        "src": str(raw),
+        "folder": folder,
+        "stem": src.stem,
+        "kw": {
+            "size": size[0],
+            "margin": 0,
+            "mirror": mirror,
+            "orig": str(orig) if orig.is_file() else None,
+            "grid": str(grid) if grid.is_file() else None,
+            "keep_green": bool(green),
+            "palette": pal,
+            "fill": max(0, min(100, fill or 0)),
+            "colours": num("colours", 64, 2, 64, int),
+            "edge": num("edge", 0.5, 0.2, 0.8),
+            "min_part": num("min_part", 0.004, 0, 0.05),
+            "key_tol": num("key_tol", 70, 20, 140, int),
+            "outline": b.get("outline", True) is not False,
+            "tidy": b.get("tidy", True) is not False,
+        },
+    }
+
+
+def run_cleanup(inp: dict, dst: Path) -> str:
+    """Runs the clean-up into dst; returns its warnings."""
+    buf = io.StringIO()
+    with _clean_lock, contextlib.redirect_stdout(buf):
+        pm().pxtool.post(inp["src"], str(dst), **inp["kw"])
+    return "\n".join(x for x in buf.getvalue().splitlines() if x.startswith("warning"))
+
+
+@app.post("/api/results/cleanup")
+def api_results_cleanup(b: dict):
+    """Body: the variant's "path", the settings (colours, edge, min_part, key_tol, outline, tidy, mirror, palette,
+    keep_green, fill) and "save". Without "save": a preview (PNG as a data URL, nothing written); with it, the new
+    variant is saved next to the old one as <name>_c<n>.png."""
+    inp = cleanup_inputs(b)
+    if not b.get("save"):
+        with tempfile.TemporaryDirectory() as td:
+            dst = Path(td) / "preview.png"
+            notes = run_cleanup(inp, dst)
+            if not dst.is_file():
+                raise HTTPException(422, notes.strip() or "nothing came out of this clean-up")
+            data = base64.b64encode(dst.read_bytes()).decode()
+        return {"image": "data:image/png;base64," + data, "notes": notes.strip()}
+    base_stem = re.sub(r"_c\d+$", "", inp["stem"])
+    n = 1
+    while (inp["folder"] / f"{base_stem}_c{n}.png").exists():
+        n += 1
+    dst = inp["folder"] / f"{base_stem}_c{n}.png"
+    notes = run_cleanup(inp, dst)
+    if not dst.is_file():
+        raise HTTPException(422, notes.strip() or "nothing came out of this clean-up")
+    return {"file": str(dst), "notes": notes.strip()}
 
 
 @app.get("/api/results/detail")

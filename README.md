@@ -29,7 +29,9 @@ web app and a set of command-line tools.
   imported from `.hex` / `.gpl` / images, computed automatically to match
   other groups; exported for other tools.
 - **Results**: browse, zoom, compare side by side, star the keepers and
-  export them, recolour, delete (with a bin and undo).
+  export them, recolour, clean up again from the raw render with live
+  settings (colours, edge, outline, symmetry, palette), delete (with a bin
+  and undo).
 - **Any NVIDIA card**: PyTorch build, training precision and memory savers
   chosen from the card; time estimates measured on yours.
 

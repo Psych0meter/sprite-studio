@@ -9,8 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Results**: **Clean up again** (sliders icon on a variant). The model's
+  raw render is shown next to the result, with live settings for palette,
+  symmetry, number of colours, edge, loose specks, background tolerance,
+  tidying and outline. No GPU is needed. A good one is kept as a new
+  variant (`<name>_c1.png`); the old one stays.
 - **Releases**: pushing a `vX.Y.Z` tag publishes a GitHub release with the
   changelog notes and a source archive.
+
+### Changed
+
+- **Clean-up**: converting a render to a sprite is several times faster
+  (colours are matched once per distinct colour), with identical output.
 
 ### Fixed
 

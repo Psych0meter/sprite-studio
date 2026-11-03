@@ -91,7 +91,17 @@ mask init denoise size refs palette fill`), then `prompt:`, `negative:`,
    palette of at most 64 colours from the render, one sprite pixel per
    `k x k` block (majority vote, grid phase searched), or a fit to the
    requested *fill*; lone pixels tidied, dark outline, mirror; then the
-   palette (relight, tune, match, snap) and the touch-up merge.
+   palette (relight, tune, match, snap) and the touch-up merge. The
+   clean-up's settings (`--max-colours`, `--edge`, `--min-part`, `--key-tol`,
+   `--no-outline`, `--no-tidy`, `--mirror`, `--palette`, `--fill`) are
+   arguments of `pxtool.post`, whose defaults are what `pxmake.sh` uses.
+5. *Clean up again* (`POST /api/results/cleanup`) re-runs step 4 on a
+   variant's saved render (`raw/*_s<seed>_*.png`) with the job's own
+   size, grid (`init.png.json`), original and palette, and the settings sent
+   by the page. Without `save` it returns the PNG as a data URL and writes
+   nothing (the page asks for it live, so `_snap` looks each distinct colour
+   up once); with `save` the result is `<name>_c<n>.png` next to the
+   variant. Touch-ups and variants without a raw render are refused.
 
 The JavaScript preview of palettes (`webapp/static/palette.js`) repeats
 `pxtool`'s arithmetic, rounding included, so the preview matches the output

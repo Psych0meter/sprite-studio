@@ -218,6 +218,27 @@ On any variant in Results:
 - **Touch up** (brush): paint the pixels to redraw, say what to draw there,
   choose how much it changes. Only the painted pixels are redrawn.
 - **Generate again from this one**: a remaster of the variant.
+- **Clean up again** (sliders icon): the model's raw render is read again
+  with other settings, next to the render so you can compare. Nothing is
+  drawn again: it takes under a second and needs no GPU. The preview follows
+  the settings live; **Keep it as a new variant** saves it next to the old
+  one as `<name>_c1.png`, `_c2`... (the old one stays). Settings:
+  - *Palette*: as generated, none (the render's own colours), or any saved
+    palette. The palette is the biggest change from the raw render.
+  - *Symmetry*: like the original, none, or one half mirrored onto the other.
+  - *Colours at most* (2 to 64): fewer colours give a flatter, more graphic
+    sprite.
+  - *Edge* (20 to 80 %): how much of a pixel's block of the render must be
+    sprite to draw that pixel. Lower is a fuller silhouette, higher a thinner
+    one.
+  - *Loose specks*: separate bits smaller than this share of the sprite are
+    dropped.
+  - *Background tolerance*: how close to the green a pixel must be to count
+    as background. Higher removes more fringe but may eat green-tinted parts.
+  - *Tidy lone pixels*, *Dark outline*, *Greens of its own*.
+
+  Not available for touch-ups (redo them from Generate) or for variants
+  whose raw render was deleted.
 - **Recolour**: a palette on this variant, kept as a new variant.
 
 ### 5.3 Fill

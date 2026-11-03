@@ -77,3 +77,41 @@ def test_results_delete_and_restore(client, env):
     assert client.get("/api/results").json() == []
     assert client.post("/api/results/bin/restore", json={"count": 1}).json()["restored"] == ["run_1"]
     assert job.is_dir()
+
+
+def _cleanup_job(env, name="run_1"):
+    """A result folder as pxmake.sh leaves it: job.txt, a raw render and its cleaned variant."""
+    from test_pxtool import render
+
+    job = env["output"] / name
+    (job / "raw").mkdir(parents=True)
+    render(job / "raw" / "run_s7_00001.png")
+    (job / "job.txt").write_text("name=run model=m group=g kind=none size=64 palette=none fill=0\nprompt: a sprite\n")
+    from PIL import Image
+
+    Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(job / "run_s7.png")
+    return job
+
+
+def test_cleanup_previews_then_saves_a_new_variant(client, env):
+    job = _cleanup_job(env)
+    body = {"path": str(job / "run_s7.png"), "colours": 4, "edge": 0.4, "outline": False}
+    r = client.post("/api/results/cleanup", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["image"].startswith("data:image/png;base64,")
+    assert not (job / "run_s7_c1.png").exists()  # a preview writes nothing
+    saved = client.post("/api/results/cleanup", json=body | {"save": True}).json()
+    assert saved["file"].endswith("run_s7_c1.png")
+    again = client.post("/api/results/cleanup", json=body | {"path": saved["file"], "save": True}).json()
+    assert again["file"].endswith("run_s7_c2.png")  # cleaning a clean-up numbers on, never overwrites
+    detail = client.get("/api/results/detail", params={"path": str(job)}).json()
+    assert all(v["raw"] for v in detail["variants"])  # the new variants keep their link to the raw render
+
+
+def test_cleanup_refuses_what_has_no_raw_render(client, env):
+    job = _cleanup_job(env)
+    from PIL import Image
+
+    Image.new("RGBA", (8, 8), (0, 0, 0, 0)).save(job / "plain.png")
+    assert client.post("/api/results/cleanup", json={"path": str(job / "plain.png")}).status_code == 400
+    assert client.post("/api/results/cleanup", json={"path": "/etc/passwd"}).status_code in (400, 403)
