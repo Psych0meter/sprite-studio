@@ -181,7 +181,8 @@ made, use a palette's *Light from the top* slider (section 7).
    for each, with the run's own seeds, through ComfyUI (it must be running;
    on a GTX 1080 an SDXL image takes about 2 minutes). Each preview appears
    in the grid as it is done, a cancelled run keeps what is finished, and a
-   preview already there is never rendered again. On a card under 12 GB the
+   preview already there is never rendered again. The render time of each
+   image is shown under it (and next to the name of a variant in Results). On a card under 12 GB the
    Train step has a checkbox, **Render previews when training ends**, which
    queues the same job as soon as the run finishes. *All checkpoint files*
    lists every file with the same **Use** and **Add** buttons.

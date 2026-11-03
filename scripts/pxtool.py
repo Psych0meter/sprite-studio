@@ -755,6 +755,19 @@ def _legacy_fit(rgb, fg, pal, size, margin, mirror):
     return canvas
 
 
+def flatten_background(src, dst, key=KEY, tol=70):
+    """The render with its background made the pure key colour: the model's greens drift from image to image
+    (a darker or bluer green), which makes a grid of previews look uneven. Only the green reached from the
+    border changes, as in post()."""
+    a = np.array(Image.open(src).convert("RGB"))
+    near = _key_like(a, key, tol)
+    lab, _ = ndimage.label(near)
+    border = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))) - {0}
+    bg = np.isin(lab, list(border))
+    a[bg] = hex_to_rgb(key)
+    Image.fromarray(a).save(dst)
+
+
 def post(
     src,
     dst,
@@ -978,6 +991,9 @@ def main():
         default=0,
         help="50 to 100: the share of the canvas the sprite's longest side takes (0: the render's scale)",
     )
+    fb = sub.add_parser("flatten-background", help="a render with its key-colour background made uniform")
+    fb.add_argument("src")
+    fb.add_argument("dst")
     pe = sub.add_parser("palette-extract", help="a palette from sprites")
     pe.add_argument("dst", help="the palette .json")
     pe.add_argument("sprites", nargs="+")
@@ -999,6 +1015,9 @@ def main():
     px.add_argument("palette")
     px.add_argument("dst")
     a = ap.parse_args()
+    if a.cmd == "flatten-background":
+        flatten_background(a.src, a.dst)
+        return 0
     if a.cmd == "palette-extract":
         pal = extract_palette(a.sprites, a.n)
         pal["id"] = re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(a.dst))[0].lower()).strip("_")

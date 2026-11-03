@@ -20,7 +20,9 @@ a = ap.parse_args()
 lora = os.path.join(os.environ["COMFY"], "models", "loras", os.environ["PX_LORA"])
 if not os.path.exists(lora) or "fail" in a.prompt:
     sys.exit("error: stand-in refuses")
-open(os.path.join(a.out, f"comfy_s{a.seed}_sprite_.png"), "wb").write(b"png")
+from PIL import Image
+Image.new("RGB", (8, 8), (0, 255, 0)).save(os.path.join(a.out, f"comfy_s{a.seed}_sprite_.png"))
+open(os.path.join(a.out, f"comfy_s{a.seed}_sprite_.json"), "w").write('{"seconds": 12.5}')
 print("ok", os.environ["PX_LORA"], os.environ.get("PX_RES"), os.environ.get("PX_CKPT"), a.seed)
 """
 
@@ -75,6 +77,7 @@ def test_renders_the_missing_previews_then_has_nothing_left(pxmodel, env, tmp_pa
     assert "=== [3/3]" in r.stdout
     names = sorted(p.name[:21] for p in (out / "sample").glob("*.png"))
     assert names == ["pxunit_xl_e000002_00_", "pxunit_xl_e000002_01_", "pxunit_xl_e000004_00_", "pxunit_xl_e000004_01_"]
+    assert len(list((out / "sample").glob("*.json"))) == 3  # a render time for each new preview
     assert not list((env["comfy"] / "models" / "loras").glob("px_preview_*"))  # the temporary copies are gone
     again = run(tmp_path, env, comfy_url, PROMPTS="2")
     assert again.returncode == 0 and "nothing to render" in again.stdout

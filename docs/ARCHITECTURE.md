@@ -129,7 +129,10 @@ job, else the base model's default) unless a numbered checkpoint already is
 that epoch. `pxpreviews.sh` copies each checkpoint into ComfyUI's loras
 folder as `px_preview_*.safetensors` for the run, renders each cell with
 `pxcomfy.py` (the prompt's own seed, steps and cfg, one image), and writes
-it under the name the Train page's grid reads. Exit codes follow the batch
+it under the name the Train page's grid reads, with its background made
+the pure key green (`pxtool.py flatten-background`) and its render time next
+to it (`<name>.json`, written by `pxcomfy.py` beside every image as
+`{"seconds", "seed"}` and read by `render_seconds`). Exit codes follow the batch
 convention (0 ok, 4 some failed, 1 none made). In the app this is the
 `previews` job kind (`POST /api/train/<model>/previews`, GPU lane, waits for
 ComfyUI like generation); a training request with `previews_after` queues

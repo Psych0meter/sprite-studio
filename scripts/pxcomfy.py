@@ -282,7 +282,10 @@ def main():
         img = render(a, seed, init_name, mask_name)
         dst = os.path.join(a.out, f"comfy_s{seed}_sprite_.png")
         download(a, img, dst)
-        print(f"   [{i + 1}/{a.n}] seed={seed}  {time.time() - t:.0f} s  ->  {dst}", flush=True)
+        secs = time.time() - t
+        with open(dst[:-4] + ".json", "w") as fh:  # the render time, read by the web app
+            json.dump({"seconds": round(secs, 1), "seed": seed}, fh)
+        print(f"   [{i + 1}/{a.n}] seed={seed}  {secs:.0f} s  ->  {dst}", flush=True)
     return 0
 
 

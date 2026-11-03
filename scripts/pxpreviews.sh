@@ -76,7 +76,10 @@ for row in "${PLAN[@]}"; do
 		--negative "$neg" -n 1 --seed "$seed" --steps "$steps" --cfg "$cfg"; then
 		img="$(find "$tmp" -maxdepth 1 -name '*.png' | head -1)"
 		if [ -n "$img" ]; then
-			mv "$img" "$OUT/sample/${NAME}_e$(printf %06d "$epoch")_$(printf %02d "$idx")_$(date +%Y%m%d%H%M%S).png"
+			dst="$OUT/sample/${NAME}_e$(printf %06d "$epoch")_$(printf %02d "$idx")_$(date +%Y%m%d%H%M%S)"
+			# a uniform green background (the model's green drifts), so the grid reads evenly
+			python3 -W ignore "$HERE/pxtool.py" flatten-background "$img" "$dst.png" 2>/dev/null || mv "$img" "$dst.png"
+			[ ! -f "${img%.png}.json" ] || mv "${img%.png}.json" "$dst.json" # the render time
 			continue
 		fi
 	fi

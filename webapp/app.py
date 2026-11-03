@@ -610,6 +610,15 @@ def is_variant(f: Path) -> bool:
     return not (f.stem in VARIANT_SKIP or f.stem.startswith("init_") or f.stem.endswith("_x4"))
 
 
+def render_seconds(png: str | Path) -> float | None:
+    """How long the image took to render, from the .json pxcomfy.py writes next to it (None: not recorded)."""
+    f = Path(png).with_suffix(".json") if png else None
+    try:
+        return float(json.loads(f.read_text())["seconds"]) if f and f.is_file() else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def result_set(folder: Path) -> dict:
     """One generation folder (pxmake.sh layout: job.txt, raw/, variants)."""
     job_txt = (folder / "job.txt").read_text(errors="replace") if (folder / "job.txt").exists() else ""
@@ -626,6 +635,7 @@ def result_set(folder: Path) -> dict:
             continue
         m = re.search(r"_s(\d+)(?:_c\d+)?$", f.stem)
         wh = png_size(f) or (0, 0)
+        raw = next((str(r) for r in (folder / "raw").glob(f"*_s{m.group(1)}_*.png")), "") if m else ""
         variants.append(
             {
                 "path": str(f),
@@ -633,7 +643,8 @@ def result_set(folder: Path) -> dict:
                 "seed": m.group(1) if m else "",
                 "w": wh[0],
                 "h": wh[1],
-                "raw": next((str(r) for r in (folder / "raw").glob(f"*_s{m.group(1)}_*.png")), "") if m else "",
+                "raw": raw,
+                "seconds": render_seconds(raw),
             }
         )
     orig = folder / "orig.png"
@@ -845,6 +856,7 @@ def train_info(cat: str, model: str = "sd15") -> dict:
             )
     info["checkpoints"] = ckpts
     grid: dict[int, dict[int, str]] = {}
+    grid_files: list[Path] = []
     prompts = []
     if (out / "sample_prompts.txt").exists():
         prompts = [p.split(" --n ")[0] for p in (out / "sample_prompts.txt").read_text().splitlines() if p.strip()]
@@ -852,9 +864,11 @@ def train_info(cat: str, model: str = "sd15") -> dict:
         m = SAMPLE_RE.search(f.stem)
         if not m:
             continue
+        grid_files.append(f)
         ep = int(m.group(1)) if m.group(1) else -int(m.group(2))  # step-based samples: negative keys
         grid.setdefault(int(m.group(3)), {})[ep] = str(f)
     info["samples"] = {
+        "times": {str(f): t for f in grid_files if (t := render_seconds(f)) is not None},
         "prompts": prompts,
         "grid": {str(k): {str(e): v for e, v in sorted(row.items())} for k, row in grid.items()},
     }

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through ComfyUI, with the run's own seeds, and shows each one as it is
   done. Existing previews are kept. On a card under 12 GB (SDXL) a checkbox,
   *Render previews when training ends*, does it automatically after the run.
+- **Results, Train**: the render time of each generated image is shown
+  (small figure next to the name of a variant, under a preview). Images
+  generated before this version have none.
 - **Results**: **Clean up again** (sliders icon on a variant). The model's
   raw render is shown next to the result, with live settings for palette,
   symmetry, number of colours, edge, loose specks, background tolerance,
@@ -24,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changelog notes and a source archive.
 
 ### Changed
+
+- **Train**: previews are centred under their epoch, and a preview rendered
+  afterwards has a uniform green background (the model's green drifts from
+  one image to the next, which made the grid look uneven). Previews already
+  rendered keep their own green.
 
 - **Clean-up**: converting a render to a sprite is several times faster
   (colours are matched once per distinct colour), with identical output.

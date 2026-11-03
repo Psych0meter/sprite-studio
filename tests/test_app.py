@@ -86,6 +86,7 @@ def _cleanup_job(env, name="run_1"):
     job = env["output"] / name
     (job / "raw").mkdir(parents=True)
     render(job / "raw" / "run_s7_00001.png")
+    (job / "raw" / "run_s7_00001.json").write_text('{"seconds": 3.5}')
     (job / "job.txt").write_text("name=run model=m group=g kind=none size=64 palette=none fill=0\nprompt: a sprite\n")
     from PIL import Image
 
@@ -105,7 +106,10 @@ def test_cleanup_previews_then_saves_a_new_variant(client, env):
     again = client.post("/api/results/cleanup", json=body | {"path": saved["file"], "save": True}).json()
     assert again["file"].endswith("run_s7_c2.png")  # cleaning a clean-up numbers on, never overwrites
     detail = client.get("/api/results/detail", params={"path": str(job)}).json()
-    assert all(v["raw"] for v in detail["variants"])  # the new variants keep their link to the raw render
+    assert all(v["raw"] for v in detail["variants"])
+    assert all(
+        v["seconds"] == 3.5 for v in detail["variants"]
+    )  # the render time, read from pxcomfy's .json  # the new variants keep their link to the raw render
 
 
 def test_cleanup_refuses_what_has_no_raw_render(client, env):

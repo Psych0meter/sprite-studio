@@ -108,7 +108,17 @@ def test_post_fill_sets_the_longest_side(tmp_path):
         assert max(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1) == round(64 * fill / 100)
 
 
-def test_post_tuning_colours_outline_and_edge(tmp_path):
+def test_flatten_background_makes_the_green_uniform(tmp_path):
+    src = render(tmp_path / "render.png")
+    a = np.array(Image.open(src))
+    a[a[..., 1] == 255] = (20, 220, 80)  # the model's green drifted
+    a[10, 10] = (30, 200, 90)
+    Image.fromarray(a).save(src)
+    pxtool.flatten_background(str(src), str(tmp_path / "flat.png"))
+    out = np.array(Image.open(tmp_path / "flat.png"))
+    assert (out[0, 0] == (0, 255, 0)).all() and (out[10, 10] == (0, 255, 0)).all()
+    assert (out[250, 260] == a[250, 260]).all()  # the sprite is untouched
+
     src = render(tmp_path / "render.png")
     a = np.array(Image.open(src))
     hull = a[..., 1] != 255

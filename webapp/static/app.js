@@ -470,7 +470,8 @@ function tile(v, opts = {}) {
   if (opts.cleanup && v.raw) tools.append(iconBtn("tune", "Clean up again: colours, edge, outline, symmetry, palette", () => opts.cleanup(v)));
   if (opts.recolour) tools.append(iconBtn("palette", "Recolour with a palette", () => opts.recolour(v)));
   if (opts.remaster) tools.append(iconBtn("redo", "Generate again from this one", () => opts.remaster(v)));
-  el.append(stage, h("div", { class: "cap" }, h("span", { class: "name", title: v.label || v.name }, v.label || v.name), tools));
+  el.append(stage, h("div", { class: "cap" }, h("span", { class: "name", title: v.label || v.name }, v.label || v.name,
+    v.seconds ? h("span", { class: "secs muted", title: "Render time", style: { marginLeft: "6px", fontSize: "11px" } }, fmtDur(v.seconds)) : null), tools));
   return el;
 }
 
@@ -1343,7 +1344,8 @@ routes.train = async (main, parts) => {
         }))),
         h("tbody", {}, Object.keys(grid).sort().map((pi) => h("tr", {},
           h("td", { class: "prompt-cell" }, (info.samples.prompts[Number(pi)] || "").replace(c.trigger + ", ", "").split(", pixel art")[0]),
-          epochs.map((e) => h("td", {}, grid[pi][String(e)] ? h("img", { class: "px", src: fileUrl(grid[pi][String(e)]), alt: `epoch ${e}`, onclick: () => openSprite(grid[pi][String(e)], `Prompt ${Number(pi) + 1}, epoch ${e}`) }) : null))))));
+          epochs.map((e) => h("td", {}, grid[pi][String(e)] ? [h("img", { class: "px", src: fileUrl(grid[pi][String(e)]), alt: `epoch ${e}`, onclick: () => openSprite(grid[pi][String(e)], `Prompt ${Number(pi) + 1}, epoch ${e}`) }),
+            (info.samples.times || {})[grid[pi][String(e)]] ? h("div", { class: "secs", title: "Render time" }, fmtDur(info.samples.times[grid[pi][String(e)]])) : null] : null))))));
       s3.append(h("div", { class: "preview-grid" }, table));
       if (!epochs.length) s3.append(h("p", { class: "muted small" }, "No previews yet: render them above."));
       const addName = (k) => `${c.trigger}_${k.epoch === null ? "final" : "e" + k.epoch}${xl ? "_xl" : ""}`;
