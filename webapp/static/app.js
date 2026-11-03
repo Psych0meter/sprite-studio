@@ -1216,6 +1216,8 @@ routes.train = async (main, parts) => {
     const running = info.jobs.find((j) => j.kind !== "setup" && ["running", "queued"].includes(j.status));
     const downloading = info.jobs.find((j) => j.kind === "setup" && ["running", "queued"].includes(j.status));
     const trainJob = info.jobs.find((j) => j.kind === "train");
+    const pvJob = info.jobs.find((j) => j.kind === "previews");
+    const smallCard = xl && S.catalog.gpu_mb && S.catalog.gpu_mb < 12000; // training renders no previews there
     box.innerHTML = "";
 
     // 0. which base model
@@ -1304,8 +1306,14 @@ routes.train = async (main, parts) => {
       s2.append(h("div", { class: "note", style: { marginTop: "14px" } }, (S.catalog.gpu_mb && S.catalog.gpu_mb >= 15000)
         ? "This card has room for both: ComfyUI keeps running during training (Settings can change it). Jobs already in the queue run first."
         : "Training needs the whole GPU: the app stops ComfyUI for the run and starts it again at the end. Jobs already in the queue run first."));
+      if (smallCard) {
+        s2.append(h("label", { class: "check", style: { display: "flex", marginTop: "14px" } },
+          h("input", { type: "checkbox", checked: opts.previews_after !== false, onchange: (e) => { opts.previews_after = e.target.checked; keep(); } }),
+          "Render previews when training ends (a few per checkpoint, about 2 minutes each on a GTX 1080)"));
+        s2.append(h("div", { class: "hint" }, "This card cannot render them during training, so the app does it afterwards through ComfyUI."));
+      }
       s2.append(h("div", { style: { marginTop: "14px" } }, h("button", { class: "btn primary", disabled: !ds.exists || !!running || (xl && !info.sdxl_ready),
-        onclick: async () => { const j = await attempt(() => api(`/train/${cat}/start`, { body: opts }), "Training queued"); if (j) schedule(1500); } },
+        onclick: async () => { const j = await attempt(() => api(`/train/${cat}/start`, { body: Object.assign({}, opts, { previews_after: !!smallCard && opts.previews_after !== false }) }), "Training queued"); if (j) schedule(1500); } },
         ds.exists ? `Train ${info.name}` : "Build the training set first")));
     }
     box.append(s2);
@@ -1321,6 +1329,7 @@ routes.train = async (main, parts) => {
       s3.append(h("p", { class: "muted" }, "Checkpoints and their previews appear here during training, every 2 epochs. SDXL on a card under 12 GB saves the checkpoints without previews: try them on Compare LoRAs."));
     } else {
       s3.append(h("p", { class: "small muted" }, "Each column is one checkpoint, each row one test prompt (things the game does not have, to see the style rather than copies). Pick the earliest column that looks right: later ones tend to copy the training set."));
+      s3.append(previewsBox(info, pvJob, running, smallCard));
       const grid = info.samples.grid;
       const epochs = [...new Set(Object.values(grid).flatMap((row) => Object.keys(row)))].map(Number).filter((e) => e > 0).sort((a, b) => a - b);
       const ckptFor = (e) => info.checkpoints.find((k) => k.epoch === e) || (e === Math.max(...epochs) ? info.checkpoints.find((k) => k.epoch === null) : null);
@@ -1336,7 +1345,7 @@ routes.train = async (main, parts) => {
           h("td", { class: "prompt-cell" }, (info.samples.prompts[Number(pi)] || "").replace(c.trigger + ", ", "").split(", pixel art")[0]),
           epochs.map((e) => h("td", {}, grid[pi][String(e)] ? h("img", { class: "px", src: fileUrl(grid[pi][String(e)]), alt: `epoch ${e}`, onclick: () => openSprite(grid[pi][String(e)], `Prompt ${Number(pi) + 1}, epoch ${e}`) }) : null))))));
       s3.append(h("div", { class: "preview-grid" }, table));
-      if (!epochs.length) s3.append(h("p", { class: "muted small" }, "No previews yet."));
+      if (!epochs.length) s3.append(h("p", { class: "muted small" }, "No previews yet: render them above."));
       const addName = (k) => `${c.trigger}_${k.epoch === null ? "final" : "e" + k.epoch}${xl ? "_xl" : ""}`;
       const isAdded = (k) => info.installed.some((i) => i.name === addName(k) + ".safetensors");
       s3.append(keepOpen("train-files", h("details", { style: { marginTop: "12px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, `All ${info.checkpoints.length} checkpoint files`),
@@ -1350,6 +1359,51 @@ routes.train = async (main, parts) => {
     box.append(s3);
     if (running) schedule(running.kind === "train" ? 5000 : 1500);
     else if (downloading) schedule(5000);
+  };
+  // Previews the training did not render (SDXL on a small card, or a stopped run): rendered afterwards through ComfyUI.
+  const pvOff = new Set();
+  const previewsBox = (info, pvJob, running, smallCard) => {
+    const el = h("div", { class: "note", style: { margin: "0 0 14px" } });
+    const spi = S.catalog.speed && S.catalog.speed.sec_per_image;
+    if (pvJob && ["running", "queued"].includes(pvJob.status)) {
+      const p = pvJob.progress || {};
+      el.append(h("div", { class: "row between", style: { marginBottom: "8px" } }, h("span", {}, statusLabel(pvJob), h("span", { class: "muted small" }, "  Rendering previews: ", p.text || "")),
+        h("div", { class: "row" }, h("a", { class: "btn sm ghost", href: "#/jobs/" + pvJob.id }, "Log"),
+          h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${pvJob.id}/cancel`, { body: {} }), "Previews cancelled") }, "Cancel"))));
+      el.append(progressBar(pvJob));
+      el.append(h("div", { class: "hint" }, "Each one appears in the grid below when it is done; a cancelled run keeps what is finished."));
+      return el;
+    }
+    const by = info.previews_by_epoch || {};
+    const eps = Object.keys(by).map(Number).sort((a, b) => a - b);
+    if (pvJob && pvJob.status === "failed" && pvJob.error) el.append(h("div", { class: "note bad", style: { marginBottom: "10px" } }, pvJob.error, " ", h("a", { href: "#/jobs/" + pvJob.id }, "log")));
+    if (!eps.length) {
+      el.append(h("span", { class: "small" }, "Every checkpoint has its previews."));
+      return el;
+    }
+    const picked = () => eps.filter((e) => !pvOff.has(e));
+    const count = () => picked().reduce((n, e) => n + by[String(e)], 0);
+    const label = h("span", { class: "small muted" });
+    const go = h("button", { class: "btn primary", disabled: !!running });
+    const update = () => {
+      const n = count();
+      label.textContent = n ? `${n} render${n === 1 ? "" : "s"}` + (spi ? `, about ${fmtDur(n * spi)} on this machine` : "") : "Nothing chosen";
+      go.disabled = !!running || !n;
+    };
+    go.textContent = "Render the missing previews";
+    go.onclick = async () => {
+      const j = await attempt(() => api(`/train/${cat}/previews`, { body: { model: opts.model, epochs: picked() } }), "Rendering previews");
+      if (j) schedule(1500);
+    };
+    el.append(h("div", { class: "small", style: { marginBottom: "8px" } }, smallCard
+      ? "SDXL on this card is not rendered during training. Render a few previews per checkpoint here, then pick one."
+      : "Some checkpoints have no previews (a stopped run, or ones added later). They can be rendered here, through ComfyUI."),
+      h("div", { class: "row", style: { flexWrap: "wrap", gap: "14px", marginBottom: "10px" } }, h("span", { class: "label" }, "Checkpoints"),
+        eps.map((e) => h("label", { class: "check small", style: { display: "flex" } },
+          h("input", { type: "checkbox", checked: !pvOff.has(e), onchange: (ev) => { if (ev.target.checked) pvOff.delete(e); else pvOff.add(e); update(); } }), `epoch ${e}`))),
+      h("div", { class: "row" }, go, label), h("div", { class: "hint" }, "The first 2 test prompts of the run, with its own seeds; the ones already rendered are kept."));
+    update();
+    return el;
   };
   const numField = (label, key, min, max, step, hint, placeholder) => h("div", { class: "field" }, h("label", {}, label),
     h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); } }), h("div", { class: "hint" }, hint));

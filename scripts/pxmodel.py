@@ -65,6 +65,7 @@ background".
   pxmodel.py sprites <model>              every sprite and what it is
   pxmodel.py dataset <model> <dst> [--res 512] [--repeats N]
   pxmodel.py previews <model> [--res 512]  sample prompts for sd-scripts
+  pxmodel.py preview-plan <model> --out DIR --name N   the preview renders a run is missing (TSV)
   pxmodel.py prompt <model> --group G [--kind K] [--extra TEXT] [--colours TEXT]
                   [--refs-kind K] [--exclude FILE] [--palette P]   prompt, refs and size, as JSON
   pxmodel.py batch-list <model> [--groups a,b] [--kinds a,b]
@@ -80,6 +81,7 @@ import os
 import re
 import shutil
 import sys
+from pathlib import Path
 
 from PIL import Image
 
@@ -529,6 +531,53 @@ def previews(m, res=512):
     return "\n".join(f"{p} --n {n} {tail} --d {i + 1}" for i, (p, n) in enumerate(lines)) + "\n"
 
 
+PREVIEW_LINE = re.compile(r"^(.*?) --n (.*?) --w (\d+) --h (\d+) --s (\d+) --l ([\d.]+) --d (\d+)\s*$")
+CELL_RE = re.compile(r"_e(\d{6})_(\d{2})_")
+
+
+def preview_plan(m, out_dir, name, res=512, epochs=None, prompts=2, final_epoch=None):
+    """The preview renders a training run is missing, as dicts: one per (checkpoint, preview prompt) with no
+    image in out_dir/sample yet. The prompts are the run's own (sample_prompts.txt, else the model's), the
+    first `prompts` of them; epochs: only these epochs (a list of ints; None: every checkpoint); final_epoch:
+    the epoch the final file (<name>.safetensors, no number) stands for, when no numbered checkpoint does."""
+    out_dir = str(out_dir)
+    lines = []
+    f = os.path.join(out_dir, "sample_prompts.txt")
+    text = Path(f).read_text() if os.path.exists(f) else previews(m, res)
+    for i, ln in enumerate(x for x in text.splitlines() if x.strip()):
+        g = PREVIEW_LINE.match(ln)
+        if g:
+            p, n, w, _h, steps, cfg, seed = g.groups()
+            lines.append((i, p, n, int(steps), float(cfg), int(seed)))
+        else:  # a hand-edited line: its text, with the usual settings
+            lines.append((i, ln.split(" --")[0], negative(m), 28, 7.0, i + 1))
+    ckpts = {}
+    for fn in sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else []:
+        g = re.fullmatch(re.escape(name) + r"-(\d+)\.safetensors", fn)
+        if g:
+            ckpts[int(g.group(1))] = os.path.join(out_dir, fn)
+    final = os.path.join(out_dir, name + ".safetensors")
+    if final_epoch and int(final_epoch) not in ckpts and os.path.exists(final):
+        ckpts[int(final_epoch)] = final
+    have = set()
+    sdir = os.path.join(out_dir, "sample")
+    for fn in sorted(os.listdir(sdir)) if os.path.isdir(sdir) else []:
+        g = CELL_RE.search(fn)
+        if g:
+            have.add((int(g.group(1)), int(g.group(2))))
+    plan = []
+    for ep, path in sorted(ckpts.items()):
+        if epochs is not None and ep not in epochs:
+            continue
+        for i, p, n, steps, cfg, seed in lines[: max(0, int(prompts))]:
+            if (ep, i) not in have:
+                plan.append(
+                    {"epoch": ep, "checkpoint": path, "index": i, "prompt": p, "negative": n, "steps": steps,
+                     "cfg": cfg, "seed": seed}
+                )  # fmt: skip
+    return plan
+
+
 def auto_previews(m, limit=8):
     """One test prompt per enabled group, each with one of the kinds that
     group really has (a different one each time), and no sprite's own
@@ -658,6 +707,14 @@ def main():
     p = sub.add_parser("previews")
     p.add_argument("model")
     p.add_argument("--res", type=int, default=512)
+    p = sub.add_parser("preview-plan")
+    p.add_argument("model")
+    p.add_argument("--out", required=True, help="the training output folder")
+    p.add_argument("--name", required=True, help="the LoRA's name (pxunit, pxunit_xl)")
+    p.add_argument("--res", type=int, default=512)
+    p.add_argument("--epochs", default="", help="2,4,6: only these epochs (default: every checkpoint)")
+    p.add_argument("--prompts", type=int, default=2, help="the first N preview prompts")
+    p.add_argument("--final-epoch", type=int, default=0, help="the epoch the unnumbered final file stands for")
     p = sub.add_parser("prompt")
     p.add_argument("model")
     p.add_argument("--group", required=True)
@@ -704,6 +761,14 @@ def main():
         dataset(load(a.model), a.dst, a.res, a.repeats)
     elif a.cmd == "previews":
         sys.stdout.write(previews(load(a.model), a.res))
+    elif a.cmd == "preview-plan":
+        eps = [int(x) for x in a.epochs.split(",") if x.strip()] or None
+        for r in preview_plan(load(a.model), a.out, a.name, a.res, eps, a.prompts, a.final_epoch or None):
+            print(
+                "\t".join(
+                    str(r[k]) for k in ("epoch", "checkpoint", "index", "seed", "steps", "cfg", "prompt", "negative")
+                )
+            )
     elif a.cmd == "prompt":
         print(json.dumps(prompt(load(a.model), a.group, a.kind, a.extra, a.colours, a.refs_kind, a.exclude, a.palette)))
     elif a.cmd == "batch-list":

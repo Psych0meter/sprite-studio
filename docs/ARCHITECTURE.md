@@ -39,6 +39,7 @@ scripts/
   pxbatch.sh     remaster or invent over a model, resumable, sheets
   pxmatrix.sh    LoRA comparison: subjects x LoRA files x strengths
   train_lora.sh  setup (sd-scripts, base models), dataset, train, install
+  pxpreviews.sh  a training run's missing preview images, rendered through ComfyUI
   install.sh     system install: user, ComfyUI, sd-scripts, services
 ```
 
@@ -117,6 +118,23 @@ model or about 300 steps per epoch. `train` runs sd-scripts'
 `train_network.py` (SD 1.5) or `sdxl_train_network.py` (SDXL) with the
 precision picked from the card and the memory savers; preview prompts come
 from `pxmodel.py previews`.
+
+**Previews afterwards.** Training renders them itself (every 2 epochs)
+except on SDXL under 12 GB. `pxmodel.py preview-plan` lists what a run is
+missing: for each checkpoint and each of the first N prompts of
+`<output>/sample_prompts.txt` (else the model's), the cell with no
+`sample/<name>_e<epoch>_<prompt>_*.png` yet; the unnumbered final file counts
+as the run's last epoch (`FINAL_EPOCH`: the epochs of the last training
+job, else the base model's default) unless a numbered checkpoint already is
+that epoch. `pxpreviews.sh` copies each checkpoint into ComfyUI's loras
+folder as `px_preview_*.safetensors` for the run, renders each cell with
+`pxcomfy.py` (the prompt's own seed, steps and cfg, one image), and writes
+it under the name the Train page's grid reads. Exit codes follow the batch
+convention (0 ok, 4 some failed, 1 none made). In the app this is the
+`previews` job kind (`POST /api/train/<model>/previews`, GPU lane, waits for
+ComfyUI like generation); a training request with `previews_after` queues
+it when the run finishes (`follow_up`). `GET /api/train/<model>` reports
+`previews_todo`, `previews_by_epoch` and `final_epoch`.
 
 ## 7. Web app
 

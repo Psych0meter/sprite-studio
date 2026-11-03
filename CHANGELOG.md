@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Train**: previews can be rendered after training. A box above the preview
+  grid lists the checkpoints with missing previews; **Render the missing
+  previews** renders the run's first 2 test prompts for the ticked ones
+  through ComfyUI, with the run's own seeds, and shows each one as it is
+  done. Existing previews are kept. On a card under 12 GB (SDXL) a checkbox,
+  *Render previews when training ends*, does it automatically after the run.
 - **Results**: **Clean up again** (sliders icon on a variant). The model's
   raw render is shown next to the result, with live settings for palette,
   symmetry, number of colours, edge, loose specks, background tolerance,

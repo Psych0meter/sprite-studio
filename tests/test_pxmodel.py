@@ -98,3 +98,42 @@ def test_list_models_only_lists_saved_ones(pxmodel, env):
     new_model(pxmodel, "a")
     (env["lora"] / "not_a_model").mkdir()
     assert pxmodel.list_models() == ["a"]
+
+
+def _run_dir(tmp_path, *epochs, final=False, samples=()):
+    out = tmp_path / "output"
+    (out / "sample").mkdir(parents=True)
+    for e in epochs:
+        (out / f"pxunit-{e:06d}.safetensors").write_bytes(b"x")
+    if final:
+        (out / "pxunit.safetensors").write_bytes(b"x")
+    for e, i in samples:
+        (out / "sample" / f"pxunit_e{e:06d}_{i:02d}_20260101000000.png").write_bytes(b"x")
+    return out
+
+
+def test_preview_plan_lists_only_the_missing_renders(pxmodel, tmp_path):
+    m = new_model(pxmodel, previews=["pxunit, red ship", "pxunit, blue ship --n organic"])
+    out = _run_dir(tmp_path, 2, 4, final=True, samples=[(2, 0)])
+    plan = pxmodel.preview_plan(m, out, "pxunit", 512, prompts=2, final_epoch=6)
+    assert [(r["epoch"], r["index"]) for r in plan] == [(2, 1), (4, 0), (4, 1), (6, 0), (6, 1)]
+    assert plan[-1]["checkpoint"].endswith("pxunit.safetensors")  # the final file stands for epoch 6
+    assert "organic" in plan[0]["negative"] and plan[0]["seed"] == 2 and plan[1]["seed"] == 1
+    assert [(r["epoch"], r["index"]) for r in pxmodel.preview_plan(m, out, "pxunit", 512, epochs=[4], prompts=1)] == [
+        (4, 0)
+    ]
+
+
+def test_preview_plan_does_not_duplicate_a_numbered_final(pxmodel, tmp_path):
+    m = new_model(pxmodel, previews=["pxunit, red ship"])
+    out = _run_dir(tmp_path, 2, 4, final=True)
+    plan = pxmodel.preview_plan(m, out, "pxunit", 512, prompts=1, final_epoch=4)
+    assert [r["epoch"] for r in plan] == [2, 4]  # epoch 4 has its numbered twin: the final file is not rendered too
+
+
+def test_preview_plan_reads_the_runs_own_prompts(pxmodel, tmp_path):
+    m = new_model(pxmodel, previews=["pxunit, from the model"])
+    out = _run_dir(tmp_path, 2)
+    (out / "sample_prompts.txt").write_text("pxunit, from the run --n bad --w 1024 --h 1024 --s 20 --l 5.5 --d 77\n")
+    (r,) = pxmodel.preview_plan(m, out, "pxunit", 1024)
+    assert (r["prompt"], r["negative"], r["steps"], r["cfg"], r["seed"]) == ("pxunit, from the run", "bad", 20, 5.5, 77)

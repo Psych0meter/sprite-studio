@@ -174,9 +174,17 @@ made, use a palette's *Light from the top* slider (section 7).
    saved epoch. Take the first epoch where the style is clearly there and
    before the images turn noisy or copy the originals; click **Use** (it
    becomes the model's LoRA) or **Add** (installed under its own name, to
-   compare or batch with). Without previews (SDXL on a card under 12 GB),
-   open *All checkpoint files*: every file has the same **Use** and **Add**
-   buttons.
+   compare or batch with). A checkpoint with no previews (SDXL on a card
+   under 12 GB, a stopped run, a checkpoint added later) can be rendered
+   afterwards: tick the epochs in the box above the grid and click **Render
+   the missing previews**. The app renders the run's first 2 test prompts
+   for each, with the run's own seeds, through ComfyUI (it must be running;
+   on a GTX 1080 an SDXL image takes about 2 minutes). Each preview appears
+   in the grid as it is done, a cancelled run keeps what is finished, and a
+   preview already there is never rendered again. On a card under 12 GB the
+   Train step has a checkbox, **Render previews when training ends**, which
+   queues the same job as soon as the run finishes. *All checkpoint files*
+   lists every file with the same **Use** and **Add** buttons.
 
 Underfit (previews look like generic Stable Diffusion): more epochs, or a
 learning rate of 2e-4. Overfit (previews copy your sprites, colours burn):
@@ -190,7 +198,8 @@ precision (GTX 10 and older) it is very slow (about 30 seconds a step on a
 GTX 1080, so 2400 steps take most of a day), and SD 1.5 is the better
 choice. Under 12 GB no preview images are rendered during training (the
 render ran an 8 GB card out of memory); the checkpoints are still saved
-every 2 epochs, so compare them with Compare LoRAs.
+every 2 epochs, and their previews are rendered afterwards through ComfyUI
+(see *Choose a checkpoint*), or compared with Compare LoRAs.
 
 ## 5. Generating
 

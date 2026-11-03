@@ -100,7 +100,10 @@ def model_cfg(mid: str) -> dict:
         raise HTTPException(404, str(e)) from None
 
 
-BASES = {"sd15": {"label": "SD 1.5", "suffix": ""}, "sdxl": {"label": "SDXL", "suffix": "_xl"}}
+BASES = {
+    "sd15": {"label": "SD 1.5", "suffix": "", "res": 512, "epochs": 12},
+    "sdxl": {"label": "SDXL", "suffix": "_xl", "res": 1024, "epochs": 8},
+}
 
 
 def model_ok(m: str | None) -> str:
@@ -273,7 +276,7 @@ class Jobs:
         try:
             if job["meta"].get("needs_free_gpu") and must_free_gpu():
                 stopped_comfy = self._free_gpu(job)
-            elif job["kind"] in ("generate", "batch", "matrix") and not comfy_status()["up"]:
+            elif job["kind"] in ("generate", "batch", "matrix", "previews") and not comfy_status()["up"]:
                 # ComfyUI may be starting again after a training run
                 self._log(job, "waiting for ComfyUI to answer (up to 3 minutes)")
                 for _ in range(90):
@@ -327,6 +330,7 @@ class Jobs:
             job["ended"] = time.time()
             with self.cv:
                 self.persist()
+        follow_up(job)
 
     def _free_gpu(self, job: dict) -> bool:
         if not comfy_status()["up"]:
@@ -455,12 +459,13 @@ def progress(job: dict) -> dict:
             "fraction": min(1, max(0, n - 1) / total) if total else 0,
             "text": f"sprite {n} of {total}" + (f": {last[-1]}" if last else "") if total else f"{n} sprites",
         }
-    if kind == "matrix":
+    if kind in ("matrix", "previews"):
         text = read_log(job)
         m = re.findall(r"=== \[(\d+)/(\d+)\]", text)
         if m:
             i, t = map(int, m[-1])
-            return {"fraction": (i - 1) / t, "text": f"cell {i} of {t}"}
+            what = "preview" if kind == "previews" else "cell"
+            return {"fraction": (i - 1) / t, "text": f"{what} {i} of {t}"}
         return {"fraction": 0, "text": "starting"}
     if kind == "generate":
         text = read_log(job, 20000)
@@ -521,7 +526,7 @@ def speed() -> dict:
     for j in jobs:
         if j["status"] != "done":
             continue
-        if j["kind"] in ("generate", "batch", "matrix") and len(per_image) < 200:
+        if j["kind"] in ("generate", "batch", "matrix", "previews") and len(per_image) < 200:
             per_image += [int(x) for x in re.findall(r"\] seed=\d+\s+(\d+) s", read_log(j, 200000))][-50:]
         elif j["kind"] == "train" and j.get("started") and j.get("ended"):
             train.setdefault(model_ok(j["meta"].get("model")), (j["ended"] - j["started"]) / 60)
@@ -853,6 +858,15 @@ def train_info(cat: str, model: str = "sd15") -> dict:
         "prompts": prompts,
         "grid": {str(k): {str(e): v for e, v in sorted(row.items())} for k, row in grid.items()},
     }
+    final_epoch = last_train_epochs(cat, model)
+    info["final_epoch"] = final_epoch
+    try:
+        todo = pm().preview_plan(pm().load(cat), out, name, BASES[model]["res"], None, PREVIEW_PROMPTS, final_epoch)
+    except SystemExit:
+        todo = []
+    info["previews_todo"] = len(todo)
+    info["previews_epochs"] = sorted({r["epoch"] for r in todo})
+    info["previews_by_epoch"] = {str(e): sum(1 for r in todo if r["epoch"] == e) for e in info["previews_epochs"]}
     loras = lora_dir()
     info["installed"] = (
         [
@@ -864,6 +878,24 @@ def train_info(cat: str, model: str = "sd15") -> dict:
         else []
     )
     return info
+
+
+PREVIEW_PROMPTS = 2  # previews rendered afterwards: the first N preview prompts of the run
+
+
+def last_train_epochs(cat: str, model: str) -> int:
+    """The epoch the final checkpoint file stands for: the epochs of the last training run of this model
+    and base (its request), else the script's default."""
+    with _lock:
+        jobs = sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
+    for j in jobs:
+        m = j["meta"]
+        if j["kind"] == "train" and m.get("category") == cat and model_ok(m.get("model")) == model:
+            try:
+                return int((m.get("request") or {}).get("epochs") or BASES[model]["epochs"])
+            except (TypeError, ValueError):
+                break
+    return BASES[model]["epochs"]
 
 
 def sdxl_ready() -> bool:
@@ -1410,7 +1442,7 @@ def api_train(cat: str, model: str = "sd15"):
         jobs = [
             JOBS.view(j)
             for j in sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
-            if j["kind"] in ("train", "dataset", "setup")
+            if j["kind"] in ("train", "dataset", "setup", "previews")
             and j["meta"].get("category") in (cat, None)
             and model_ok(j["meta"].get("model")) == model
         ][:5]
@@ -1461,8 +1493,58 @@ async def api_train_start(cat: str, request: Request):
         title,
         [str(SCRIPTS / "train_lora.sh"), "train"],
         env=env,
-        meta={"category": cat, "model": model, "needs_free_gpu": True, "request": b},
+        meta={
+            "category": cat,
+            "model": model,
+            "needs_free_gpu": True,
+            "request": b,
+            "then_previews": bool(b.get("previews_after")),
+        },
     )
+
+
+def submit_previews(cat: str, model: str, epochs: list[int] | None = None, prompts: int = PREVIEW_PROMPTS) -> dict:
+    """A job rendering the training run's missing previews (pxpreviews.sh) in the GPU lane."""
+    mcfg = model_cfg(cat)
+    out = P("lora_home") / cat / ("output" + BASES[model]["suffix"])
+    if not any(out.glob("*.safetensors")):
+        raise HTTPException(400, "no checkpoint to render: train this model first")
+    env = {
+        "CATEGORY": cat,
+        "MODEL": model,
+        "PROMPTS": str(max(1, min(8, prompts))),
+        "FINAL_EPOCH": str(last_train_epochs(cat, model)),
+    }
+    if epochs:
+        env["EPOCHS"] = ",".join(str(int(e)) for e in sorted(set(epochs)))
+    return JOBS.submit(
+        "previews",
+        f"Previews: {mcfg['label']}" + (" (SDXL)" if model == "sdxl" else ""),
+        [str(SCRIPTS / "pxpreviews.sh")],
+        env=env,
+        meta={"category": cat, "model": model},
+    )
+
+
+def follow_up(job: dict) -> None:
+    """What a finished job asked for next: a training run started with "render previews afterwards"."""
+    if job["kind"] != "train" or job["status"] != "done" or not job["meta"].get("then_previews"):
+        return
+    cat, model = job["meta"]["category"], model_ok(job["meta"].get("model"))
+    try:
+        submit_previews(cat, model)
+    except HTTPException as e:
+        JOBS._log(job, f"previews not queued: {e.detail}")
+
+
+@app.post("/api/train/{cat}/previews")
+async def api_train_previews(cat: str, request: Request):
+    """Renders the previews a run is missing. Body: {"model": "sd15"|"sdxl", "epochs": [2, 4] (default: all),
+    "prompts": 2}."""
+    b = await request.json()
+    model = model_ok(b.get("model"))
+    epochs = [int(e) for e in b["epochs"]] if b.get("epochs") else None
+    return submit_previews(cat, model, epochs, body_get(b, "prompts", PREVIEW_PROMPTS, int))
 
 
 @app.post("/api/train/setup-sdxl")

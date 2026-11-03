@@ -16,7 +16,8 @@ web app and a set of command-line tools.
   starting points; models export and import as files.
 - **Training**: training sets built from the model (captions, a whole-number
   pixel grid per kind, optional relighting of sprites lit from below), SD 1.5
-  or SDXL, live progress and preview grids per epoch, one click to install the
+  or SDXL, live progress and preview grids per epoch (rendered afterwards through
+  ComfyUI when the card cannot do it while training), one click to install the
   epoch you prefer.
 - **Generation**: remaster a sprite (same shape, new detail), invent one from
   a description or a sketch, touch up part of a sprite with a mask. Results
@@ -82,6 +83,7 @@ in the `PATH` of the installation's user):
 |---|---|
 | `pxmodel.py` | the models: sprites, captions, training sets, prompts, batch lists |
 | `train_lora.sh` | `setup`, `dataset`, `train`, `install` a model's LoRA (`CATEGORY=<model>`) |
+| `pxpreviews.sh` | the preview images a training run is missing, rendered through ComfyUI |
 | `pxmake.sh` | one generation: prompt, ComfyUI render, clean-up into sprites |
 | `pxbatch.sh` | every sprite of a model remastered, or new ones invented |
 | `pxmatrix.sh` | a LoRA comparison: checkpoints x strengths on fixed seeds |

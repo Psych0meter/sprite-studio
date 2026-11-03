@@ -115,3 +115,34 @@ def test_cleanup_refuses_what_has_no_raw_render(client, env):
     Image.new("RGBA", (8, 8), (0, 0, 0, 0)).save(job / "plain.png")
     assert client.post("/api/results/cleanup", json={"path": str(job / "plain.png")}).status_code == 400
     assert client.post("/api/results/cleanup", json={"path": "/etc/passwd"}).status_code in (400, 403)
+
+
+def test_previews_endpoint_queues_a_job_and_reports_what_is_missing(client, env, monkeypatch):
+    import app as webapp
+
+    assert client.post("/api/models", json={"id": "units", "label": "Units"}).status_code == 200
+    out = env["lora"] / "units" / "output"
+    out.mkdir(parents=True)
+    calls = []
+    monkeypatch.setattr(webapp.JOBS, "submit", lambda *a, **kw: calls.append((a, kw)) or {"id": "j1"})
+    trigger = client.get("/api/models/units").json()["model"]["trigger"]
+    (out / f"{trigger}-000002.safetensors").write_bytes(b"x")
+    r = client.post("/api/train/units/previews", json={"model": "sd15", "epochs": [2], "prompts": 1})
+    assert r.status_code == 200, r.text
+    (args, kw) = calls[0]
+    assert args[0] == "previews" and kw["env"]["EPOCHS"] == "2" and kw["env"]["PROMPTS"] == "1"
+    assert kw["env"]["FINAL_EPOCH"] == "12"  # no training run on record: the script's default for SD 1.5
+    info = client.get("/api/train/units").json()
+    assert info["previews_todo"] >= 1 and 2 in info["previews_epochs"]
+
+
+def test_a_finished_training_queues_its_previews_when_asked(client, monkeypatch):
+    import app as webapp
+
+    seen = []
+    monkeypatch.setattr(webapp, "submit_previews", lambda cat, model, *a: seen.append((cat, model)))
+    job = {"kind": "train", "status": "done", "meta": {"category": "units", "model": "sdxl", "then_previews": True}}
+    webapp.follow_up(job)
+    webapp.follow_up(job | {"status": "failed"})
+    webapp.follow_up(job | {"meta": {"category": "units", "model": "sdxl"}})
+    assert seen == [("units", "sdxl")]
