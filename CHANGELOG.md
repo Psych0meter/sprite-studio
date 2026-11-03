@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-03
+
 ### Added
 
 - **Train**: previews can be rendered after training. A box above the preview
@@ -124,5 +126,6 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Psych0meter/sprite-studio/releases/tag/v0.1.0
