@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Training**: a finished SDXL run on a card under 12 GB is no longer
+  reported as failed. All checkpoints were saved, but the script ended with
+  exit code 1 because there was no preview folder to mention.
 - **Train**: the list of checkpoint files no longer closes itself every time
   the page refreshes during a training run (the same goes for Generate's
   *More settings*).

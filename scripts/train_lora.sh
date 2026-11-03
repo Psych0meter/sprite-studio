@@ -194,7 +194,7 @@ train() {
 			--optimizer_type AdamW
 	fi
 	echo "checkpoints: $OUT/$NAME-0000NN.safetensors (every 2 epochs) and $OUT/$NAME.safetensors (last)"
-	[ -d "$OUT/sample" ] && echo "previews:    $OUT/sample/"
+	if [ -d "$OUT/sample" ]; then echo "previews:    $OUT/sample/"; fi
 }
 
 install() {
