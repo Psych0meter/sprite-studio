@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Models**: the *Preview prompts* tab is easier to use. Each prompt is its own
+  row with a words-to-avoid field, a check that it starts with the model's
+  trigger word (with a **Fix** button), a tag on the first 2 prompts (the ones
+  rendered afterwards), move up/down and remove. **Add** builds a prompt from
+  a group and a kind, or an empty one; the automatic prompts are folded away
+  and can be copied into the list to edit. Saved lists load unchanged.
 - **Train**: previews are centred under their epoch, and a preview rendered
   afterwards has a uniform green background (the model's green drifts from
   one image to the next, which made the grid look uneven). Previews already

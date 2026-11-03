@@ -150,3 +150,11 @@ def test_a_finished_training_queues_its_previews_when_asked(client, monkeypatch)
     webapp.follow_up(job | {"status": "failed"})
     webapp.follow_up(job | {"meta": {"category": "units", "model": "sdxl"}})
     assert seen == [("units", "sdxl")]
+
+
+def test_model_prompt_endpoint_builds_a_prompt_for_a_group(client, env):
+    assert client.post("/api/models", json={"id": "units", "label": "Units"}).status_code == 200
+    m = client.get("/api/models/units").json()["model"]
+    r = client.get("/api/models/units/prompt", params={"group": m["groups"][0]["id"]})
+    assert r.status_code == 200 and r.json()["prompt"].startswith(m["trigger"])
+    assert client.get("/api/models/units/prompt", params={"group": "nope"}).status_code == 400

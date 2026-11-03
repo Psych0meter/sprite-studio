@@ -138,6 +138,9 @@ convention (0 ok, 4 some failed, 1 none made). In the app this is the
 ComfyUI like generation); a training request with `previews_after` queues
 it when the run finishes (`follow_up`). `GET /api/train/<model>` reports
 `previews_todo`, `previews_by_epoch` and `final_epoch`.
+`GET /api/models/<id>/prompt?group=&kind=` returns the prompt the model builds
+for a group and a kind; the Preview prompts editor uses it to start a row.
+The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
 
 ## 7. Web app
 

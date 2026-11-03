@@ -1716,6 +1716,20 @@ def api_models():
     return models_summary()
 
 
+@app.get("/api/models/{mid}/prompt")
+def api_model_prompt(mid: str, group: str, kind: str = ""):
+    """The prompt the model builds for a group and a kind (what a preview line for them would start from)."""
+    m = model_cfg(mid)
+    if not any(g["id"] == group for g in m["groups"]):
+        raise HTTPException(400, f"no group {group}")
+    if kind and not any(k["id"] == kind for k in m["kinds"]):
+        raise HTTPException(400, f"no kind {kind}")
+    try:
+        return {"prompt": pm().prompt(m, group, kind or None, "" if m["kinds"] else "new design")["prompt"]}
+    except SystemExit as e:
+        raise HTTPException(400, str(e)) from None
+
+
 @app.get("/api/models/{mid}")
 def api_model(mid: str):
     m = model_cfg(mid)

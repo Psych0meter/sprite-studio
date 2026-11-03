@@ -113,6 +113,25 @@ group keywords, kind keywords, the model's end words, the sprite's colours,
 "pixel art, flat green background". The Sprites tab shows the caption of the
 selected sprite.
 
+### 3.3.1 Preview prompts
+
+The **Preview prompts** tab of a model lists the test prompts that every
+training run draws at each epoch. One row per prompt:
+
+- the prompt itself, and *Words to avoid* (optional);
+- a check that the prompt starts with the model's trigger word: without it
+  the LoRA is not called, and the preview looks like plain Stable Diffusion.
+  **Fix** puts the trigger first;
+- the first 2 rows are marked: they are the ones rendered afterwards when a
+  card cannot render previews during training (see Train);
+- move up, move down and remove.
+
+**Add** starts a row from a group and a kind (the prompt the model would
+build for them) or from an empty one. With no list, the automatic prompts
+are used; they are folded away, and **Copy them into the list** lets you
+edit them. Choose prompts that differ (one per group, one per kind) rather
+than variants of the same sprite.
+
 ### 3.4 One model or several?
 
 One model for every group learns what they share (kinds, pixel style)

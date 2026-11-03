@@ -1911,14 +1911,66 @@ async function modelEditor(main, mid, tab) {
   };
 
   // ---- previews
+  // m.previews stays a list of lines ("prompt --n words to avoid"); the page edits them as rows.
   const drawPreviews = () => {
     body.innerHTML = "";
-    const ta = h("textarea", { rows: 8, class: "mono", placeholder: "One prompt per line. Empty: the automatic ones on the left.", oninput: (e) => { m.previews = e.target.value.split("\n"); dirty = true; } }, (m.previews || []).join("\n"));
-    body.append(h("div", { class: "grid-2" },
-      h("div", { class: "panel" }, h("h2", {}, "Automatic"), h("p", { class: "small muted" }, "One per enabled group (up to 8), each with a kind that group has, and no sprite's own words: new designs, to see whether the LoRA learned the style."),
+    const split = (line) => { const i = line.indexOf(" --n "); return i < 0 ? { text: line.trim(), avoid: "" } : { text: line.slice(0, i).trim(), avoid: line.slice(i + 5).trim() }; };
+    const rows = (m.previews || []).filter((l) => l.trim()).map(split);
+    const sync = () => { m.previews = rows.map((r) => r.text.trim() + (r.avoid.trim() ? " --n " + r.avoid.trim() : "")).filter((l) => l.trim()); dirty = true; };
+    const list = h("div", {});
+    const startsRight = (t) => t.trim().split(/[\s,]+/)[0] === m.trigger;
+    const drawRows = () => {
+      list.innerHTML = "";
+      if (!rows.length) list.append(h("p", { class: "muted" }, "No prompt of your own: training uses the automatic ones (see below)."));
+      rows.forEach((r, i) => {
+        const check = h("span", { class: "small" });
+        const paint = () => {
+          check.innerHTML = "";
+          if (!r.text.trim()) return;
+          if (startsRight(r.text)) check.append(h("span", { class: "tag ok" }, "starts with " + m.trigger));
+          else check.append(h("span", { class: "tag amber", title: "The captions the LoRA learned start with its trigger word" }, "should start with " + m.trigger), " ",
+            h("button", { class: "btn sm", onclick: () => { r.text = m.trigger + ", " + r.text.trim().replace(/^[^,]*,\s*/, ""); sync(); drawRows(); } }, "Fix"));
+        };
+        const ta = h("textarea", { rows: 3, class: "mono", oninput: (e) => { r.text = e.target.value; sync(); paint(); } }, r.text);
+        const avoid = h("input", { type: "text", value: r.avoid, placeholder: "e.g. organic, creature, animal",
+          oninput: (e) => { r.avoid = e.target.value; sync(); } });
+        const move = (to) => () => { if (to < 0 || to >= rows.length) return; rows.splice(to, 0, rows.splice(i, 1)[0]); sync(); drawRows(); };
+        list.append(h("div", { class: "panel", style: { padding: "12px 14px", marginBottom: "10px" } },
+          h("div", { class: "row between", style: { marginBottom: "6px" } },
+            h("div", { class: "row" }, h("strong", {}, "Prompt " + (i + 1)), i < 2 ? h("span", { class: "tag", title: "The previews rendered afterwards (Train page) use the first 2 prompts" }, "rendered afterwards") : null, check),
+            h("div", { class: "row", style: { gap: "4px" } },
+              h("button", { class: "btn sm ghost", title: "Move up", disabled: i === 0, onclick: move(i - 1) }, "↑"),
+              h("button", { class: "btn sm ghost", title: "Move down", disabled: i === rows.length - 1, onclick: move(i + 1) }, "↓"),
+              h("button", { class: "btn sm ghost danger", onclick: () => { rows.splice(i, 1); sync(); drawRows(); } }, "Remove"))),
+          ta, h("div", { class: "field", style: { marginTop: "8px" } }, h("label", {}, "Words to avoid (optional)"), avoid)));
+        paint();
+      });
+    };
+    // a prompt built from a group and a kind, the way the training captions are
+    const pick = { group: (m.groups.find((g) => g.enabled) || m.groups[0] || {}).id || "", kind: (m.kinds[0] || {}).id || "" };
+    const adder = h("div", { class: "row", style: { flexWrap: "wrap", gap: "8px", alignItems: "flex-end" } },
+      h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { pick.group = e.target.value; } },
+        m.groups.map((g) => h("option", { value: g.id, selected: g.id === pick.group }, g.label)))),
+      m.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { pick.kind = e.target.value; } },
+        m.kinds.map((k) => h("option", { value: k.id, selected: k.id === pick.kind }, k.label)))) : null,
+      h("button", { class: "btn", onclick: async () => {
+        const r = await attempt(() => api(`/models/${mid}/prompt?group=${encodeURIComponent(pick.group)}&kind=${encodeURIComponent(pick.kind)}`));
+        if (r) { rows.push({ text: r.prompt, avoid: "" }); sync(); drawRows(); }
+      } }, "Add a prompt for them"));
+    body.append(h("div", { class: "panel" },
+      h("h2", {}, "Preview prompts"),
+      h("p", { class: "small muted", style: { maxWidth: "80ch" } }, "Test prompts for training: each is one row of the checkpoint grid on the Train page, drawn at every saved epoch with the same seed, so the columns can be compared. Write new designs the training set does not contain, to see the style rather than copies."),
+      h("p", { class: "small muted", style: { maxWidth: "80ch" } }, "Write them like the training captions: the trigger word " + m.trigger + " first, then the group's and kind's words, then what it looks like. A good set has one prompt per kind. Previews rendered afterwards use the first 2."),
+      list,
+      h("div", { class: "row", style: { gap: "8px", marginTop: "4px" } },
+        h("button", { class: "btn", onclick: () => { rows.push({ text: m.trigger + ", ", avoid: "" }); sync(); drawRows(); } }, "Add an empty prompt")),
+      h("div", { style: { marginTop: "14px" } }, h("div", { class: "label" }, "Or build one from a group and a kind"), adder),
+      h("details", { style: { marginTop: "16px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, "The automatic prompts (used when the list above is empty)"),
+        h("p", { class: "small muted" }, "One per enabled group (up to 8), each with a kind that group has, and no sprite's own words."),
         d.auto_previews.map((p) => h("p", { class: "small mono" }, p.prompt)),
-        h("button", { class: "btn sm", onclick: () => { ta.value = d.auto_previews.map((p) => p.prompt).join("\n"); m.previews = ta.value.split("\n"); dirty = true; } }, "Copy them to edit")),
-      h("div", { class: "panel" }, h("h2", {}, "Your own"), h("p", { class: "small muted" }, "Rendered every 2 epochs during training, one row each in the checkpoint grid. Each should start with the trigger word " + m.trigger + ". A line can end with its own words to avoid: \" --n organic, creature\"."), ta, saveBar())));
+        h("button", { class: "btn sm", onclick: () => { rows.splice(0, rows.length, ...d.auto_previews.map((p) => split(p.prompt))); sync(); drawRows(); } }, "Copy them into the list to edit")),
+      saveBar()));
+    drawRows();
   };
 
   // ---- settings
