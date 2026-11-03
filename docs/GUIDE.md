@@ -174,7 +174,9 @@ made, use a palette's *Light from the top* slider (section 7).
    saved epoch. Take the first epoch where the style is clearly there and
    before the images turn noisy or copy the originals; click **Use** (it
    becomes the model's LoRA) or **Add** (installed under its own name, to
-   compare or batch with).
+   compare or batch with). Without previews (SDXL on a card under 12 GB),
+   open *All checkpoint files*: every file has the same **Use** and **Add**
+   buttons.
 
 Underfit (previews look like generic Stable Diffusion): more epochs, or a
 learning rate of 2e-4. Overfit (previews copy your sprites, colours burn):

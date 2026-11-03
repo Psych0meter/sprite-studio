@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Train**: the list of checkpoint files no longer closes itself every time
+  the page refreshes during a training run (the same goes for Generate's
+  *More settings*).
+- **Train**: each checkpoint file has an **Add** button next to **Use**, so
+  checkpoints saved without previews (SDXL on a small card) can be installed
+  under their own name and compared on Compare LoRAs.
 - **Training**: SDXL training no longer runs an 8 GB card out of memory when
   it renders the preview images (hours in, at the end of epoch 2, after the
   checkpoint was saved). Under 12 GB SDXL saves its checkpoints without

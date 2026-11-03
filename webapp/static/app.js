@@ -626,6 +626,14 @@ window.addEventListener("hashchange", route);
 // Pages that work on a model: an empty state instead when there is none yet.
 const NEEDS_MODEL = ["generate", "train", "batch", "loras", "palettes"];
 
+// A <details> that stays open (or closed) when its page redraws, as the Train page does every few seconds.
+const OPEN_DETAILS = {};
+function keepOpen(key, d) {
+  d.open = !!OPEN_DETAILS[key];
+  d.addEventListener("toggle", () => { OPEN_DETAILS[key] = d.open; });
+  return d;
+}
+
 function head(title, text, ...actions) {
   return h("div", { class: "page-head" }, h("div", {}, h("h1", {}, title), text ? h("p", {}, text) : null), h("div", { class: "row" }, actions));
 }
@@ -790,7 +798,7 @@ routes.generate = async (main, _parts, params) => {
       h("div", { class: "field" }, h("label", { for: "f-size" }, "Size (px)"), h("input", { id: "f-size", type: "number", min: 8, max: 1024, step: 8, value: f.size, placeholder: (k && k.size) || m.size, oninput: (e) => { f.size = e.target.value; remember(); } })),
       h("div", { class: "field" }, h("label", { for: "f-seed" }, "Seed"), h("input", { id: "f-seed", type: "number", value: f.seed, placeholder: "random", oninput: (e) => { f.seed = e.target.value; } }))));
 
-    const adv = h("details", { style: { marginTop: "16px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, "More settings"));
+    const adv = keepOpen("generate-more", h("details", { style: { marginTop: "16px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, "More settings")));
     adv.append(h("div", { class: "inline-fields", style: { marginTop: "12px" } },
       h("div", { class: "field" }, h("label", { for: "f-lora" }, "LoRA"),
         h("select", { id: "f-lora", onchange: (e) => { f.lora = e.target.value; remember(); draw(); } }, loraOptions(m, f.lora))),
@@ -1242,9 +1250,15 @@ routes.train = async (main, parts) => {
           epochs.map((e) => h("td", {}, grid[pi][String(e)] ? h("img", { class: "px", src: fileUrl(grid[pi][String(e)]), alt: `epoch ${e}`, onclick: () => openSprite(grid[pi][String(e)], `Prompt ${Number(pi) + 1}, epoch ${e}`) }) : null))))));
       s3.append(h("div", { class: "preview-grid" }, table));
       if (!epochs.length) s3.append(h("p", { class: "muted small" }, "No previews yet."));
-      s3.append(h("details", { style: { marginTop: "12px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, `All ${info.checkpoints.length} checkpoint files`),
+      const addName = (k) => `${c.trigger}_${k.epoch === null ? "final" : "e" + k.epoch}${xl ? "_xl" : ""}`;
+      const isAdded = (k) => info.installed.some((i) => i.name === addName(k) + ".safetensors");
+      s3.append(keepOpen("train-files", h("details", { style: { marginTop: "12px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, `All ${info.checkpoints.length} checkpoint files`),
+        h("p", { class: "small muted" }, "Use installs a checkpoint as the LoRA the generator uses. Add installs it under its own name, to compare it with the others on Compare LoRAs."),
         h("table", {}, h("tbody", {}, info.checkpoints.map((k) => h("tr", {}, h("td", { class: "mono small" }, k.name), h("td", { class: "muted small" }, fmtMB(k.size)), h("td", { class: "muted small" }, fmtTime(k.mtime)),
-          h("td", {}, used === k.name ? h("span", { class: "tag ok" }, "in use") : h("button", { class: "btn sm", onclick: () => install(k.path, info.name) }, "Use"))))))));
+          h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end" } },
+            used === k.name ? h("span", { class: "tag ok" }, "in use") : h("button", { class: "btn sm primary", title: `Install as ${info.name}.safetensors, the one the generator uses`, onclick: () => install(k.path, info.name) }, "Use"),
+            isAdded(k) ? h("span", { class: "tag", title: `Installed as ${addName(k)}.safetensors` }, "added")
+              : h("button", { class: "btn sm", title: "Install under its own name, to compare", onclick: () => install(k.path, addName(k)) }, "Add"))))))))));
     }
     box.append(s3);
     if (running) schedule(running.kind === "train" ? 5000 : 1500);
