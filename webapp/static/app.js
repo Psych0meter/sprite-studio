@@ -225,7 +225,8 @@ function renderStatus() {
   line.innerHTML = "";
   line.append(h("span", {}, h("i", { class: "dot " + (c.up ? "up" : "down") }), c.up ? "ComfyUI running" : "ComfyUI stopped"));
   if (st.gpu) {
-    line.append(h("span", {}, `${st.gpu.name.replace("NVIDIA GeForce ", "")}  ${(st.gpu.mem_used / 1024).toFixed(1)} of ${(st.gpu.mem_total / 1024).toFixed(0)} GB, ${st.gpu.util} %, ${st.gpu.temp} °C`));
+    line.append(h("span", {}, `${st.gpu.name.replace("NVIDIA GeForce ", "")}  memory ${(st.gpu.mem_used / 1024).toFixed(1)} of ${(st.gpu.mem_total / 1024).toFixed(0)} GB, GPU busy ${st.gpu.util} %, ${st.gpu.temp} °C`));
+    line.lastChild.title = "Memory: what is allocated on the card. GPU busy: the share of time the card was computing (100 % while training or rendering is normal, it is not memory).";
   } else if (c.up && c.vram_total) {
     line.append(h("span", {}, `${(c.device || "GPU").replace("NVIDIA GeForce ", "")}  ${((c.vram_total - c.vram_free) / 1073741824).toFixed(1)} of ${(c.vram_total / 1073741824).toFixed(0)} GB in use`));
   }
@@ -1348,11 +1349,13 @@ routes.train = async (main, parts) => {
             (info.samples.times || {})[grid[pi][String(e)]] ? h("div", { class: "secs", title: "Render time" }, fmtDur(info.samples.times[grid[pi][String(e)]])) : null] : null))))));
       s3.append(h("div", { class: "preview-grid" }, table));
       if (!epochs.length) s3.append(h("p", { class: "muted small" }, "No previews yet: render them above."));
-      const addName = (k) => `${c.trigger}_${k.epoch === null ? "final" : "e" + k.epoch}${xl ? "_xl" : ""}`;
-      const isAdded = (k) => info.installed.some((i) => i.name === addName(k) + ".safetensors");
+      const epochOf = (k) => (k.epoch === null ? info.final_epoch : k.epoch);
+      const addName = (k) => `${c.trigger}_e${epochOf(k)}${xl ? "_xl" : ""}`;
+      const oldAddName = (k) => `${c.trigger}_${k.epoch === null ? "final" : "e" + k.epoch}${xl ? "_xl" : ""}`;
+      const isAdded = (k) => info.installed.some((i) => i.name === addName(k) + ".safetensors" || i.name === oldAddName(k) + ".safetensors");
       s3.append(keepOpen("train-files", h("details", { style: { marginTop: "12px" } }, h("summary", { class: "label", style: { cursor: "pointer" } }, `All ${info.checkpoints.length} checkpoint files`),
         h("p", { class: "small muted" }, "Use installs a checkpoint as the LoRA the generator uses. Add installs it under its own name, to compare it with the others on Compare LoRAs."),
-        h("table", {}, h("tbody", {}, info.checkpoints.map((k) => h("tr", {}, h("td", { class: "mono small" }, k.name), h("td", { class: "muted small" }, fmtMB(k.size)), h("td", { class: "muted small" }, fmtTime(k.mtime)),
+        h("table", {}, h("tbody", {}, info.checkpoints.map((k) => h("tr", {}, h("td", { class: "mono small" }, k.name), h("td", { class: "small" }, k.epoch === null ? `epoch ${epochOf(k)} (last)` : `epoch ${k.epoch}`), h("td", { class: "muted small" }, fmtMB(k.size)), h("td", { class: "muted small" }, fmtTime(k.mtime)),
           h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end" } },
             used === k.name ? h("span", { class: "tag ok" }, "in use") : h("button", { class: "btn sm primary", title: `Install as ${info.name}.safetensors, the one the generator uses`, onclick: () => install(k.path, info.name) }, "Use"),
             isAdded(k) ? h("span", { class: "tag", title: `Installed as ${addName(k)}.safetensors` }, "added")

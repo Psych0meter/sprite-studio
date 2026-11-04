@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Train**: the list of checkpoint files shows an epoch for each file; the
+  last one (which the trainer saves without a number) reads *epoch 8 (last)*.
+  *Add* names it with that epoch (`<trigger>_e8`) instead of `_final`.
+- **Status line**: reads *memory 6.5 of 8 GB, GPU busy 100 %*. The percentage
+  was always the share of time the card computes, not its memory.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added
