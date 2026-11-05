@@ -222,6 +222,7 @@ function renderStatus() {
   const st = S.status;
   const c = st.comfy;
   const line = $("#gpu-line");
+  if (st.version) $("#app-version").textContent = "Version " + st.version;
   line.innerHTML = "";
   line.append(h("span", {}, h("i", { class: "dot " + (c.up ? "up" : "down") }), c.up ? "ComfyUI running" : "ComfyUI stopped"));
   if (st.gpu) {
