@@ -318,7 +318,7 @@ class Jobs:
             else:
                 job["status"] = "failed"
                 job["error"] = log_error(job) or f"exited with code {rc}: see the log"
-        except Exception as e:  # noqa: BLE001 - shown to the user
+        except Exception as e:
             job["status"] = "failed"
             job["error"] = str(e)
             self._log(job, f"error: {e}")
@@ -627,7 +627,7 @@ def result_set(folder: Path) -> dict:
     for line in job_txt.splitlines():
         if line.startswith("prompt: "):
             prompt = line[8:]
-        elif line.startswith("what: ") or line.startswith("extra: "):
+        elif line.startswith(("what: ", "extra: ")):
             what = line.split(": ", 1)[1]
     variants = []
     for f in sorted(folder.glob("*.png")):
@@ -1343,8 +1343,7 @@ async def api_generate(request: Request):
         cmd += ["--mirror", b["mirror"]]
     if b.get("mask"):
         title = "Touch-up: " + title
-    job = JOBS.submit("generate", title, cmd, env=lora_env(b), out=out, meta={"count": count, "request": b})
-    return job
+    return JOBS.submit("generate", title, cmd, env=lora_env(b), out=out, meta={"count": count, "request": b})
 
 
 @app.post("/api/batch/plan")
@@ -1730,11 +1729,29 @@ def api_loras():
         free = shutil.disk_usage(lora_dir()).free
     return {"dir_ok": lora_dir().is_dir(), "files": lora_rows(), "disk_free": free}
 
+def existing_lora(name: str) -> Path | None:
+    """The LoRA file of this exact name in ComfyUI's folder (a file made outside the app may have spaces
+    that name_ok would change), else the one lora_filename gives; None when there is none."""
+    for n in (name if name.endswith(".safetensors") else name + ".safetensors", lora_filename(name)):
+        if n == Path(n).name and (lora_dir() / n).is_file():
+            return lora_dir() / n
+    return None
+
+
+
+def existing_lora(name: str) -> Path | None:
+    """The LoRA file of this exact name in ComfyUI's folder (a file made outside the app may have spaces
+    that name_ok would change), else the one lora_filename gives; None when there is none."""
+    for n in (name if name.endswith(".safetensors") else name + ".safetensors", lora_filename(name)):
+        if n == Path(n).name and (lora_dir() / n).is_file():
+            return lora_dir() / n
+    return None
+
 
 def lora_file(name: str) -> Path:
-    f = lora_dir() / lora_filename(name)
-    if not f.is_file():
-        raise HTTPException(404, f"{f.name} is not in ComfyUI's models/loras")
+    f = existing_lora(name)
+    if f is None:
+        raise HTTPException(404, f"{lora_filename(name)} is not in ComfyUI's models/loras")
     return f
 
 
@@ -1780,18 +1797,18 @@ async def api_loras_rename(request: Request):
 @app.post("/api/loras/delete")
 async def api_loras_delete(request: Request):
     b = await request.json()
-    names = [lora_filename(n) for n in b.get("names") or []]
+    names = [str(n) for n in b.get("names") or []]
     if not names:
         raise HTTPException(400, "nothing to delete")
     done = []
     with _lock:
         rec = _load("installed.json", {})
         for n in names:
-            f = lora_dir() / n
-            if f.is_file():
+            f = existing_lora(n)
+            if f is not None:
                 f.unlink()
-                done.append(n)
-            rec.pop(n, None)
+                done.append(f.name)
+                rec.pop(f.name, None)
         _save("installed.json", rec)
     return {"deleted": done}
 
@@ -2574,7 +2591,7 @@ async def api_palette_import(request: Request):
         f.write_bytes(base64.b64decode(mm.group(1)))
         try:
             pal = pm().pxtool.load_palette(str(f))
-        except Exception as e:  # noqa: BLE001 - a bad file: say so
+        except Exception as e:
             raise HTTPException(400, f"could not read {name}: {e}") from None
     if not pal.get("colours"):
         raise HTTPException(400, f"no colour found in {name}")

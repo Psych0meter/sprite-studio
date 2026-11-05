@@ -229,3 +229,23 @@ def test_lora_use_rename_delete(client, env):
     assert not (loras / "pxunit_best.safetensors").exists()
     assert client.post("/api/loras/rename", json={"name": "pxunit_best", "to": "y"}).status_code == 404
     assert client.post("/api/loras/delete", json={"names": []}).status_code == 400
+
+
+def test_lora_files_with_odd_names_can_be_renamed_and_deleted(client, env):
+    loras = env["comfy"] / "models" / "loras"
+    (loras / "my lora v1.safetensors").write_bytes(b"x")
+    (loras / "second one.safetensors").write_bytes(b"x")
+    assert [r["name"] for r in client.get("/api/loras").json()["files"]] == [
+        "my lora v1.safetensors",
+        "second one.safetensors",
+    ]
+    assert client.post("/api/loras/rename", json={"name": "my lora v1.safetensors", "to": "mine"}).json() == {
+        "renamed": "mine.safetensors"
+    }
+    assert client.post("/api/loras/delete", json={"names": ["second one.safetensors"]}).json() == {
+        "deleted": ["second one.safetensors"]
+    }
+    assert client.post("/api/loras/delete", json={"names": ["../x", "gone"]}).json() == {
+        "deleted": []
+    }  # nothing outside the folder
+    assert [r["name"] for r in client.get("/api/loras").json()["files"]] == ["mine.safetensors"]
