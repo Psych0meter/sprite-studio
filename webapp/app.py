@@ -148,7 +148,7 @@ def settings() -> dict:
     return s
 
 
-def P(key: str) -> Path:
+def setting_path(key: str) -> Path:
     return Path(settings()[key])
 
 
@@ -675,7 +675,7 @@ def _variants(d: Path) -> list[Path]:
 
 def scan_results() -> list[dict]:
     """Every result folder; "empty" ones (nothing rendered, e.g. every sprite failed) are flagged."""
-    out_root = P("px_output")
+    out_root = setting_path("px_output")
     items = []
     if not out_root.is_dir():
         return items
@@ -755,13 +755,13 @@ def busy_outputs() -> list[str]:
 
 
 def results_bin() -> Path:
-    return P("px_output") / ".bin"
+    return setting_path("px_output") / ".bin"
 
 
 def delete_result(path: str) -> str:
     """Moves a result folder (a run, a batch, a LoRA test, or one sprite inside a batch) to the bin."""
     p = safe_path(path)
-    out_root = P("px_output").resolve()
+    out_root = setting_path("px_output").resolve()
     if p == out_root or out_root not in p.parents or not p.is_dir():
         raise HTTPException(400, f"not a result folder: {path}")
     rel = p.relative_to(out_root)
@@ -817,7 +817,7 @@ def train_info(cat: str, model: str = "sd15") -> dict:
     c = model_cfg(cat)
     sfx = BASES[model]["suffix"]
     name = c["trigger"] + sfx
-    home = P("lora_home") / cat
+    home = setting_path("lora_home") / cat
     data, out = home / ("dataset" + sfx), home / ("output" + sfx)
     info: dict[str, Any] = {
         "category": cat,
@@ -914,12 +914,12 @@ def last_train_epochs(cat: str, model: str) -> int:
 
 def sdxl_ready() -> bool:
     """The SDXL base model is there, whole (a download in progress is smaller)."""
-    f = P("comfy_dir") / "models" / "checkpoints" / "sd_xl_base_1.0.safetensors"
+    f = setting_path("comfy_dir") / "models" / "checkpoints" / "sd_xl_base_1.0.safetensors"
     return f.is_file() and f.stat().st_size > 6_000_000_000
 
 
 def lora_dir() -> Path:
-    return P("comfy_dir") / "models" / "loras"
+    return setting_path("comfy_dir") / "models" / "loras"
 
 
 def lora_info(name: str, rec: dict | None = None) -> dict:
@@ -1147,11 +1147,11 @@ async def api_project_delete(request: Request):
 @app.get("/api/sprites")
 def api_sprites(root: str = "input", sub: str = ""):
     if root == "input":
-        return sprite_list(P("px_input"))
+        return sprite_list(setting_path("px_input"))
     if root == "game":
         if sub and ".." in sub:
             raise HTTPException(400, "bad folder")
-        return sprite_list(P("px_game"), sub, recursive=not sub)
+        return sprite_list(setting_path("px_game"), sub, recursive=not sub)
     raise HTTPException(400, "root is input or game")
 
 
@@ -1191,7 +1191,7 @@ async def api_upload(request: Request):
     m = re.match(r"data:image/png;base64,(.+)", b.get("data", ""))
     if not m:
         raise HTTPException(400, "send a PNG image")
-    folder = P("px_output") / "uploads"
+    folder = setting_path("px_output") / "uploads"
     folder.mkdir(parents=True, exist_ok=True)
     f = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name_ok(b.get('name', 'sketch.png'))}"
     if f.suffix != ".png":
@@ -1284,7 +1284,7 @@ async def api_generate(request: Request):
         raise HTTPException(400, "choose a kind")
     require_lora(m, name_ok(b["lora"]) if b.get("lora") else "")
     name = name_ok(b.get("name") or f"{kind['id'] if kind else m['id']}_{group['id']}")
-    out = str(P("px_output") / f"{name}_{stamp}")
+    out = str(setting_path("px_output") / f"{name}_{stamp}")
     cmd = [
         str(SCRIPTS / "pxmake.sh"),
         "--model",
@@ -1408,7 +1408,7 @@ async def api_batch(request: Request):
     plan = await api_batch_plan(request)
     cmd = batch_cmd(b)
     tag = cmd[cmd.index("--tag") + 1]
-    out = str(P("px_output") / f"batch-{tag}")
+    out = str(setting_path("px_output") / f"batch-{tag}")
     return JOBS.submit(
         "batch", f"Batch {tag}", cmd, env=lora_env(b), out=out, meta={"total": len(plan["todo"]), "request": b}
     )
@@ -1431,7 +1431,7 @@ async def api_matrix(request: Request):
         "TAG": tag,
         "SEED": str(body_get(b, "seed", 1000, int)),
     }
-    out = str(P("px_output") / f"matrix-{tag}")
+    out = str(setting_path("px_output") / f"matrix-{tag}")
     return JOBS.submit(
         "matrix",
         f"LoRA comparison: {m['label']} {tag}",
@@ -1519,7 +1519,7 @@ async def api_train_start(cat: str, request: Request):
 def submit_previews(cat: str, model: str, epochs: list[int] | None = None, prompts: int = PREVIEW_PROMPTS) -> dict:
     """A job rendering the training run's missing previews (pxpreviews.sh) in the GPU lane."""
     mcfg = model_cfg(cat)
-    out = P("lora_home") / cat / ("output" + BASES[model]["suffix"])
+    out = setting_path("lora_home") / cat / ("output" + BASES[model]["suffix"])
     if not any(out.glob("*.safetensors")):
         raise HTTPException(400, "no checkpoint to render: train this model first")
     env = {
@@ -1651,7 +1651,7 @@ def model_triggers() -> dict[str, dict]:
 def lora_results_count() -> dict[str, int]:
     """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt)."""
     counts: dict[str, int] = {}
-    root = P("px_output")
+    root = setting_path("px_output")
     if not root.is_dir():
         return counts
     for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt"):
@@ -2313,7 +2313,7 @@ async def api_results_restore(request: Request):
         if not origin.exists():
             continue
         rel = Path(origin.read_text().strip())
-        dst = P("px_output") / rel
+        dst = setting_path("px_output") / rel
         if dst.exists():
             continue
         origin.unlink()
@@ -2321,7 +2321,7 @@ async def api_results_restore(request: Request):
         shutil.move(str(d), str(dst))
         restored.append(str(rel))
         if len(rel.parts) == 3 and rel.parts[0].startswith("batch-"):
-            refresh_batch_sheet(P("px_output") / rel.parts[0], rel.parts[1])
+            refresh_batch_sheet(setting_path("px_output") / rel.parts[0], rel.parts[1])
     return {"restored": restored, "bin": bin_info()}
 
 
@@ -2617,7 +2617,7 @@ async def api_palette_apply(request: Request):
     <name>_pal-<id>.png. Body: {"paths": [...], "id": ..., "palette": {...}}."""
     b = await request.json()
     pal = clean_palette(b["palette"], b.get("id") or "edit") if b.get("palette") else read_palette(b.get("id", ""))
-    out_root = P("px_output").resolve()
+    out_root = setting_path("px_output").resolve()
     made = []
     for x in b.get("paths") or []:
         src = safe_path(x)
@@ -2804,7 +2804,7 @@ async def api_pick(request: Request):
 @app.post("/api/picks/export")
 def api_picks_export():
     picks = _load("picks.json", {})
-    dest = P("px_output") / "picked"
+    dest = setting_path("px_output") / "picked"
     dest.mkdir(parents=True, exist_ok=True)
     done = []
     for path, info in picks.items():
