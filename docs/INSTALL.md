@@ -195,6 +195,13 @@ variables give the defaults (the service sets the data folders):
 | `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `0.0.0.0` | the app's address |
 | `SG_WEB_PASSWORD` | none | ask for a password |
 | `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: jobs, logs, settings, picks |
+| `PX_SOURCES` | none | more source folders, as JSON: `{"tiles": "/mnt/x/tiles"}` (the Settings page has a field for the same purpose) |
+| `SG_SCRIPTS` | `scripts/` next to the app | where the app finds `pxmodel.py` and the other scripts |
+
+The command-line scripts read a few more: `PX_LORA` and `PX_LORA_STRENGTH` (the
+LoRA file and its strength for one `pxmake.sh` run), `PX_CKPT` and `PX_RES`
+(the base model and its size), `PX_HIRES` and `PX_HIRES_DENOISE` (a second
+pass at a larger size). Each script's `-h` says how it uses them.
 
 ## 7. Moving to another machine
 

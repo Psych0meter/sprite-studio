@@ -79,7 +79,7 @@ the app picks a free one when it creates a model.
 
 On a model's **Sprites** tab:
 
-- **Drop PNG files or a zip** (sub-folder names can become name prefixes:
+- **Drop PNG sprites or a zip of them** (sub-folder names can become name prefixes:
   `icons/map/x.png` becomes `map_x.png`), choosing the group and kind they
   go into, or letting their names decide.
 - **Import from a source folder**: the named folders of Settings (`input`,
