@@ -1729,15 +1729,6 @@ def api_loras():
         free = shutil.disk_usage(lora_dir()).free
     return {"dir_ok": lora_dir().is_dir(), "files": lora_rows(), "disk_free": free}
 
-def existing_lora(name: str) -> Path | None:
-    """The LoRA file of this exact name in ComfyUI's folder (a file made outside the app may have spaces
-    that name_ok would change), else the one lora_filename gives; None when there is none."""
-    for n in (name if name.endswith(".safetensors") else name + ".safetensors", lora_filename(name)):
-        if n == Path(n).name and (lora_dir() / n).is_file():
-            return lora_dir() / n
-    return None
-
-
 
 def existing_lora(name: str) -> Path | None:
     """The LoRA file of this exact name in ComfyUI's folder (a file made outside the app may have spaces
