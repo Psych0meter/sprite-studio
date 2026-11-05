@@ -73,7 +73,7 @@ def _quantize(cnt, k):
     data = []
     for c, n in cnt.items():
         data += [c] * max(1, int(math.sqrt(n)))
-    w = int(math.ceil(math.sqrt(len(data))))
+    w = math.ceil(math.sqrt(len(data)))
     data += [data[0]] * (w * w - len(data))
     img = Image.new("RGB", (w, w))
     img.putdata(data)
@@ -217,7 +217,7 @@ def describe_counts(cnt, neutral=False):
     total = sum(cnt.values())
     hull, light, glow = Counter(), 0, Counter()
     for c, n in cnt.items():
-        h, s, v = _hsv(c)
+        _h, s, v = _hsv(c)
         if v > 0.7 and s < 0.2:
             light += n
         elif v > 0.45 and s > 0.45:

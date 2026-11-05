@@ -379,7 +379,7 @@ def describe(m, paths):
     return pxtool.describe(paths, neutral=is_neutral(m)) if paths else ""
 
 
-def target_size(m, kind, w, h):
+def target_size(kind, w, h):
     if kind and kind.get("size"):
         return int(kind["size"])
     return max(w, h)
@@ -413,7 +413,7 @@ def dataset(m, dst, res=512, repeats=0):
             continue
         g = next(g for g in m["groups"] if g["id"] == s["group"])
         k = next((k for k in m["kinds"] if k["id"] == s["kind"]), None)
-        rows.append((s, caption(m, g, k, s["words"], describe(m, [s["path"]])), target_size(m, k, s["w"], s["h"])))
+        rows.append((s, caption(m, g, k, s["words"], describe(m, [s["path"]])), target_size(k, s["w"], s["h"])))
     if not rows:
         raise SystemExit(f"model {m['id']}: no sprite to learn from (add sprites, and put them in an enabled group)")
     if not repeats:
@@ -547,7 +547,7 @@ def preview_plan(m, out_dir, name, res=512, epochs=None, prompts=2, final_epoch=
     for i, ln in enumerate(x for x in text.splitlines() if x.strip()):
         g = PREVIEW_LINE.match(ln)
         if g:
-            p, n, w, _h, steps, cfg, seed = g.groups()
+            p, n, _w, _h, steps, cfg, seed = g.groups()
             lines.append((i, p, n, int(steps), float(cfg), int(seed)))
         else:  # a hand-edited line: its text, with the usual settings
             lines.append((i, ln.split(" --")[0], negative(m), 28, 7.0, i + 1))

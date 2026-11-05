@@ -43,7 +43,7 @@ def _comfy_reason(e):
     """The readable part of a ComfyUI error answer (a bad file name, a node error)."""
     try:
         body = json.loads(e.read())
-    except Exception:  # noqa: BLE001 - not JSON: show the HTTP status
+    except Exception:
         return f"HTTP {e.code}"
     parts = []
     err = body.get("error") or {}
@@ -59,7 +59,7 @@ def check_files(a):
     """Stops early, with the fix, when the checkpoint or the LoRA isn't in ComfyUI."""
     try:
         info = _get_json(a.server, "/object_info/LoraLoader")["LoraLoader"]["input"]["required"]
-    except Exception:  # noqa: BLE001 - an older ComfyUI: let the job itself report
+    except Exception:
         return None
     loras, _ckpts = info["lora_name"][0], info.get("ckpt_name", [None])[0]
     if a.lora not in loras:
@@ -73,7 +73,7 @@ def check_files(a):
         ck = _get_json(a.server, "/object_info/CheckpointLoaderSimple")["CheckpointLoaderSimple"]["input"]["required"]
         if a.ckpt not in ck["ckpt_name"][0]:
             return f"error: the base model {a.ckpt} isn't in ComfyUI's models/checkpoints"
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return None
 
