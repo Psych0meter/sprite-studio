@@ -1595,6 +1595,96 @@ routes.loras = async (main) => {
       : h("p", { class: "muted" }, "None yet.")));
 };
 
+// ---------------------------------------------------------------- LoRA files
+
+routes.lorafiles = async (main) => {
+  await loadCatalog();
+  const state = Object.assign({ model: "", find: "", sort: "date" }, store.get("lorafiles", {}));
+  const keep = () => store.set("lorafiles", state);
+  const picked = new Set();
+  main.append(head("LoRA files", "Every LoRA in ComfyUI's models/loras: where it comes from, which one a model generates with, and what it was used for. Install, rename or delete them here."));
+  const body = h("div", {});
+  main.append(body);
+  const load = async () => {
+    const data = await api("/loras");
+    body.innerHTML = "";
+    const files = data.files;
+    if (!data.dir_ok) {
+      body.append(h("div", { class: "note warn" }, "ComfyUI's models/loras folder is not visible from here (Settings, ComfyUI folder)."));
+      return;
+    }
+    const models = [...new Map(files.filter((f) => f.model).map((f) => [f.model, f.model_label])).entries()];
+    const q = state.find.trim().toLowerCase();
+    const shown = files.filter((f) => (!state.model || f.model === state.model || (state.model === "-" && !f.model)) && (!q || f.name.toLowerCase().includes(q)));
+    const sorts = {
+      date: (a, b) => b.mtime - a.mtime,
+      name: (a, b) => a.name.localeCompare(b.name),
+      model: (a, b) => (a.model_label || "~").localeCompare(b.model_label || "~") || (a.epoch || 0) - (b.epoch || 0),
+      size: (a, b) => b.size - a.size,
+    };
+    shown.sort(sorts[state.sort] || sorts.date);
+    const total = files.reduce((n, f) => n + f.size, 0);
+    const act = async (fn, msg) => { if (await attempt(fn, msg)) { await loadCatalog(); load(); } };
+    body.append(h("div", { class: "row", style: { marginBottom: "12px", gap: "10px", flexWrap: "wrap" } },
+      h("select", { "aria-label": "Model", style: { width: "auto" }, onchange: (e) => { state.model = e.target.value; keep(); load(); } },
+        h("option", { value: "" }, "All models"),
+        models.map(([id, label]) => h("option", { value: id, selected: id === state.model }, label)),
+        files.some((f) => !f.model) ? h("option", { value: "-", selected: state.model === "-" }, "No model") : null),
+      h("input", { type: "search", placeholder: "Find a name", style: { width: "220px" }, value: state.find, "aria-label": "Find", oninput: (e) => { state.find = e.target.value; keep(); }, onchange: () => load() }),
+      h("select", { "aria-label": "Sort", style: { width: "auto" }, onchange: (e) => { state.sort = e.target.value; keep(); load(); } },
+        [["date", "Newest first"], ["name", "Name"], ["model", "Model, then epoch"], ["size", "Largest first"]].map(([v, t]) => h("option", { value: v, selected: v === state.sort }, t))),
+      h("span", { class: "muted small", style: { marginLeft: "auto" } }, `${files.length} files, ${fmtMB(total)}` + (data.disk_free != null ? `, ${(data.disk_free / 1073741824).toFixed(0)} GB free on the disk` : ""))));
+    if (!shown.length) {
+      body.append(h("p", { class: "muted" }, files.length ? "No file matches." : "No LoRA installed yet: train a model, then Use an epoch on the Train page."));
+      return;
+    }
+    for (const n of [...picked]) if (!files.some((f) => f.name === n)) picked.delete(n);
+    const sel = files.filter((f) => picked.has(f.name));
+    const modelsPicked = [...new Set(sel.map((f) => f.model))];
+    body.append(h("div", { class: "row", style: { marginBottom: "8px", gap: "8px", minHeight: "30px" } },
+      sel.length ? [
+        h("span", { class: "small" }, `${sel.length} selected`),
+        h("button", { class: "btn sm", disabled: modelsPicked.length !== 1 || !modelsPicked[0], title: "Open Compare LoRAs with these files ticked (files of one model)",
+          onclick: () => { store.set("matrix", Object.assign({ strengths: "0.8 1.0", seed: 1000, tag: "" }, store.get("matrix", {}), { model: modelsPicked[0], loras: sel.map((f) => f.name) })); location.hash = "#/loras"; } }, "Compare"),
+        h("button", { class: "btn sm danger", onclick: async () => {
+          const inUse = sel.filter((f) => f.in_use);
+          const msg = `Delete ${sel.length} LoRA file(s) from ComfyUI? ${fmtMB(sel.reduce((n, f) => n + f.size, 0))} are freed. The trained checkpoints of the Train page are kept.` +
+            (inUse.length ? ` ${inUse.map((f) => f.name).join(", ")} is what a model generates with: it will have no LoRA until you install another one.` : "");
+          if (await askConfirm(msg, { danger: true, ok: "Delete", title: "Delete LoRA files" })) { const names = sel.map((f) => f.name); picked.clear(); act(() => api("/loras/delete", { body: { names } }), "Deleted"); }
+        } }, "Delete"),
+        h("button", { class: "btn sm ghost", onclick: () => { picked.clear(); load(); } }, "Clear")] : null));
+    const allBox = h("input", { type: "checkbox", "aria-label": "Select all", checked: shown.every((f) => picked.has(f.name)), onchange: (e) => { shown.forEach((f) => (e.target.checked ? picked.add(f.name) : picked.delete(f.name))); load(); } });
+    body.append(h("div", { class: "panel", style: { padding: 0, overflowX: "auto" } }, h("table", { class: "lora-table" },
+      h("thead", {}, h("tr", {}, h("th", {}, allBox), h("th", {}, "Name"), h("th", {}, "Model"), h("th", {}, "Base"), h("th", {}, "Epoch"), h("th", {}, "Date"), h("th", {}, "Size"),
+        h("th", { title: "Result folders rendered with this file" }, "Results"), h("th", {}, ""))),
+      h("tbody", {}, shown.map((f) => h("tr", {},
+        h("td", {}, h("input", { type: "checkbox", "aria-label": "Select " + f.name, checked: picked.has(f.name), onchange: (e) => { if (e.target.checked) picked.add(f.name); else picked.delete(f.name); load(); } })),
+        h("td", {}, h("div", { class: "mono small" }, f.name), f.in_use ? h("span", { class: "tag ok", title: `The ${f.in_use} LoRA that ${f.model_label} generates with` }, `in use, ${f.in_use}`) : null),
+        h("td", {}, f.model_label ? h("a", { href: "#/train/" + f.model }, f.model_label) : h("span", { class: "muted" }, "unknown")),
+        h("td", {}, f.base),
+        h("td", {}, f.epoch != null ? "epoch " + f.epoch : f.final ? "last epoch" : h("span", { class: "muted", title: "Copied outside the app, and the name has no epoch" }, "?")),
+        h("td", {}, h("span", { class: "small", title: f.known ? `Trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)}` : "File date" }, fmtTime(f.known && f.trained ? f.trained : f.mtime))),
+        h("td", {}, h("span", { class: "muted small" }, fmtMB(f.size))),
+        h("td", {}, f.results ? h("span", { class: "small" }, String(f.results)) : h("span", { class: "muted" }, "0")),
+        h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end", flexWrap: "nowrap" } },
+          f.model && !f.in_use ? h("button", { class: "btn sm primary", title: `Install as the ${f.base} LoRA that ${f.model_label} generates with`,
+            onclick: () => act(() => api("/loras/use", { body: { name: f.name } }), "Installed as the one in use") }, "Use") : null,
+          h("button", { class: "btn sm", disabled: !!f.in_use, title: f.in_use ? "The LoRA a model generates with keeps its name" : "Rename",
+            onclick: async () => {
+              const cur = f.name.replace(/\.safetensors$/, "");
+              const to = await askText("Rename the LoRA", { input: "New name", value: cur, ok: "Rename" });
+              if (to && to !== cur) act(() => api("/loras/rename", { body: { name: f.name, to } }), "Renamed");
+            } }, "Rename"),
+          h("button", { class: "btn sm danger", title: "Delete this file",
+            onclick: async () => {
+              const msg = `Delete ${f.name} from ComfyUI? ${fmtMB(f.size)} are freed.` + (f.in_use ? ` It is what ${f.model_label} generates with: install another one afterwards.` : "");
+              if (await askConfirm(msg, { danger: true, ok: "Delete", title: "Delete a LoRA file" })) { picked.delete(f.name); act(() => api("/loras/delete", { body: { names: [f.name] } }), "Deleted"); }
+            } }, "Delete")))))))));
+    body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes: renaming a file does not change old ones."));
+  };
+  await load();
+};
+
 // ---------------------------------------------------------------- Models
 
 routes.models = async (main, parts) => {

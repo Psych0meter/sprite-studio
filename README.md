@@ -25,6 +25,8 @@ web app and a set of command-line tools.
   model's grid, colours limited to 64, outline, optional symmetry and fill.
 - **Batches**: remaster every sprite of a model, or invent N new ones per
   group and kind, resumable, with comparison sheets.
+- **LoRA files**: every installed LoRA in a table (model, epoch, date, size,
+  results made with it); install, rename or delete them.
 - **Palettes**: colours and a tuning (brightness, contrast, saturation, hue,
   light from the top) put on what is generated; taken from sprites or a batch,
   imported from `.hex` / `.gpl` / images, computed automatically to match

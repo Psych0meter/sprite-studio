@@ -1593,33 +1593,207 @@ async def api_train_caption(cat: str, request: Request):
     return {"ok": True}
 
 
+def install_lora(src: Path, name: str, model: str, meta: dict | None = None) -> dict:
+    """Copies a LoRA file into ComfyUI's loras folder as `name` and records where it came from
+    (`meta` overrides what is read from the source's own name)."""
+    lora_dir().mkdir(parents=True, exist_ok=True)
+    dst = lora_dir() / name
+    shutil.copy2(src, dst)
+    m = re.search(r"-(\d+)$", src.stem)
+    entry = {
+        "model": model,
+        "checkpoint": src.name,
+        "epoch": int(m.group(1)) if m else None,
+        "final": not m,
+        "trained": src.stat().st_mtime,
+    }
+    entry.update(meta or {})
+    entry.update(installed=time.time(), size=dst.stat().st_size, mtime=dst.stat().st_mtime)
+    with _lock:
+        rec = _load("installed.json", {})
+        rec[name] = entry
+        _save("installed.json", rec)
+    return entry
+
+
+def lora_filename(s: str) -> str:
+    """A safe LoRA file name from what the browser sent (always ends in .safetensors)."""
+    name = name_ok(s)
+    return name if name.endswith(".safetensors") else name + ".safetensors"
+
+
 @app.post("/api/train/{cat}/install")
 async def api_train_install(cat: str, request: Request):
     b = await request.json()
     src = safe_path(b.get("checkpoint", ""))
     if src.suffix != ".safetensors" or not src.is_file():
         raise HTTPException(400, "not a checkpoint")
-    name = name_ok(b.get("as") or model_cfg(cat)["trigger"])
-    if not name.endswith(".safetensors"):
-        name += ".safetensors"
-    lora_dir().mkdir(parents=True, exist_ok=True)
-    dst = lora_dir() / name
-    shutil.copy2(src, dst)
-    m = re.search(r"-(\d+)$", src.stem)
+    name = lora_filename(b.get("as") or model_cfg(cat)["trigger"])
+    install_lora(src, name, cat)
+    return {"installed": name, "lora": lora_info(name)}
+
+
+# ---- LoRA files in ComfyUI: list, use, rename, delete
+
+
+def model_triggers() -> dict[str, dict]:
+    """id -> {label, trigger} of every model that loads."""
+    out = {}
+    p = pm()
+    for mid in p.list_models():
+        try:
+            m = p.load(mid)
+        except SystemExit:
+            continue
+        out[mid] = {"label": m["label"], "trigger": m["trigger"]}
+    return out
+
+
+def lora_results_count() -> dict[str, int]:
+    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt)."""
+    counts: dict[str, int] = {}
+    root = P("px_output")
+    if not root.is_dir():
+        return counts
+    for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt"):
+        for jt in root.glob(pattern):
+            if any(part.startswith(".") for part in jt.relative_to(root).parts):
+                continue  # the bin
+            try:
+                with open(jt, errors="replace") as fh:
+                    head = fh.readline()
+            except OSError:
+                continue
+            m = re.search(r"\blora=(\S+)", head)
+            if m:
+                counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+    return counts
+
+
+def lora_guess_model(name: str, models: dict[str, dict]) -> str:
+    """The model a LoRA file belongs to by its name (the longest trigger it starts with)."""
+    best = ""
+    for mid, m in models.items():
+        t = m["trigger"]
+        if (
+            name.startswith(t)
+            and re.match(r"[._-]", name[len(t) :] or ".")
+            and len(t) > len(models.get(best, {}).get("trigger", ""))
+        ):
+            best = mid
+    return best
+
+
+def lora_rows() -> list[dict]:
+    models = model_triggers()
+    rec = _load("installed.json", {})
+    counts = lora_results_count()
+    defaults = {}
+    for mid, m in models.items():
+        defaults[m["trigger"] + ".safetensors"] = (mid, "SD 1.5")
+        defaults[m["trigger"] + "_xl.safetensors"] = (mid, "SDXL")
+    rows = []
+    for f in sorted(lora_dir().glob("*.safetensors")) if lora_dir().is_dir() else []:
+        info = lora_info(f.name, rec)
+        model = info.get("model") or lora_guess_model(f.name, models)
+        epoch, final = info.get("epoch"), info.get("final")
+        if "checkpoint" not in info:  # copied outside the app: read what the name says
+            em = re.search(r"_e(\d+)(?:_xl)?$", f.stem) or re.search(r"-(\d+)$", f.stem)
+            epoch = int(em.group(1)) if em else None
+        d = defaults.get(f.name)
+        rows.append(
+            {
+                "name": f.name,
+                "size": info["size"],
+                "mtime": info["mtime"],
+                "model": model,
+                "model_label": models.get(model, {}).get("label", ""),
+                "base": "SDXL" if info["xl"] else "SD 1.5",
+                "epoch": epoch,
+                "final": bool(final),
+                "known": "checkpoint" in info,
+                "trained": info.get("trained"),
+                "installed_at": info.get("installed_at"),
+                "checkpoint": info.get("checkpoint"),
+                "in_use": d[1] if d else "",
+                "in_use_model": d[0] if d else "",
+                "results": counts.get(f.name, 0),
+            }
+        )
+    return rows
+
+
+@app.get("/api/loras")
+def api_loras():
+    free = None
+    if lora_dir().is_dir():
+        free = shutil.disk_usage(lora_dir()).free
+    return {"dir_ok": lora_dir().is_dir(), "files": lora_rows(), "disk_free": free}
+
+
+def lora_file(name: str) -> Path:
+    f = lora_dir() / lora_filename(name)
+    if not f.is_file():
+        raise HTTPException(404, f"{f.name} is not in ComfyUI's models/loras")
+    return f
+
+
+@app.post("/api/loras/use")
+async def api_loras_use(request: Request):
+    """Installs a LoRA file as its model's default (<trigger>.safetensors, or <trigger>_xl.safetensors for SDXL)."""
+    b = await request.json()
+    src = lora_file(b.get("name", ""))
+    row = next((r for r in lora_rows() if r["name"] == src.name), None)
+    mid = b.get("model") or (row or {}).get("model")
+    models = model_triggers()
+    if mid not in models:
+        raise HTTPException(400, "Which model is this LoRA for? Its name does not tell.")
+    dst = models[mid]["trigger"] + ("_xl" if "_xl" in src.stem else "") + ".safetensors"
+    if dst == src.name:
+        raise HTTPException(400, "This LoRA is already the one in use.")
+    meta = {k: row[k] for k in ("epoch", "final", "checkpoint", "trained")} if row and row["known"] else {}
+    install_lora(src, dst, mid, meta)
+    return {"installed": dst}
+
+
+@app.post("/api/loras/rename")
+async def api_loras_rename(request: Request):
+    b = await request.json()
+    src = lora_file(b.get("name", ""))
+    dst = lora_dir() / lora_filename(b.get("to", ""))
+    reserved = {m["trigger"] + sfx + ".safetensors" for m in model_triggers().values() for sfx in ("", "_xl")}
+    if src.name in reserved:
+        raise HTTPException(400, "This is the LoRA a model generates with: install another one with Use instead.")
+    if dst.name in reserved:
+        raise HTTPException(400, "That name is a model's own: use the Use button to install a LoRA as the one in use.")
+    if dst.exists():
+        raise HTTPException(400, f"{dst.name} already exists")
+    with _lock:
+        src.rename(dst)
+        rec = _load("installed.json", {})
+        if src.name in rec:
+            rec[dst.name] = rec.pop(src.name)
+            _save("installed.json", rec)
+    return {"renamed": dst.name}
+
+
+@app.post("/api/loras/delete")
+async def api_loras_delete(request: Request):
+    b = await request.json()
+    names = [lora_filename(n) for n in b.get("names") or []]
+    if not names:
+        raise HTTPException(400, "nothing to delete")
+    done = []
     with _lock:
         rec = _load("installed.json", {})
-        rec[name] = {
-            "model": cat,
-            "checkpoint": src.name,
-            "epoch": int(m.group(1)) if m else None,
-            "final": not m,
-            "trained": src.stat().st_mtime,
-            "installed": time.time(),
-            "size": dst.stat().st_size,
-            "mtime": dst.stat().st_mtime,
-        }
+        for n in names:
+            f = lora_dir() / n
+            if f.is_file():
+                f.unlink()
+                done.append(n)
+            rec.pop(n, None)
         _save("installed.json", rec)
-    return {"installed": name, "lora": lora_info(name)}
+    return {"deleted": done}
 
 
 # ---- models (pxmodel.py): groups, kinds, sprites

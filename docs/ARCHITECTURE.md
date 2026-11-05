@@ -59,7 +59,7 @@ scripts/
 | `$PX_OUTPUT/batch-<tag>/<kind>/<sprite>/` | one sprite of a batch (same layout); `sheet_<kind>.png`, `batch.log` |
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
-| `$SG_WEB_STATE/` | `settings.json`, `jobs.json`, `logs/`, `picks.json`, `installed.json` (which checkpoint each installed LoRA is), `projects.json` (projects with no model yet) |
+| `$SG_WEB_STATE/` | `settings.json`, `jobs.json`, `logs/`, `picks.json`, `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -138,6 +138,10 @@ convention (0 ok, 4 some failed, 1 none made). In the app this is the
 ComfyUI like generation); a training request with `previews_after` queues
 it when the run finishes (`follow_up`). `GET /api/train/<model>` reports
 `previews_todo`, `previews_by_epoch` and `final_epoch`.
+`GET /api/loras` lists ComfyUI's LoRA files (model from `installed.json`, else from the
+trigger the name starts with; epoch; the number of results whose `job.txt` names the file);
+`POST /api/loras/use|rename|delete` change them (a model's own `<trigger>[_xl].safetensors`
+cannot be renamed or a rename target).
 `GET /api/models/<id>/prompt?group=&kind=` returns the prompt the model builds
 for a group and a kind; the Preview prompts editor uses it to start a row.
 The stored `previews` list is unchanged (`"prompt --n words to avoid"`).

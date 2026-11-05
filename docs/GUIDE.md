@@ -47,6 +47,7 @@ ignores the starting image. The render is then cleaned into a sprite.
 3. **Generate** or **Batch**: remaster sprites, invent new ones.
 4. **Palettes**: fix colours and light that come out wrong.
 5. **Results**: compare, star the keepers, export them.
+6. **LoRA files**: install, rename or delete the LoRAs you no longer need.
 
 ## 3. Models
 
@@ -299,6 +300,29 @@ shows what will run and how long it should take on your card.
 remaster per group) with each LoRA file and strength you tick, on fixed
 seeds, one sheet per subject: to choose between epochs, or between SD 1.5
 and SDXL.
+
+### 5.6 Managing LoRA files
+
+**LoRA files** lists every LoRA in ComfyUI's `models/loras` folder as a
+table: name, the model it belongs to, base (SD 1.5 or SDXL), epoch, date,
+size, and *Results*, the number of result folders rendered with it. A tag
+shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
+
+- **Use** installs a file as the one its model generates with (same as
+  *Use* on the Train page, for files you added earlier). The SDXL file is
+  kept apart from the SD 1.5 one.
+- **Rename** a file. The one in use keeps its name, because the name is how
+  the app finds it; a name that belongs to a model is refused.
+- **Delete** one file, or tick several and delete them together. The
+  trained checkpoints of the Train page are never touched, so a deleted
+  LoRA can be installed again. Deleting the one in use leaves the model
+  without a LoRA until you install another.
+- **Compare** (with files ticked) opens Compare LoRAs with them selected.
+- Filter by model, find a name, sort by date, name, model or size. The top
+  right shows the total size and the free disk space.
+
+A file copied into the folder by hand shows its model from its name and its
+epoch only when the name says it (`_e6`); otherwise the epoch reads `?`.
 
 ## 6. Results
 

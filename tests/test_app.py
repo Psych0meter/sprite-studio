@@ -158,3 +158,74 @@ def test_model_prompt_endpoint_builds_a_prompt_for_a_group(client, env):
     r = client.get("/api/models/units/prompt", params={"group": m["groups"][0]["id"]})
     assert r.status_code == 200 and r.json()["prompt"].startswith(m["trigger"])
     assert client.get("/api/models/units/prompt", params={"group": "nope"}).status_code == 400
+
+
+def _lora_setup(client, env):
+    client.post("/api/models", json={"id": "units", "label": "Units", "trigger": "pxunit"})
+    out = env["lora"] / "units" / "output"
+    out.mkdir(parents=True)
+    (out / "pxunit-000004.safetensors").write_bytes(b"four")
+    (out / "pxunit.safetensors").write_bytes(b"last!")
+    return out
+
+
+def test_lora_files_are_listed_with_their_origin(client, env):
+    out = _lora_setup(client, env)
+    client.post("/api/train/units/install", json={"checkpoint": str(out / "pxunit-000004.safetensors")})
+    client.post("/api/train/units/install", json={"checkpoint": str(out / "pxunit.safetensors"), "as": "pxunit_final"})
+    (env["comfy"] / "models" / "loras" / "pxunit_e8.safetensors").write_bytes(b"copied")  # outside the app
+    (env["comfy"] / "models" / "loras" / "other.safetensors").write_bytes(b"?")
+    job = env["output"] / "run_1"
+    job.mkdir()
+    (job / "job.txt").write_text("name=a model=units lora=pxunit.safetensors res=512\n")
+    data = client.get("/api/loras").json()
+    rows = {r["name"]: r for r in data["files"]}
+    assert data["dir_ok"] and set(rows) == {
+        "pxunit.safetensors",
+        "pxunit_final.safetensors",
+        "pxunit_e8.safetensors",
+        "other.safetensors",
+    }
+    d = rows["pxunit.safetensors"]
+    assert (d["model"], d["epoch"], d["in_use"], d["known"], d["results"]) == ("units", 4, "SD 1.5", True, 1)
+    assert rows["pxunit_final.safetensors"]["final"] and rows["pxunit_final.safetensors"]["epoch"] is None
+    assert (
+        rows["pxunit_e8.safetensors"]["model"],
+        rows["pxunit_e8.safetensors"]["epoch"],
+        rows["pxunit_e8.safetensors"]["known"],
+    ) == ("units", 8, False)
+    assert rows["other.safetensors"]["model"] == "" and rows["other.safetensors"]["in_use"] == ""
+
+
+def test_lora_use_rename_delete(client, env):
+    out = _lora_setup(client, env)
+    loras = env["comfy"] / "models" / "loras"
+    client.post(
+        "/api/train/units/install", json={"checkpoint": str(out / "pxunit-000004.safetensors"), "as": "pxunit_e4"}
+    )
+    # Use: the file becomes the model's own, keeping where it came from
+    assert client.post("/api/loras/use", json={"name": "pxunit_e4"}).json() == {"installed": "pxunit.safetensors"}
+    assert (loras / "pxunit.safetensors").read_bytes() == b"four"
+    rows = {r["name"]: r for r in client.get("/api/loras").json()["files"]}
+    assert rows["pxunit.safetensors"]["epoch"] == 4 and rows["pxunit.safetensors"]["in_use"] == "SD 1.5"
+    assert client.post("/api/loras/use", json={"name": "pxunit"}).status_code == 400  # already the one in use
+    # rename: not the one in use, not onto a model's own name, not over a file
+    assert client.post("/api/loras/rename", json={"name": "pxunit", "to": "x"}).status_code == 400
+    assert client.post("/api/loras/rename", json={"name": "pxunit_e4", "to": "pxunit_xl"}).status_code == 400
+    (loras / "pxunit_b.safetensors").write_bytes(b"b")
+    assert client.post("/api/loras/rename", json={"name": "pxunit_e4", "to": "pxunit_b"}).status_code == 400
+    assert client.post("/api/loras/rename", json={"name": "pxunit_e4", "to": "pxunit_best"}).json() == {
+        "renamed": "pxunit_best.safetensors"
+    }
+    rows = {r["name"]: r for r in client.get("/api/loras").json()["files"]}
+    assert (
+        rows["pxunit_best.safetensors"]["epoch"] == 4 and rows["pxunit_best.safetensors"]["known"]
+    )  # the record followed
+    # delete, and a missing file is a clear refusal
+    assert client.post("/api/loras/delete", json={"names": ["pxunit_best", "pxunit_b"]}).json()["deleted"] == [
+        "pxunit_best.safetensors",
+        "pxunit_b.safetensors",
+    ]
+    assert not (loras / "pxunit_best.safetensors").exists()
+    assert client.post("/api/loras/rename", json={"name": "pxunit_best", "to": "y"}).status_code == 404
+    assert client.post("/api/loras/delete", json={"names": []}).status_code == 400

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LoRA files**: a new page lists every LoRA in ComfyUI's loras folder (name,
+  model, base, epoch, date, size, number of results made with it, and which
+  one each model generates with). **Use** installs a file as the model's own,
+  **Rename** and **Delete** manage them (several at once), **Compare** opens
+  Compare LoRAs with the ticked files.
 - **Menu**: the version of the app is shown at the bottom of the left menu.
 
 ### Changed
