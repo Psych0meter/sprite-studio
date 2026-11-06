@@ -1358,6 +1358,14 @@ async def api_batch_plan(request: Request):
     return {"todo": todo, "done": int(m.group(1)) if m else 0, "skipped": skipped, "error": r.stderr.strip()[-500:]}
 
 
+def default_batch_tag(m: dict, b: dict) -> str:
+    """The folder name of a batch nobody named: model, LoRA and date, so that batches of other models or LoRAs
+    on the same day do not end up in one folder (and a rerun of the same one still continues)."""
+    lora = re.sub(r"\.safetensors$", "", name_ok(b["lora"])) if b.get("lora") else "default"
+    mode = "-invent" if b.get("mode") == "invent" else ""
+    return f"{m['id']}-{lora}-{dt.date.today():%Y%m%d}{mode}"
+
+
 def batch_cmd(b: dict) -> list[str]:
     m = model_cfg(body_model(b))
     cmd = [
@@ -1365,7 +1373,7 @@ def batch_cmd(b: dict) -> list[str]:
         "--model",
         m["id"],
         "--tag",
-        name_ok(b.get("tag") or dt.date.today().strftime("%Y%m%d")),
+        name_ok(b.get("tag") or default_batch_tag(m, b)),
     ]
     groups = [g["id"] for g in m["groups"] if g["id"] in (b.get("groups") or [])]
     kinds = [k["id"] for k in m["kinds"] if k["id"] in (b.get("kinds") or [])]

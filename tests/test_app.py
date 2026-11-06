@@ -249,3 +249,16 @@ def test_lora_files_with_odd_names_can_be_renamed_and_deleted(client, env):
         "deleted": []
     }  # nothing outside the folder
     assert [r["name"] for r in client.get("/api/loras").json()["files"]] == ["mine.safetensors"]
+
+
+def test_unnamed_batches_get_their_own_folder_name(client):
+    import datetime as dt
+    import sys
+
+    app = sys.modules["app"]
+    day = f"{dt.date.today():%Y%m%d}"
+    m = {"id": "units"}
+    assert app.default_batch_tag(m, {}) == f"units-default-{day}"
+    assert app.default_batch_tag(m, {"lora": "pxunit_e6.safetensors"}) == f"units-pxunit_e6-{day}"
+    assert app.default_batch_tag(m, {"lora": "pxunit_e6", "mode": "invent"}) == f"units-pxunit_e6-{day}-invent"
+    assert app.default_batch_tag(m, {"lora": "pxunit_e6"}) != app.default_batch_tag(m, {"lora": "pxunit_e8"})

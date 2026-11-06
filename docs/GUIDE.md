@@ -291,7 +291,9 @@ with comparison sheets per kind:
 - **Invent new sprites**: N new designs for each group and kind, with an
   optional list of ideas (one per line) used in turn.
 
-A batch with the same name continues where it stopped. *Preview the list*
+A batch with the same name continues where it stopped. Left empty, the name
+is the model, the LoRA and the date (`units-pxunit_e6-20261106`), so batches
+of other models or LoRAs never share a folder. *Preview the list*
 shows what will run and how long it should take on your card.
 
 ### 5.5 Comparing LoRAs

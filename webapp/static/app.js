@@ -1509,7 +1509,7 @@ routes.batch = async (main) => {
       m.kinds.length ? h("div", { class: "field" }, h("span", { class: "label" }, "Kinds"), chipSet(m.kinds, "kinds"),
         h("div", { class: "hint" }, "None selected: all of them.")) : null,
       h("div", { class: "field" }, h("label", { for: "b-tag" }, "Batch name"),
-        h("input", { id: "b-tag", type: "text", value: b.tag, placeholder: "today's date", oninput: (e) => { b.tag = e.target.value; keep(); } }),
+        h("input", { id: "b-tag", type: "text", value: b.tag, placeholder: "model, LoRA and date", oninput: (e) => { b.tag = e.target.value; keep(); } }),
         h("div", { class: "hint" }, "Same name as an earlier batch: it continues that one.")),
       h("div", { class: "inline-fields", style: { marginTop: "14px" } },
         h("div", { class: "field" }, h("label", { for: "b-n" }, "Variants each"), h("input", { id: "b-n", type: "number", min: 1, max: 8, value: b.count, oninput: (e) => { b.count = e.target.value; keep(); } })),

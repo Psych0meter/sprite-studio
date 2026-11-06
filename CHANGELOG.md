@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Batch**: a batch with no name is now called after its model, LoRA and date
+  (it used to be the date alone, so every unnamed batch of the day landed in
+  the same folder). Running the same batch again still continues it.
 - **Train**: the list of checkpoint files shows an epoch for each file; the
   last one (which the trainer saves without a number) reads *epoch 8 (last)*.
   *Add* names it with that epoch (`<trigger>_e8`) instead of `_final`.
