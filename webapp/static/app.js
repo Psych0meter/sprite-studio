@@ -140,6 +140,29 @@ const ICONS = {
 const iconBtn = (name, title, onclick, on = false) =>
   h("button", { class: "icon-btn" + (on ? " on" : ""), title, "aria-label": title, type: "button", onclick, html: ICONS[name] });
 
+/** Paging shared by the long tables (Jobs, LoRA files): the rows of the current page, with the page kept in range. */
+const PAGE_SIZES = [25, 50, 100];
+function pageOf(rows, state) {
+  const size = PAGE_SIZES.includes(state.size) ? state.size : PAGE_SIZES[0];
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  state.page = Math.min(Math.max(0, state.page || 0), pages - 1);
+  return { rows: rows.slice(state.page * size, (state.page + 1) * size), pages, size };
+}
+
+/** The page controls under a table; nothing while everything fits on one page. */
+function pager(total, state, onChange) {
+  if (total <= PAGE_SIZES[0]) return null;
+  const { pages, size } = pageOf(new Array(total), state);
+  const go = (n) => { state.page = n; onChange(); };
+  return h("div", { class: "pager" },
+    h("span", { class: "muted small" }, `${state.page * size + 1} to ${Math.min(total, (state.page + 1) * size)} of ${total}`),
+    h("button", { class: "btn sm ghost", type: "button", disabled: state.page === 0, "aria-label": "Previous page", onclick: () => go(state.page - 1) }, "‹"),
+    h("span", { class: "small" }, `Page ${state.page + 1} of ${pages}`),
+    h("button", { class: "btn sm ghost", type: "button", disabled: state.page >= pages - 1, "aria-label": "Next page", onclick: () => go(state.page + 1) }, "›"),
+    h("select", { "aria-label": "Rows per page", style: { width: "auto" }, onchange: (e) => { state.size = Number(e.target.value); state.page = 0; onChange(); } },
+      PAGE_SIZES.map((n) => h("option", { value: n, selected: n === size }, `${n} per page`))));
+}
+
 // ---------------------------------------------------------------- shared state
 
 const S = {
@@ -786,7 +809,7 @@ routes[""] = async (main) => {
     const loras = S.catalog.loras;
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "LoRAs"), h("a", { href: "#/train", class: "small" }, "Train")),
-      loras.length ? h("table", {}, h("tbody", {}, loras.map((l) => h("tr", {}, h("td", { class: "mono" }, l.name), h("td", { class: "muted small nowrap" }, ago(l.mtime))))))
+      loras.length ? h("div", { class: "scroll-box" }, h("table", {}, h("tbody", {}, loras.map((l) => h("tr", {}, h("td", { class: "mono" }, l.name), h("td", { class: "muted small nowrap" }, ago(l.mtime)))))))
         : h("p", { class: "muted" }, "No LoRA installed yet. Train one, or copy your .safetensors files to ComfyUI's models/loras.")));
   };
   document.addEventListener("status", drawCards);
@@ -1176,7 +1199,7 @@ routes.results = async (main, _parts, params) => {
     rowShown = current;
   };
 
-  // Live updates, every 4 s while the page is open: the list on the left picks up new and changing results, and a
+  // Live updates, every 30 s while the page is open: the list on the left picks up new and changing results, and a
   // result a job is still writing is patched in place (only the sprites that changed are redrawn, nothing else flickers).
   const itemsSig = (list) => list.map((i) => [i.path, i.count, i.tried, i.busy, i.empty, i.cover].join()).join("|");
   const patchView = async () => {
@@ -1228,9 +1251,9 @@ routes.results = async (main, _parts, params) => {
         else if (!it && current && rowShown === current) { /* the result was removed elsewhere: leave the view as it is */ }
       } catch { /* the app is restarting: try again next time */ }
     }
-    liveTimer = setTimeout(tick, 4000);
+    liveTimer = setTimeout(tick, 30000);
   };
-  let liveTimer = setTimeout(tick, 4000);
+  let liveTimer = setTimeout(tick, 30000);
   onLeave(() => clearTimeout(liveTimer));
 
   drawList();
@@ -1681,6 +1704,8 @@ routes.lorafiles = async (main) => {
   const state = Object.assign({ model: "", find: "", sort: "date" }, store.get("lorafiles", {}));
   const keep = () => store.set("lorafiles", state);
   const picked = new Set();
+  const paging = { page: 0, size: store.get("lorafiles_size", 25) };
+  let lastFilter = "";
   main.append(head("LoRA files", "Every LoRA in ComfyUI's models/loras: where it comes from, which one a model generates with, and what it was used for. Install, rename or delete them here."));
   const body = h("div", {});
   main.append(body);
@@ -1702,6 +1727,9 @@ routes.lorafiles = async (main) => {
       size: (a, b) => b.size - a.size,
     };
     shown.sort(sorts[state.sort] || sorts.date);
+    const filterKey = [state.model, state.find, state.sort].join("|");
+    if (filterKey !== lastFilter) { paging.page = 0; lastFilter = filterKey; }
+    const pg = pageOf(shown, paging);
     const total = files.reduce((n, f) => n + f.size, 0);
     const act = async (fn, msg) => { if (await attempt(fn, msg)) { await loadCatalog(); load(); } };
     body.append(h("div", { class: "row", style: { marginBottom: "12px", gap: "10px", flexWrap: "wrap" } },
@@ -1736,7 +1764,7 @@ routes.lorafiles = async (main) => {
     body.append(h("div", { class: "panel", style: { padding: 0, overflowX: "auto" } }, h("table", { class: "lora-table" },
       h("thead", {}, h("tr", {}, h("th", {}, allBox), h("th", {}, "Name"), h("th", {}, "Model"), h("th", {}, "Base"), h("th", {}, "Epoch"), h("th", {}, "Date"), h("th", {}, "Size"),
         h("th", { title: "Result folders rendered with this file" }, "Results"), h("th", {}, ""))),
-      h("tbody", {}, shown.map((f) => h("tr", {},
+      h("tbody", {}, pg.rows.map((f) => h("tr", {},
         h("td", {}, h("input", { type: "checkbox", "aria-label": "Select " + f.name, checked: picked.has(f.name), onchange: (e) => { if (e.target.checked) picked.add(f.name); else picked.delete(f.name); load(); } })),
         h("td", {}, h("div", { class: "mono small" }, f.name), f.in_use ? h("span", { class: "tag ok", title: `The ${f.in_use} LoRA that ${f.model_label} generates with` }, `in use, ${f.in_use}`) : null),
         h("td", {}, f.model_label ? h("a", { href: "#/train/" + f.model }, f.model_label) : h("span", { class: "muted" }, "unknown")),
@@ -1759,6 +1787,8 @@ routes.lorafiles = async (main) => {
               const msg = `Delete ${f.name} from ComfyUI? ${fmtMB(f.size)} are freed.` + (f.in_use ? ` It is what ${f.model_label} generates with: install another one afterwards.` : "");
               if (await askConfirm(msg, { danger: true, ok: "Delete", title: "Delete a LoRA file" })) { picked.delete(f.name); act(() => api("/loras/delete", { body: { names: [f.name] } }), "Deleted"); }
             } }, "Delete")))))))));
+    const pgr = pager(shown.length, paging, () => { store.set("lorafiles_size", paging.size); load(); });
+    if (pgr) body.append(pgr);
     body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes: renaming a file does not change old ones."));
   };
   await load();
@@ -2561,12 +2591,14 @@ routes.jobs = async (main, parts) => {
   main.append(box);
   let timer;
   onLeave(() => clearTimeout(timer));
+  const paging = Object.assign({ page: 0, size: 25 }, store.get("jobs_paging", {}));
   const draw = async () => {
     const jobs = await api("/jobs");
     box.innerHTML = "";
     if (!jobs.length) { box.append(h("div", { class: "empty" }, "No jobs yet.")); return; }
+    const pg = pageOf(jobs, paging);
     box.append(h("table", {}, h("thead", {}, h("tr", {}, ["Job", "Status", "Progress", "Started", "Took", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, jobs.map((j) => h("tr", { class: "clickable", onclick: () => { location.hash = "#/jobs/" + j.id; } },
+      h("tbody", {}, pg.rows.map((j) => h("tr", { class: "clickable", onclick: () => { location.hash = "#/jobs/" + j.id; } },
         h("td", {}, j.title, h("div", { class: "faint small" }, j.kind)),
         h("td", {}, statusLabel(j)),
         h("td", { style: { width: "220px" } }, j.status === "running" ? [progressBar(j), h("div", { class: "small muted" }, (j.progress && j.progress.text) || "")] : null),
@@ -2576,6 +2608,8 @@ routes.jobs = async (main, parts) => {
           ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(draw); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
             ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(draw); } }, "Run again") : null))))));
+    const pgr = pager(jobs.length, paging, () => { store.set("jobs_paging", { size: paging.size }); draw(); });
+    if (pgr) box.append(pgr);
     if (jobs.some((j) => ["running", "queued"].includes(j.status))) timer = setTimeout(draw, 3000);
   };
   draw();
