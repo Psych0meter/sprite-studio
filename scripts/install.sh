@@ -171,6 +171,14 @@ EOF
 chmod 440 /etc/sudoers.d/spritegen-comfyui
 command -v sudo >/dev/null || apt-get install -y -q sudo
 visudo -cf /etc/sudoers.d/spritegen-comfyui
+# Settings added by hand to the unit (a password, a port, a host) survive a reinstall.
+UNIT=/etc/systemd/system/spritegen-web.service
+KEPT=""
+[ -f "$UNIT" ] && KEPT="$(grep -E '^Environment="?SG_WEB_(PASSWORD|PORT|HOST|ALLOWED_ORIGINS)=' "$UNIT" || true)"
+if ! printf '%s' "$KEPT" | grep -q SG_WEB_PASSWORD; then
+	echo "  note: no password is set (add Environment=SG_WEB_PASSWORD=... to $UNIT):"
+	echo "  the app is open to everyone who can reach its port."
+fi
 cat >/etc/systemd/system/spritegen-web.service <<EOF
 [Unit]
 Description=Sprite Studio (web app)
@@ -180,6 +188,8 @@ After=network-online.target comfyui.service
 User=$SG_USER
 WorkingDirectory=$SG_APP/webapp
 Environment=SG_DATA=$SG_DATA PX_INPUT=$SG_DATA/input PX_GAME=$SG_DATA/game PX_OUTPUT=$SG_DATA/output
+Environment=SG_WEB_HOST=0.0.0.0
+$KEPT
 ExecStart=$SG_APP/webapp/run.sh
 Restart=on-failure
 

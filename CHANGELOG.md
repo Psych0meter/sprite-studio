@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Menu**: the version of the app is shown at the bottom of the left menu.
 
 ### Changed
+- **Security**: found by an outside audit. A plain run now listens on this machine only (`SG_WEB_HOST`); the service made by `install.sh` still listens on every address and keeps a password, port or host added to its unit, and the installer says when no password is set. Changes sent from another website are refused. Requests, uploaded images (checked as real images, at most 64 million pixels) and zips (5000 files, 1 GB unpacked) have size limits. `/api/file` serves only images and small text files, no longer model weights or code. A password with accents no longer crashes the login.
+- **Jobs**: at most 100 jobs may wait for the GPU and 8 CPU jobs run at once (the app says so instead of piling up); the logs of old jobs are deleted.
 - **Prompts**: the negative prompt also rejects pillow shading, anti-aliased edges and jagged lines (the training captions are unchanged).
 - **Wording**: the app, guide and examples no longer speak of ships, factions or hulls: groups are "teams or families", examples use neutral units, projects are not "games". Stored names (`game` source folder, `PX_GAME`) and the hard-surface colour words are unchanged, so saved models and trained LoRAs keep working.
 

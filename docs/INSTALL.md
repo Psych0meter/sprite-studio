@@ -171,8 +171,9 @@ results and settings are not touched.
 - Scripts: `~spritegen/spritegen/scripts`, in that user's `PATH`
   (`su - spritegen`)
 
-The app has no login by default (it is meant for a private network). To
-require a password, add `Environment=SG_WEB_PASSWORD=...` to
+The app has no login by default (it is meant for a private network), and
+anyone who can reach its port can start jobs, change settings and delete
+files. **Set a password** unless the machine is only reachable by you: add `Environment=SG_WEB_PASSWORD=...` to
 `/etc/systemd/system/spritegen-web.service`, then
 `systemctl daemon-reload && systemctl restart spritegen-web`.
 
@@ -192,8 +193,10 @@ variables give the defaults (the service sets the data folders):
 | `PX_LORA_HOME` | `~/lora` | models, training, palettes |
 | `COMFY` | `~/ComfyUI` | ComfyUI's folder |
 | `PX_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI's API |
-| `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `0.0.0.0` | the app's address |
+| `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `127.0.0.1` | the app's address (a plain run listens on this machine only; the service made by `install.sh` sets `0.0.0.0`, and keeps a host, port or password you added to its unit) |
 | `SG_WEB_PASSWORD` | none | ask for a password |
+| `SG_ALLOWED_ORIGINS` | none | extra host names allowed to send changes (behind a reverse proxy that changes the `Host`) |
+| `SG_MAX_UPLOAD_MB`, `SG_MAX_QUEUED` | `300`, `100` | the largest request, and how many jobs may wait for the GPU |
 | `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: jobs, logs, settings, picks |
 | `PX_SOURCES` | none | more source folders, as JSON: `{"tiles": "/mnt/x/tiles"}` (the Settings page has a field for the same purpose) |
 | `SG_SCRIPTS` | `scripts/` next to the app | where the app finds `pxmodel.py` and the other scripts |

@@ -7,8 +7,9 @@
 # scipy come from the system packages, python3-numpy python3-pil
 # python3-scipy).
 #
-# Settings: SG_WEB_PORT (8189), SG_WEB_HOST (0.0.0.0), SG_WEB_PASSWORD (empty:
-# no password; set one if the container is reachable beyond your LAN), and
+# Settings: SG_WEB_PORT (8189), SG_WEB_HOST (127.0.0.1: this machine only;
+# the service installed by install.sh listens on 0.0.0.0), SG_WEB_PASSWORD
+# (empty: no password; set one if the app is reachable by anyone else), and
 # SG_DATA, PX_INPUT, PX_GAME, PX_OUTPUT, PX_COMFY_URL, COMFY,
 # PX_LORA_HOME (the Settings page overrides them).
 #

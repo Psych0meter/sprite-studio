@@ -165,6 +165,15 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   failed (shown as finished with a warning), 1 that nothing was made.
 - **Paths**: every path the browser sends is checked to be under a known
   folder (`safe_path`); writes go only to the output and model folders.
+  `/api/file` serves images and small text files only (`SERVED_SUFFIXES`),
+  never model weights or code.
+- **Limits**: a request over `SG_MAX_UPLOAD_MB` (413) or without a length (411)
+  is refused; a change (POST, PUT, DELETE) from another site is refused (the
+  `Origin` must be the app's own `Host`, `SG_ALLOWED_ORIGINS` adds more). Uploads
+  are strict base64 and must open as images (`check_image`), at most 64 million
+  pixels and 25 MB each; a zip may hold 5000 files and 1 GB unpacked. At most
+  `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429). The
+  logs of jobs that fell off the 300 kept are deleted after a day.
 - **Front end**: `app.js` and `palette.js`, a small `h()` element helper, one route
   function per page, in-app dialogs (`askText`, `askConfirm`); no global
   build or framework.
