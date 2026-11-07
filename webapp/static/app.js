@@ -474,7 +474,9 @@ function tile(v, opts = {}) {
   if (opts.remaster) tools.append(iconBtn("redo", "Generate again from this one", () => opts.remaster(v)));
   el.append(stage, h("div", { class: "cap" },
     h("div", { class: "cap-text" }, h("div", { class: "name", title: v.label || v.name }, v.label || v.name),
-      v.seconds ? h("div", { class: "secs", title: "Render time" }, fmtDur(v.seconds)) : null), tools));
+      v.seed || v.seconds ? h("div", { class: "secs" },
+        v.seed ? h("span", { class: "seed", title: "Seed (click to copy)", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(v.seed); toast("Seed " + v.seed + " copied"); } }, "seed " + v.seed) : null,
+        v.seed && v.seconds ? " · " : "", v.seconds ? h("span", { title: "Render time" }, fmtDur(v.seconds)) : null) : null), tools));
   return el;
 }
 
