@@ -1435,8 +1435,43 @@ routes.train = async (main, parts) => {
   let captionFilter = "";
   let showCaptions = false;
 
-  const draw = async () => {
-    const info = await api(`/train/${cat}?model=${opts.model}`);
+  // What the page shows, apart from the progress of a running job: when it is the same after a poll, nothing is
+  // rebuilt (no flicker, no images loaded again); the progress bars are repainted in place.
+  let lastSig = "";
+  const live = { train: null, pv: null };
+  const sigOf = (info) => JSON.stringify([info.jobs.map((j) => [j.id, j.status]), info.checkpoints.map((k) => k.name), info.samples, info.installed.map((i) => i.name),
+    info.dataset.mtime, info.dataset.count, info.sdxl_ready, info.final_epoch]);
+  const paintLive = (jobs) => {
+    const find = (l) => l && jobs.find((j) => j.id === l.id && ["running", "queued"].includes(j.status));
+    const t = find(live.train);
+    if (t) live.train.el.replaceChildren(trainProgress(t));
+    const v = find(live.pv);
+    if (v) live.pv.paint(v);
+  };
+  const onStatus = () => { if (S.status && box.isConnected) paintLive(S.status.running); };
+  document.addEventListener("status", onStatus);
+  onLeave(() => document.removeEventListener("status", onStatus));
+  const poll = async () => {
+    if (!box.isConnected) return;
+    if (document.hidden) { next(); return; }
+    let info;
+    try { info = await api(`/train/${cat}?model=${opts.model}`); } catch (_) { next(); return; }
+    if (sigOf(info) !== lastSig) await draw(info);
+    else { paintLive(info.jobs); next(); }
+  };
+  // The next look at the server: a running job needs it, an idle page does not. Slow while training (checkpoints
+  // and previews appear every 2 epochs), faster while previews render one by one.
+  const next = () => {
+    clearTimeout(timer);
+    const k = lastKinds;
+    timer = k.length ? setTimeout(poll, k.includes("train") ? 20000 : k.includes("setup") ? 8000 : 4000) : null;
+  };
+  let lastKinds = [];
+  const draw = async (pre) => {
+    const info = pre || await api(`/train/${cat}?model=${opts.model}`);
+    lastSig = sigOf(info);
+    live.train = null;
+    live.pv = null;
     const c = models.find((m) => m.id === cat);
     const xl = opts.model === "sdxl";
     const running = info.jobs.find((j) => j.kind !== "setup" && ["running", "queued"].includes(j.status));
@@ -1515,7 +1550,9 @@ routes.train = async (main, parts) => {
       h("div", { class: "panel-head" }, h("div", { class: "step-head" }, h("span", { class: "n" + (info.checkpoints.length ? " done" : "") }, "2"), h("h2", {}, "Train")),
         h("span", { class: "muted small" }, trainEstimate(xl))));
     if (trainJob && ["running", "queued"].includes(trainJob.status)) {
-      s2.append(trainProgress(trainJob));
+      const holder = h("div", {}, trainProgress(trainJob));
+      live.train = { id: trainJob.id, el: holder };
+      s2.append(holder);
     } else {
       if (trainJob && trainJob.status === "failed" && trainJob.error) s2.append(h("div", { class: "note bad", style: { marginBottom: "12px" } }, trainJob.error));
       if (trainJob) s2.append(h("p", { class: "small" }, "Last run: ", statusLabel(trainJob), h("span", { class: "muted" }, " ", fmtTime(trainJob.ended), trainJob.started && trainJob.ended ? `, ${fmtDur(trainJob.ended - trainJob.started)}` : ""),
@@ -1586,8 +1623,8 @@ routes.train = async (main, parts) => {
               : h("button", { class: "btn sm", title: "Install under its own name, to compare", onclick: () => install(k.path, addName(k)) }, "Add"))))))))));
     }
     box.append(s3);
-    if (running) schedule(running.kind === "train" ? 5000 : 1500);
-    else if (downloading) schedule(5000);
+    lastKinds = [running, downloading].filter(Boolean).map((j) => j.kind);
+    next();
   };
   // Previews the training did not render (SDXL on a small card, or a stopped run): rendered afterwards through ComfyUI.
   const pvOff = new Set();
@@ -1595,12 +1632,16 @@ routes.train = async (main, parts) => {
     const el = h("div", { class: "note", style: { margin: "0 0 14px" } });
     const spi = S.catalog.speed && S.catalog.speed.sec_per_image;
     if (pvJob && ["running", "queued"].includes(pvJob.status)) {
-      const p = pvJob.progress || {};
-      el.append(h("div", { class: "row between", style: { marginBottom: "8px" } }, h("span", {}, statusLabel(pvJob), h("span", { class: "muted small" }, "  Rendering previews: ", p.text || "")),
-        h("div", { class: "row" }, h("a", { class: "btn sm ghost", href: "#/jobs/" + pvJob.id }, "Log"),
-          h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${pvJob.id}/cancel`, { body: {} }), "Previews cancelled") }, "Cancel"))));
-      el.append(progressBar(pvJob));
-      el.append(h("div", { class: "hint" }, "Each one appears in the grid below when it is done; a cancelled run keeps what is finished."));
+      const paint = (j) => {
+        const p = j.progress || {};
+        el.replaceChildren(h("div", { class: "row between", style: { marginBottom: "8px" } }, h("span", {}, statusLabel(j), h("span", { class: "muted small" }, "  Rendering previews: ", p.text || "")),
+          h("div", { class: "row" }, h("a", { class: "btn sm ghost", href: "#/jobs/" + j.id }, "Log"),
+            h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Previews cancelled") }, "Cancel"))),
+        progressBar(j),
+        h("div", { class: "hint" }, "Each one appears in the grid below when it is done; a cancelled run keeps what is finished."));
+      };
+      paint(pvJob);
+      live.pv = { id: pvJob.id, paint };
       return el;
     }
     const by = info.previews_by_epoch || {};

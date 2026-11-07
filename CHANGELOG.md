@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Train page**: it no longer rebuilds itself every few seconds while a job runs. Progress bars update in place, from the status the app already polls; the server is asked again every 20 s while training (4 s while previews render) and the page is rebuilt only when something it shows changed: a new checkpoint or preview image, a job starting or ending. Nothing is polled while the tab is hidden.
 - **LoRA files**: click a column header to sort by it (click again to reverse).
 - **Jobs**: *Clear successful* removes only the jobs that succeeded, so failed ones stay readable; *Clear all finished* (with a confirmation) removes every finished job.
 - **Time estimates**: the measured speed (seconds per image, minutes per training) uses only jobs that finished without error, no longer failed, cancelled or partly failed ones.
