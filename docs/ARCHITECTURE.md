@@ -163,6 +163,9 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
 - **Updates**: `GET /api/updates` runs `git fetch` in the ComfyUI folder and
   in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
   never pulls or installs.
+- **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
+  a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
+  exist, with optional group / kind overrides.
 - **Bin**: `GET /api/results/bin?items=1` lists the deleted folders; restore
   and empty take `{"ids": [...]}` for single ones.
   Training stops ComfyUI first (sudo rule for `systemctl`) when the card

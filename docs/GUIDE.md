@@ -386,7 +386,9 @@ keep (*Export picks* copies them to `output/picked/`, named after the sprite
 they replace), compare side by side. **Delete** a result, one sprite of a
 batch, its failed sprites, or every empty result: they go to the output
 folder's `.bin`, where *Undo last delete* puts them back until you *Empty
-bin*. **View bin** lists what was deleted, with *Put back* and *Erase* for
+bin*. **Train on picks…** copies the starred sprites into a new or existing
+model as training sprites (the originals stay), to train a model on what
+another one made well. **View bin** lists what was deleted, with *Put back* and *Erase* for
 each.
 
 ## 7. Palettes

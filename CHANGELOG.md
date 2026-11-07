@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Results**: *Train on picks…* copies the starred sprites into a new model, or an existing one, as training sprites (all in one group and kind if you choose, named after their pick name, never overwriting a sprite the model has), and opens the model.
 - **Updates**: *Check for updates* on the Overview's ComfyUI card looks at the upstream repositories of ComfyUI and kohya sd-scripts (a git fetch, nothing is changed) and lists the newer commits and how to update.
 - **Preview prompts**: *Auto-fix* proposes to put the trigger word first in every prompt that does not start with it (a stale or mistyped first word is replaced), showing each old and new start before changing anything.
 - **Results**: *View bin* lists the deleted results (cover, name, date, size) with *Put back* and *Erase* for each.
