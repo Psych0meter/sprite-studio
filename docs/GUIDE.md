@@ -104,7 +104,7 @@ On a model's **Sprites** tab:
 128 px). Their *size* sets the pixel grid of training and of what is
 generated; *fill* how much of the canvas a new sprite takes; *remaster
 distance* the default denoise; *keywords* and *words to avoid* refine
-the prompt per kind. A model without kinds uses each sprite's own size.
+the prompt per kind; *Tile* and *Keep edge* are for tiles, see 5.7. A model without kinds uses each sprite's own size.
 
 A model for one faction can put each kind's look of that faction in the
 kinds' keywords, and the faction's shared look in the group's keywords.
@@ -325,6 +325,25 @@ shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
 
 A file copied into the folder by hand shows its model from its name and its
 epoch only when the name says it (`_e6`); otherwise the epoch reads `?`.
+
+### 5.7 Tiles: floors, walls, anything that must join
+
+Sprites are pixel art with a background to remove and 64 colours at most.
+A **tile** is the opposite: opaque art in full colour (a floor, a wall) that
+must meet its neighbours. Tick **Tile** on its kind (Models › Groups and
+kinds). Results of a tile kind are the render's tile cut out and scaled to
+the kind's size, with no background removal, no colour limit and no outline.
+
+**Keep edge (px)** makes a remaster keep the outer N pixels of the original,
+blended into the new surface over 4 more pixels. Tiles drawn to join keep
+joining (seams, pipes that cross a side at the same place), while the inside
+is redone. Use about 8 to 16 px for a floor with a seam and a connector. It
+needs the original, so it applies to remasters (Generate from a sprite, and
+Batch), not to new designs. `pxmake.sh --keep-edge PX` overrides it for one
+run. Clean up again is not offered for tiles (nothing to tune).
+
+Make the kind's *final size* the tile's real size (256 for a 256 px floor),
+so the pixel grid is a whole number (2 on SD 1.5, 4 on SDXL).
 
 ## 6. Results
 

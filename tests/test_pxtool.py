@@ -140,3 +140,30 @@ def test_flatten_background_makes_the_green_uniform(tmp_path):
     assert not np.array_equal(plain, outlined)
     # a lower edge threshold draws a fuller silhouette than a higher one
     assert (make("lo.png", edge=0.2)[..., 3] > 0).sum() >= (make("hi.png", edge=0.8)[..., 3] > 0).sum()
+
+
+def test_tile_post_keeps_full_colour_and_the_originals_edge(tmp_path):
+    size, canvas = 32, 128  # 4 render px per tile px
+    gradient = np.dstack(
+        [np.tile(np.arange(size, dtype=np.uint8) * 8, (size, 1))] * 3 + [np.full((size, size), 255, np.uint8)]
+    )
+    gradient[0:3, 5:9, 3] = 0  # a gap in the original
+    orig = tmp_path / "orig.png"
+    Image.fromarray(gradient, "RGBA").save(orig)
+    render = Image.new("RGB", (canvas, canvas), (10, 200, 10))  # the render is flat green: nothing of the original
+    render.save(tmp_path / "raw.png")
+    grid = tmp_path / "grid.json"
+    grid.write_text('{"k": 4, "w": 32, "h": 32, "ox": 0, "oy": 0, "canvas": 128}')
+    out = tmp_path / "tile.png"
+    pxtool.tile_post(str(tmp_path / "raw.png"), str(out), size, orig=str(orig), grid=str(grid), keep_edge=4)
+    a = np.array(Image.open(out))
+    assert a.shape == (32, 32, 4)
+    assert (a[16, 0, :3] == gradient[16, 0, :3]).all() and (a[0, 16, :3] == gradient[0, 16, :3]).all()  # edge: original
+    assert (a[16, 31, :3] == gradient[16, 31, :3]).all() and (a[31, 16, :3] == gradient[31, 16, :3]).all()
+    assert tuple(a[16, 16, :3]) == (10, 200, 10)  # inside: the render, in its own colour (no 64-colour snap)
+    blend = a[16, 6:11, :3].astype(int)  # the band after the kept edge fades into the render
+    assert (np.abs(np.diff(blend[:, 0])) > 0).any() and tuple(blend[-1]) == (10, 200, 10)
+    assert a[1, 6, 3] == 0 and a[16, 16, 3] == 255  # the original's alpha is kept
+    # without keep_edge nothing of the original shows
+    pxtool.tile_post(str(tmp_path / "raw.png"), str(out), size, orig=str(orig), grid=str(grid))
+    assert tuple(np.array(Image.open(out))[16, 0, :3]) == (10, 200, 10)

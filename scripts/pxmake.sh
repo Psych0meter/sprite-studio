@@ -32,6 +32,9 @@
 #                    side takes (100: edge to edge). Default: the kind's (or
 #                    the model's) fill for new sprites and sketches; a
 #                    remaster keeps the original's size unless this is given
+#   --keep-edge PX   a remaster of a tile kind keeps the original's outer PX
+#                    pixels (so tiles that join still join); default: the
+#                    kind's Keep edge. Tile kinds are redone in full colour
 #   --palette P      a palette (id in $PX_LORA_HOME/.palettes, or a .json/.hex/
 #                    .gpl file) put on the results; none: no palette. Default:
 #                    the group's palette, if it has one
@@ -55,7 +58,7 @@ export PX_INPUT PX_GAME PX_OUTPUT PX_LORA_HOME
 PX_TOOL="$HERE/pxtool.py"
 
 model="" group="" kind="" extra="" colours="" refs_kind="" init="" sketch="" mask="" denoise=""
-size="" mirror="auto" count=4 seed="" name="" out="" post_opts=() palette="" fill=""
+size="" mirror="auto" count=4 seed="" name="" out="" post_opts=() palette="" fill="" keep_edge=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--model) model="$2"; shift 2 ;;
@@ -74,6 +77,7 @@ while [ $# -gt 0 ]; do
 	--no-tidy) post_opts+=(--no-tidy); shift ;;
 	--palette) palette="$2"; shift 2 ;;
 	--fill) fill="$2"; shift 2 ;;
+	--keep-edge) keep_edge="$2"; shift 2 ;;
 	-n) count="$2"; shift 2 ;;
 	--seed) seed="$2"; shift 2 ;;
 	--name) name="$2"; shift 2 ;;
@@ -113,6 +117,11 @@ pal_file="$(field palette)"
 if [ -z "$fill" ] && { [ -z "$start" ] || [ -n "$sketch" ]; }; then fill="$(field fill)"; fi
 [ -n "$fill" ] && [ "$fill" != 0 ] && post_opts+=(--fill "$fill")
 [ -n "$pal_file" ] && post_opts+=(--palette "$pal_file")
+# Tiles (floors, walls...): full colour, and a remaster keeps the original's outer px so they still join.
+tile="$(field tile)"
+[ -n "$keep_edge" ] || keep_edge="$(field edge)"
+[ "$tile" = 1 ] && post_opts+=(--tile)
+[ "$tile" = 1 ] && [ -n "$start" ] && [ "$keep_edge" != 0 ] && post_opts+=(--keep-edge "$keep_edge")
 
 export PX_LORA="${PX_LORA:-$trigger.safetensors}"
 case "$PX_LORA" in
@@ -150,7 +159,7 @@ fi
 [ -n "$seed" ] && args+=(--seed "$seed")
 
 {
-	echo "name=$name model=$model group=$group kind=${kind:-none} lora=$PX_LORA res=$PX_RES mask=${mask:-none} init=${start:-none} denoise=${denoise:-n/a} size=$size refs=$nrefs palette=${pal_file:-none} fill=${fill:-0}"
+	echo "name=$name model=$model group=$group kind=${kind:-none} lora=$PX_LORA res=$PX_RES mask=${mask:-none} init=${start:-none} denoise=${denoise:-n/a} size=$size refs=$nrefs palette=${pal_file:-none} fill=${fill:-0} tile=$tile edge=${keep_edge:-0}"
 	echo "prompt: $prompt"
 	echo "negative: $neg"
 	echo "extra: $extra"

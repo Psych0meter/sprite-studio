@@ -768,6 +768,40 @@ def flatten_background(src, dst, key=KEY, tol=70):
     Image.fromarray(a).save(dst)
 
 
+def tile_post(src, dst, size, orig=None, grid=None, keep_edge=0, feather=4):
+    """A render of a tile (a floor, a wall: opaque art that is not pixel art) made into the tile: the sprite's
+    rectangle cut out of the render and scaled down to its size, in full colour (no background removal, no colour
+    limit, no outline). With the original (the remaster's start) the outer `keep_edge` px stay the original's, so
+    tiles that were made to join still join, blended into the new surface over `feather` px; its alpha is kept."""
+    img = Image.open(src).convert("RGB")
+    if grid:
+        with open(grid) as fh:
+            g = json.load(fh)
+    else:
+        g = grid_for(size, size, img.width)
+    w, h, k = g["w"], g["h"], g["k"]
+    rgb = np.asarray(
+        img.crop((g["ox"], g["oy"], g["ox"] + w * k, g["oy"] + h * k)).resize((w, h), Image.Resampling.LANCZOS),
+        dtype=np.float64,
+    )
+    alpha = np.full((h, w), 255, dtype=np.uint8)
+    if orig and os.path.isfile(orig):
+        o = np.asarray(Image.open(orig).convert("RGBA"))
+        if o.shape[:2] == (h, w):
+            alpha = o[..., 3].copy()
+            if keep_edge > 0:
+                yy, xx = np.mgrid[0:h, 0:w]
+                dist = np.minimum.reduce([xx, yy, w - 1 - xx, h - 1 - yy])
+                keep = np.clip((keep_edge + feather - dist) / feather, 0, 1)[..., None]
+                rgb = o[..., :3] * keep + rgb * (1 - keep)
+        else:
+            print(f"warning: the original is {o.shape[1]}x{o.shape[0]}, not {w}x{h}: its edge is not kept")
+    out = Image.fromarray(np.dstack([np.clip(np.rint(rgb), 0, 255).astype(np.uint8), alpha]), "RGBA")
+    out.save(dst)
+    out.resize((w * 4, h * 4), Image.Resampling.NEAREST).save(dst.rsplit(".", 1)[0] + "_x4.png")
+    print(f"{dst}: {w}x{h} tile" + (f", the original's outer {keep_edge} px kept" if keep_edge and orig else ""))
+
+
 def post(
     src,
     dst,
@@ -789,8 +823,11 @@ def post(
     colours=64,
     outline=True,
     edge=0.5,
+    tile=False,
+    keep_edge=0,
 ):
-    """keep_green: the sprite has green parts of its own (an acid weapon...):
+    """tile: the render is a tile in full colour (see tile_post), keep_edge: px of the original's edge it keeps.
+    keep_green: the sprite has green parts of its own (an acid weapon...):
     only the green reached from the border is background, green inside the
     silhouette is kept. margin: empty pixels around the sprite (icons fill
     their whole canvas: 0; legacy fitting only). grid: the init's grid file
@@ -807,6 +844,8 @@ def post(
     most the sprite keeps, 2 to 64), edge (0.2 to 0.8: the share of a block
     that must be hull to draw its pixel; lower = a fuller silhouette),
     outline (the dark edge line; tidy=False drops it too)."""
+    if tile:
+        return tile_post(src, dst, size, orig=orig, grid=grid, keep_edge=int(keep_edge or 0))
     a = np.array(Image.open(src).convert("RGBA"))
     rgb = a[..., :3]
     if mirror == "auto":
@@ -991,6 +1030,8 @@ def main():
         default=0,
         help="50 to 100: the share of the canvas the sprite's longest side takes (0: the render's scale)",
     )
+    o.add_argument("--tile", action="store_true", help="a tile: full colour, no background removal, no outline")
+    o.add_argument("--keep-edge", type=int, default=0, help="with --tile and --orig: px of the original's edge kept")
     fb = sub.add_parser("flatten-background", help="a render with its key-colour background made uniform")
     fb.add_argument("src")
     fb.add_argument("dst")
@@ -1068,6 +1109,8 @@ def main():
             base=a.base,
             palette=a.palette,
             fill=a.fill,
+            tile=a.tile,
+            keep_edge=a.keep_edge,
         )
     return 0
 

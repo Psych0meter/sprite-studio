@@ -1985,12 +1985,14 @@ async function modelEditor(main, mid, tab) {
           g.palette && !(S.palettes || []).some((p) => p.id === g.palette) ? h("option", { value: g.palette, selected: true }, g.palette + " (missing)") : null)),
         h("td", { class: "muted small" }, String(counts[g.id] || 0)),
         h("td", {}, iconBtn("x", "Remove this group", () => { m.groups.splice(i, 1); dirty = true; drawGroups(); }))))));
-    const kt = h("table", {}, h("thead", {}, h("tr", {}, ["Id", "Label", "Words in every caption", "Keywords", "Words to avoid", "Final size (px)", "Fill (%)", "File name pattern", "Remaster distance", ""].map((t) => h("th", {}, t)))),
+    const kt = h("table", {}, h("thead", {}, h("tr", {}, ["Id", "Label", "Words in every caption", "Keywords", "Words to avoid", "Final size (px)", "Fill (%)", "Tile", "Keep edge (px)", "File name pattern", "Remaster distance", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, m.kinds.map((k, i) => h("tr", {},
         h("td", {}, cell(k, "id", { mono: true, w: "110px" })), h("td", {}, cell(k, "label", { w: "120px" })),
         h("td", {}, cell(k, "words", { w: "170px", ph: "small fighter" })), h("td", {}, cell(k, "keywords", { w: "170px", ph: "optional" })),
         h("td", {}, cell(k, "negative", { w: "150px", ph: "optional" })), h("td", {}, cell(k, "size", { type: "number", w: "70px" })),
         h("td", { title: "New sprites: how much of the canvas the longest side takes, 50 to 100 (0: the model's setting)" }, cell(k, "fill", { type: "number", w: "70px", ph: "0" })),
+        h("td", {}, h("input", { type: "checkbox", checked: !!k.tile, title: "Opaque tiles (floors, walls) in full colour: no background removal, no colour limit, no outline", onchange: (e) => { k.tile = e.target.checked; dirty = true; } })),
+        h("td", { title: "Tiles: a remaster keeps the original's outer pixels, so tiles that join still join (0: none, up to 64)" }, cell(k, "edge", { type: "number", w: "70px", ph: "0" })),
         h("td", {}, cell(k, "pattern", { mono: true, w: "150px", ph: "^small_" })), h("td", {}, cell(k, "denoise", { type: "number", w: "80px" })),
         h("td", {}, iconBtn("x", "Remove this kind", () => { m.kinds.splice(i, 1); dirty = true; drawGroups(); }))))));
     body.append(

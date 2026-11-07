@@ -40,7 +40,7 @@ model.json:
             hand); name_pattern: its first capture is the sprite's own
             words ("acid spitter"), formatted by name_format ("{} state");
             palette: a palette id put on what is generated for the group
-  kinds    [ {id, label, words, keywords, negative, size, fill, pattern, denoise} ]
+  kinds    [ {id, label, words, keywords, negative, size, fill, tile, edge, pattern, denoise} ]
             the second, optional axis: a size class (small 32 px, large
             128 px...). size sets the pixel grid and the final size;
             denoise, how far a remaster goes (default 0.7); keywords: extra
@@ -204,6 +204,14 @@ def sprites_dir(mid):
     return os.path.join(model_dir(mid), "sprites")
 
 
+def _edge(v):
+    """Pixels of the original's edge kept: 0 (none) to 64."""
+    try:
+        return max(0, min(64, int(float(v or 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _fill(v):
     """A fill percentage: 0 (none) or 50..100."""
     try:
@@ -256,6 +264,8 @@ def normalise(m, mid):
         k.setdefault("size", m["size"])
         k.setdefault("fill", 0)  # 0: the model's
         k["fill"] = _fill(k["fill"])
+        k["tile"] = bool(k.get("tile", False))  # opaque tiles in full colour (floors, walls), not pixel art
+        k["edge"] = _edge(k.get("edge", 0))  # px of the original's edge a remaster keeps
         k.setdefault("pattern", "")
         k.setdefault("denoise", 0.7)
         k.setdefault("keywords", "")
@@ -499,6 +509,8 @@ def prompt(m, group_id, kind_id=None, extra="", colours="", refs_kind=None, excl
     return {
         "palette": pal_file or "",
         "fill": int((k.get("fill") if k else 0) or m.get("fill") or 0),
+        "tile": int(bool(k and k.get("tile"))),
+        "edge": int((k.get("edge") if k else 0) or 0),
         "prompt": caption(m, g, k, "", colours, extra),
         "refs": refs,
         "size": int(k["size"]) if k and k.get("size") else int(m["size"]),

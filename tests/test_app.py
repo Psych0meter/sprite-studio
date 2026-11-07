@@ -262,3 +262,11 @@ def test_unnamed_batches_get_their_own_folder_name(client):
     assert app.default_batch_tag(m, {"lora": "pxunit_e6.safetensors"}) == f"units-pxunit_e6-{day}"
     assert app.default_batch_tag(m, {"lora": "pxunit_e6", "mode": "invent"}) == f"units-pxunit_e6-{day}-invent"
     assert app.default_batch_tag(m, {"lora": "pxunit_e6"}) != app.default_batch_tag(m, {"lora": "pxunit_e8"})
+
+
+def test_cleanup_refuses_a_tile(client, env):
+    job = _cleanup_job(env)
+    txt = (job / "job.txt").read_text()
+    (job / "job.txt").write_text(txt.replace("\n", " tile=1 edge=8\n", 1))
+    r = client.post("/api/results/cleanup", json={"path": str(job / "run_s7.png")})
+    assert r.status_code == 400 and "tile" in r.text

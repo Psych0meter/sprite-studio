@@ -74,7 +74,7 @@ field is migrated there (for example `colour_words: "ship"` became
 `match`), `words` (name the colours in the prompt), `source`.
 
 **job.txt**: first line `key=value` pairs (`name model group kind lora res
-mask init denoise size refs palette fill`), then `prompt:`, `negative:`,
+mask init denoise size refs palette fill tile edge`), then `prompt:`, `negative:`,
 `extra:` lines and the exact `pxcomfy.py` command. Results pages read it.
 
 ## 5. Generation pipeline
@@ -96,6 +96,11 @@ mask init denoise size refs palette fill`), then `prompt:`, `negative:`,
    clean-up's settings (`--max-colours`, `--edge`, `--min-part`, `--key-tol`,
    `--no-outline`, `--no-tidy`, `--mirror`, `--palette`, `--fill`) are
    arguments of `pxtool.post`, whose defaults are what `pxmake.sh` uses.
+   A kind with `tile` (opaque full-colour art: floors, walls) skips all of
+   this: `pxtool.tile_post` cuts the sprite's rectangle out of the render
+   (from the init's grid file), scales it down, and keeps the original's
+   alpha and, with `--keep-edge N`, its outer N px (blended over 4 more).
+   Clean up again refuses such results.
 5. *Clean up again* (`POST /api/results/cleanup`) re-runs step 4 on a
    variant's saved render (`raw/*_s<seed>_*.png`) with the job's own
    size, grid (`init.png.json`), original and palette, and the settings sent

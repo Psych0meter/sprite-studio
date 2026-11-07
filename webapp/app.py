@@ -1844,7 +1844,8 @@ def models_summary() -> list[dict]:
                     {k: g.get(k, "") for k in ("id", "label", "words", "enabled", "palette")} for g in m["groups"]
                 ],
                 "kinds": [
-                    {k: kk.get(k, 0) for k in ("id", "label", "words", "size", "denoise", "fill")} for kk in m["kinds"]
+                    {k: kk.get(k, 0) for k in ("id", "label", "words", "size", "denoise", "fill", "tile", "edge")}
+                    for kk in m["kinds"]
                 ],
                 "sprites": len(list(sd.glob("*.png"))) if sd.is_dir() else 0,
                 "saved": (Path(p.model_dir(mid)) / "model.json").exists(),
@@ -2678,6 +2679,10 @@ def cleanup_inputs(b: dict) -> dict:
     head = result["params"]
     if head.get("mask", "none") != "none":
         raise HTTPException(400, "a touch-up cannot be cleaned up again: redo it from the Generate page")
+    if head.get("tile") == "1":
+        raise HTTPException(
+            400, "a tile keeps its full colours: there is nothing to tune, render it again to change it"
+        )
     size = png_size(src)
     if not size or not size[0]:
         raise HTTPException(400, "unreadable sprite")

@@ -137,3 +137,15 @@ def test_preview_plan_reads_the_runs_own_prompts(pxmodel, tmp_path):
     (out / "sample_prompts.txt").write_text("pxunit, from the run --n bad --w 1024 --h 1024 --s 20 --l 5.5 --d 77\n")
     (r,) = pxmodel.preview_plan(m, out, "pxunit", 1024)
     assert (r["prompt"], r["negative"], r["steps"], r["cfg"], r["seed"]) == ("pxunit, from the run", "bad", 20, 5.5, 77)
+
+
+def test_tile_kinds_and_their_edge_are_normalised_and_reach_the_prompt(pxmodel):
+    m = new_model(pxmodel)
+    assert m["kinds"][0]["tile"] is False and m["kinds"][0]["edge"] == 0  # old models load unchanged
+    m["kinds"][1].update(tile=1, edge=999)
+    pxmodel.save(m)
+    m = pxmodel.load("units")
+    assert m["kinds"][1]["tile"] is True and m["kinds"][1]["edge"] == 64  # clamped
+    p = pxmodel.prompt(m, "red", "large", colours="grey")
+    assert (p["tile"], p["edge"]) == (1, 64)
+    assert pxmodel.prompt(m, "red", "small", colours="grey")["tile"] == 0
