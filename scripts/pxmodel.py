@@ -381,7 +381,8 @@ def caption(m, group, kind, own_words, colours, extra=""):
         parts.append(m["tail"])
     if colours:
         parts.append(colours)
-    parts += ["pixel art", "flat green background"]
+    # a tile fills its whole image: neither pixel art nor a green background to describe
+    parts += ["game tile, full colour"] if kind and kind.get("tile") else ["pixel art", "flat green background"]
     return ", ".join(p.strip(", ") for p in parts if p.strip(", "))
 
 

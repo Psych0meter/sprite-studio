@@ -149,3 +149,12 @@ def test_tile_kinds_and_their_edge_are_normalised_and_reach_the_prompt(pxmodel):
     p = pxmodel.prompt(m, "red", "large", colours="grey")
     assert (p["tile"], p["edge"]) == (1, 64)
     assert pxmodel.prompt(m, "red", "small", colours="grey")["tile"] == 0
+
+
+def test_a_tile_caption_has_no_pixel_art_or_green_background_words(pxmodel):
+    m = new_model(pxmodel)
+    g = m["groups"][0]
+    plain = pxmodel.caption(m, g, m["kinds"][0], "", "")
+    assert plain.endswith("pixel art, flat green background")
+    tile = pxmodel.caption(m, g, dict(m["kinds"][0], tile=True), "", "")
+    assert tile.endswith("game tile, full colour") and "green" not in tile

@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tiles**: a kind can be a **Tile** (floors, walls: opaque, full colour, no
   background removal, colour limit or outline) and have **Keep edge (px)**:
   a remaster keeps the original's outer pixels, so tiles that were made to
-  join still join. `pxmake.sh --keep-edge` overrides it for a run.
+  join still join. Their captions say "game tile, full colour" instead of
+  "pixel art, flat green background". `pxmake.sh --keep-edge` overrides it for a run.
 - **Results**: each image shows its seed next to the render time (click to copy it).
 - **LoRA files**: a new page lists every LoRA in ComfyUI's loras folder (name,
   model, base, epoch, date, size, number of results made with it, and which
