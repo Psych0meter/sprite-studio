@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Results**: the render time of each image is on its own line under the name; a
+  long name hid it.
 - **Batch**: a batch with no name is now called after its model, LoRA and date
   (it used to be the date alone, so every unnamed batch of the day landed in
   the same folder). Running the same batch again still continues it.

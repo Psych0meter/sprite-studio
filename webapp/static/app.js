@@ -472,8 +472,9 @@ function tile(v, opts = {}) {
   if (opts.cleanup && v.raw) tools.append(iconBtn("tune", "Clean up again: colours, edge, outline, symmetry, palette", () => opts.cleanup(v)));
   if (opts.recolour) tools.append(iconBtn("palette", "Recolour with a palette", () => opts.recolour(v)));
   if (opts.remaster) tools.append(iconBtn("redo", "Generate again from this one", () => opts.remaster(v)));
-  el.append(stage, h("div", { class: "cap" }, h("span", { class: "name", title: v.label || v.name }, v.label || v.name,
-    v.seconds ? h("span", { class: "secs muted", title: "Render time", style: { marginLeft: "6px", fontSize: "11px" } }, fmtDur(v.seconds)) : null), tools));
+  el.append(stage, h("div", { class: "cap" },
+    h("div", { class: "cap-text" }, h("div", { class: "name", title: v.label || v.name }, v.label || v.name),
+      v.seconds ? h("div", { class: "secs", title: "Render time" }, fmtDur(v.seconds)) : null), tools));
   return el;
 }
 
