@@ -26,6 +26,7 @@ SG_WEB_PASSWORD, when set, asks for it (any user name) in the browser.
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import csv
 import datetime as dt
@@ -51,6 +52,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, UnidentifiedImageError
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = Path(os.environ.get("SG_SCRIPTS", HERE.parent / "scripts")).resolve()
@@ -174,6 +176,49 @@ def safe_path(p: str) -> Path:
     raise HTTPException(403, "outside the data folders")
 
 
+# ---- limits: what the app accepts from the browser
+MAX_BODY = int(os.environ.get("SG_MAX_UPLOAD_MB", "300")) * 1024 * 1024  # one request
+MAX_FILE = 25 * 1024 * 1024  # one uploaded file, decoded
+MAX_ZIP_ENTRIES = 5000
+MAX_ZIP_TOTAL = 1024 * 1024 * 1024  # a zip's files, uncompressed
+MAX_PIXELS = 64_000_000  # one image
+MAX_QUEUED = int(os.environ.get("SG_MAX_QUEUED", "100"))  # jobs waiting for the GPU
+MAX_CPU_JOBS = 8  # CPU jobs running at once
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+SERVED_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".json", ".txt", ".csv", ".log"}
+
+
+def decode_data_url(data: Any, kinds: tuple[str, ...] = ("image/png",), limit: int = MAX_FILE) -> bytes:
+    """The bytes of a `data:<type>;base64,...` URL; a clear 400 for anything else (strict base64)."""
+    m = re.match(r"data:([^;,]*);base64,(.*)$", data if isinstance(data, str) else "", re.S)
+    if not m or (kinds and m.group(1) not in kinds and not (m.group(1) == "" and "" in kinds)):
+        raise HTTPException(400, "send the file as a base64 data URL" + (f" ({', '.join(kinds)})" if kinds else ""))
+    try:
+        raw = base64.b64decode(m.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "the file is not valid base64") from None
+    if len(raw) > limit:
+        raise HTTPException(413, f"file too big (at most {limit // 1_000_000} MB)")
+    return raw
+
+
+def check_image(raw: bytes, fmt: str | None = None) -> tuple[int, int]:
+    """Opens the bytes as an image (not just trusting a name or MIME type): its size, or a 400."""
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            if fmt and im.format != fmt:
+                raise HTTPException(400, f"not a {fmt} image")
+            w, h = im.size
+            im.verify()
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError, ValueError):
+        raise HTTPException(400, "not a readable image (or too large)") from None
+    if w * h > MAX_PIXELS:
+        raise HTTPException(400, f"image too large ({w}x{h} px)")
+    return w, h
+
+
 def job_env() -> dict:
     s = settings()
     env = dict(os.environ)
@@ -213,6 +258,11 @@ class Jobs:
     def persist(self) -> None:
         items = sorted(self.jobs.values(), key=lambda j: j["created"])[-300:]
         _save("jobs.json", items)
+        keep = {Path(j["log"]).name for j in items}
+        for old in LOG_DIR.glob("*.log"):  # the logs of jobs that fell off the list are removed
+            if old.name not in keep and time.time() - old.stat().st_mtime > 86400:
+                with contextlib.suppress(OSError):
+                    old.unlink()
 
     def submit(
         self,
@@ -244,6 +294,16 @@ class Jobs:
             "log": str(LOG_DIR / f"{jid}.log"),
         }
         with self.cv:
+            if lane == "gpu" and len(self.queue) >= MAX_QUEUED:
+                raise HTTPException(
+                    429, f"{MAX_QUEUED} jobs are already waiting: wait for some to finish or cancel some"
+                )
+            if (
+                lane != "gpu"
+                and sum(1 for j in self.jobs.values() if j["lane"] != "gpu" and j["status"] == "running")
+                >= MAX_CPU_JOBS
+            ):
+                raise HTTPException(429, "too many jobs are running at once: try again in a moment")
             self.jobs[jid] = job
             if lane == "gpu":
                 self.queue.append(jid)
@@ -981,6 +1041,41 @@ async def no_stale_pages(request: Request, call_next):
     return response
 
 
+def _host_of(url: str) -> str:
+    return re.sub(r"^[a-z][a-z0-9+.-]*://", "", url.strip().lower()).split("/")[0]
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    """Refuses cross-site requests that change something (a page on another site must not drive the app with
+    the browser's saved password) and oversized or length-less bodies."""
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        origin = request.headers.get("origin")
+        if origin and origin != "null":
+            own = {request.headers.get("host", "").lower(), request.headers.get("x-forwarded-host", "").lower()}
+            own |= {x.strip().lower() for x in os.environ.get("SG_ALLOWED_ORIGINS", "").split(",") if x.strip()}
+            if _host_of(origin) not in own:
+                return JSONResponse({"error": "cross-site request refused"}, status_code=403)
+        elif request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse({"error": "cross-site request refused"}, status_code=403)
+        length = request.headers.get("content-length")
+        if length is None and "chunked" in request.headers.get("transfer-encoding", "").lower():
+            return JSONResponse({"error": "send a Content-Length"}, status_code=411)
+        if length and length.isdigit() and int(length) > MAX_BODY:
+            return JSONResponse({"error": f"request too big (at most {MAX_BODY // 1_000_000} MB)"}, status_code=413)
+    return await call_next(request)
+
+
+@app.exception_handler(UnidentifiedImageError)
+async def _bad_image(request: Request, exc: Exception):
+    return JSONResponse({"error": "not a readable image"}, status_code=400)
+
+
+@app.exception_handler(Image.DecompressionBombError)
+async def _big_image(request: Request, exc: Exception):
+    return JSONResponse({"error": f"image too large (over {MAX_PIXELS // 1_000_000} million pixels)"}, status_code=400)
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
     if PASSWORD:
@@ -988,7 +1083,8 @@ async def auth(request: Request, call_next):
         ok = False
         if h.startswith("Basic "):
             try:
-                ok = secrets.compare_digest(base64.b64decode(h[6:]).decode().split(":", 1)[1], PASSWORD)
+                given = base64.b64decode(h[6:]).decode().split(":", 1)[1]
+                ok = secrets.compare_digest(given.encode(), PASSWORD.encode())
             except (ValueError, IndexError):
                 ok = False
         if not ok:
@@ -1163,6 +1259,8 @@ def api_file(path: str = ""):
     p = safe_path(path)
     if not p.is_file():
         raise HTTPException(404, "no such file")
+    if p.suffix.lower() not in SERVED_SUFFIXES:  # images and the small text files the pages read, not models or code
+        raise HTTPException(403, "this kind of file is not served")
     return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
@@ -1189,15 +1287,14 @@ def api_info(path: str):
 @app.post("/api/upload")
 async def api_upload(request: Request):
     b = await request.json()
-    m = re.match(r"data:image/png;base64,(.+)", b.get("data", ""))
-    if not m:
-        raise HTTPException(400, "send a PNG image")
+    raw = decode_data_url(b.get("data"))
+    check_image(raw, "PNG")
     folder = setting_path("px_output") / "uploads"
     folder.mkdir(parents=True, exist_ok=True)
     f = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name_ok(b.get('name', 'sketch.png'))}"
     if f.suffix != ".png":
         f = f.with_suffix(".png")
-    f.write_bytes(base64.b64decode(m.group(1)))
+    f.write_bytes(raw)
     return {"path": str(f)}
 
 
@@ -2110,13 +2207,16 @@ async def api_model_upload_zip(mid: str, request: Request):
 
     m = model_cfg(mid)
     b = await request.json()
-    mm = re.match(r"data:[^;]*;base64,(.+)", b.get("data", ""))
-    if not mm:
-        raise HTTPException(400, "send a zip file")
+    raw = decode_data_url(b.get("data"), kinds=(), limit=MAX_BODY)
     try:
-        z = zipfile.ZipFile(io.BytesIO(base64.b64decode(mm.group(1))))
+        z = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile:
         raise HTTPException(400, "not a zip file") from None
+    infos = z.infolist()
+    if len(infos) > MAX_ZIP_ENTRIES:
+        raise HTTPException(400, f"too many files in the zip (at most {MAX_ZIP_ENTRIES})")
+    if sum(i.file_size for i in infos) > MAX_ZIP_TOTAL:
+        raise HTTPException(400, f"the zip is too big once unpacked (at most {MAX_ZIP_TOTAL // 1_000_000} MB)")
     folder = Path(pm().sprites_dir(mid))
     folder.mkdir(parents=True, exist_ok=True)
     saved, skipped = [], []
@@ -2136,10 +2236,16 @@ async def api_model_upload_zip(mid: str, request: Request):
         if dst.exists() and not b.get("overwrite"):
             skipped.append(name)
             continue
-        if info.file_size > 20_000_000:
+        if info.file_size > MAX_FILE:
             skipped.append(name + " (too big)")
             continue
-        dst.write_bytes(z.read(info))
+        data = z.read(info)
+        try:
+            check_image(data, "PNG")
+        except HTTPException:
+            skipped.append(name + " (not a valid PNG)")
+            continue
+        dst.write_bytes(data)
         saved.append(name)
         if b.get("group"):
             m["sprites"].setdefault(name, {})["group"] = b["group"]
@@ -2188,16 +2294,21 @@ async def api_model_upload(mid: str, request: Request):
     folder.mkdir(parents=True, exist_ok=True)
     saved, skipped = [], []
     for f in b.get("files") or []:
-        mm = re.match(r"data:image/png;base64,(.+)", f.get("data", ""))
         name = re.sub(r"[^\w.-]+", "_", Path(f.get("name", "")).name)
-        if not mm or not name.lower().endswith(".png"):
+        try:
+            raw = decode_data_url(f.get("data"))
+            check_image(raw, "PNG")
+        except HTTPException as e:
+            skipped.append(f"{f.get('name', '?')} ({e.detail})")
+            continue
+        if not name.lower().endswith(".png"):
             skipped.append(f.get("name", "?") + " (not a PNG)")
             continue
         dst = folder / name
         if dst.exists() and not b.get("overwrite"):
             skipped.append(name + " (already there)")
             continue
-        dst.write_bytes(base64.b64decode(mm.group(1)))
+        dst.write_bytes(raw)
         saved.append(name)
         if b.get("group"):
             m["sprites"].setdefault(name, {})["group"] = b["group"]
@@ -2584,14 +2695,16 @@ async def api_palette_import(request: Request):
     import tempfile
 
     b = await request.json()
-    mm = re.match(r"data:[^;]*;base64,(.+)", b.get("data", ""))
     name = Path(b.get("name") or "palette.hex").name
     ext = Path(name).suffix.lower()
-    if not mm or ext not in (".json", ".hex", ".txt", ".gpl", ".png", ".gif", ".bmp"):
+    if ext not in (".json", ".hex", ".txt", ".gpl", ".png", ".gif", ".bmp"):
         raise HTTPException(400, "send a .hex, .gpl, .json or image file")
+    raw = decode_data_url(b.get("data"), kinds=())
+    if ext in (".png", ".gif", ".bmp"):
+        check_image(raw)
     with tempfile.TemporaryDirectory() as td:
         f = Path(td) / ("palette" + ext)
-        f.write_bytes(base64.b64decode(mm.group(1)))
+        f.write_bytes(raw)
         try:
             pal = pm().pxtool.load_palette(str(f))
         except Exception as e:
@@ -2887,9 +3000,16 @@ app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
 if __name__ == "__main__":
     import uvicorn
 
+    host = os.environ.get("SG_WEB_HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost", "::1") and not PASSWORD:
+        print(
+            f"WARNING: listening on {host} with no SG_WEB_PASSWORD: anyone who can reach this port can start jobs,\n"
+            "change settings and delete files. Set a password, or keep the app on a trusted network.",
+            file=sys.stderr,
+        )
     uvicorn.run(
         app,
-        host=os.environ.get("SG_WEB_HOST", "0.0.0.0"),
+        host=host,
         port=int(os.environ.get("SG_WEB_PORT", "8189")),
         log_level="warning",
     )
