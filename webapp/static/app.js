@@ -1835,7 +1835,7 @@ routes.models = async (main, parts) => {
       oninput: (e) => {
         form.label = e.target.value;
         const id = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
-        $("#nm-id").placeholder = id || "player_units"; $("#nm-trigger").placeholder = "px" + id.replace(/_/g, "").slice(0, 12);
+        $("#nm-id").placeholder = id || "player_units"; $("#nm-trigger").placeholder = "px" + id.replace(/_/g, "").slice(0, 22);
       } })),
     h("div", { class: "inline-fields", style: { marginTop: "14px" } },
       h("div", { class: "field" }, h("label", { for: "nm-id" }, "Id (folder)"), h("input", { id: "nm-id", type: "text", placeholder: "player_units", oninput: (e) => { form.id = e.target.value; } })),
