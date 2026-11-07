@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Menu**: the version of the app is shown at the bottom of the left menu.
 
 ### Changed
+- **Results**: the list on the left now updates by itself (new results, running batches, sprite counts) every few seconds, and a result a job is still writing is patched in place: only the sprites that changed are redrawn, so the page no longer reloads completely and keeps its scroll position and open images. When the job finishes, the page settles once.
 - **Security**: found by an outside audit. A plain run now listens on this machine only (`SG_WEB_HOST`); the service made by `install.sh` still listens on every address and keeps a password, port or host added to its unit, and the installer says when no password is set. Changes sent from another website are refused. Requests, uploaded images (checked as real images, at most 64 million pixels) and zips (5000 files, 1 GB unpacked) have size limits. `/api/file` serves only images and small text files, no longer model weights or code. A password with accents no longer crashes the login.
 - **Jobs**: at most 100 jobs may wait for the GPU and 8 CPU jobs run at once (the app says so instead of piling up); the logs of old jobs are deleted.
 - **Prompts**: the negative prompt also rejects pillow shading, anti-aliased edges and jagged lines (the training captions are unchanged).

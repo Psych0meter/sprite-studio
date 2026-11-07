@@ -1073,6 +1073,7 @@ routes.results = async (main, _parts, params) => {
     const box = h("div", { class: "list" });
     listPanel.append(box);
     const drawItems = () => {
+      const keep = box.scrollTop;
       box.innerHTML = "";
       const shown = items.filter((i) => (typeFilter === "all" || i.type === typeFilter) && i.title.toLowerCase().includes(filter.toLowerCase()));
       if (!shown.length) box.append(h("p", { class: "muted small" }, "Nothing here."));
@@ -1089,7 +1090,9 @@ routes.results = async (main, _parts, params) => {
       }
     };
     drawItems();
+    redrawItems = drawItems;
   };
+  let redrawItems = () => {};
 
   const drawView = async () => {
     view.innerHTML = "";
@@ -1098,7 +1101,8 @@ routes.results = async (main, _parts, params) => {
       return;
     }
     let d;
-    try { d = await api("/results/detail?path=" + encodeURIComponent(current)); } catch (e) { view.append(h("div", { class: "note bad" }, e.message)); return; }
+    const detailUrl = "/results/detail?path=" + encodeURIComponent(current);
+    try { d = await api(detailUrl); } catch (e) { view.append(h("div", { class: "note bad" }, e.message)); return; }
     const body = h("div", {});
     const item = items.find((i) => i.path === d.path) || {};
     const delBtn = (path, label, small) => item.busy ? null : h("button", { class: "btn sm ghost danger", title: "Move to the bin",
@@ -1114,7 +1118,14 @@ routes.results = async (main, _parts, params) => {
       if (p.kind && p.kind !== "none") q.set("kind", p.kind);
       location.hash = "#/generate?" + q;
     };
-    const setRow = (s, pickAs, title, deletable) => h("div", { class: "set" },
+    liveRows = new Map();  // the rows on screen, so a live refresh replaces only the ones that changed
+    const setRow = (s, pickAs, title, deletable) => {
+      const el = makeRow(s, pickAs, title, deletable);
+      liveRows.set(rowKey(s), { el, sig: rowSig(s), args: [pickAs, title, deletable] });
+      return el;
+    };
+    makeRowFn = (...a) => makeRow(...a);
+    const makeRow = (s, pickAs, title, deletable) => h("div", { class: "set" },
       h("div", { class: "set-head" }, h("h3", {}, title || s.name), s.done ? null : item.busy ? h("span", { class: "tag amber" }, "rendering…")
           : h("span", { class: s.variants.length ? "tag" : "tag bad" }, s.variants.length ? "unfinished" : "failed"),
         h("span", { class: "muted small", title: s.prompt }, [s.params.denoise && s.params.denoise !== "n/a" ? `denoise ${s.params.denoise}` : "", s.params.lora || "",
@@ -1139,12 +1150,12 @@ routes.results = async (main, _parts, params) => {
         const pickedCount = d.sets.filter((s) => s.variants.some((v) => S.picks[v.path])).length;
         const failedSets = d.sets.filter((s) => !s.variants.length && !item.busy);
         body.append(h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Batch " + d.title),
-          h("div", { class: "row" }, h("span", { class: "muted small" }, `${d.sets.length - failedSets.length} sprites made, ${pickedCount} picked` + (failedSets.length ? `, ${failedSets.length} failed` : "")),
+          h("div", { class: "row" }, h("span", { class: "muted small", "data-count": "1" }, `${d.sets.length - failedSets.length} sprites made, ${pickedCount} picked` + (failedSets.length ? `, ${failedSets.length} failed` : "")),
             failedSets.length && failedSets.length < d.sets.length ? h("button", { class: "btn sm ghost", onclick: () => removeResults({ paths: failedSets.map((s) => s.path) }, `the ${failedSets.length} failed sprite(s) of this batch`) }, "Delete failed") : null,
             delBtn(d.path, `the whole batch ${d.title}`))),
           d.sheets.length ? h("div", { class: "row small" }, "Sheets: ", d.sheets.map((sh) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSprite(sh); } }, base(sh)))) : null));
         for (const cls of classes) {
-          const p = h("div", { class: "panel" }, h("h2", {}, cls.replace("_", " ")));
+          const p = h("div", { class: "panel", "data-class": cls }, h("h2", {}, cls.replace("_", " ")));
           for (const s of d.sets.filter((x) => x.class === cls)) p.append(setRow(s, s.target, null, true));
           body.append(p);
         }
@@ -1160,21 +1171,66 @@ routes.results = async (main, _parts, params) => {
     };
     drawBody();
     view.append(bar, body);
-    // A job is still writing here: refresh every 15 s, so new sprites show and the tags settle.
-    clearTimeout(liveTimer);
-    if (item.busy) {
-      const shown = current;
-      liveTimer = setTimeout(async () => {
-        if (current !== shown || !document.body.contains(view)) return;
-        const y = window.scrollY;
-        items = await api("/results");
-        drawList();
-        await drawView();
-        window.scrollTo(0, y);
-      }, 15000);
+    shownBusy = !!item.busy;
+    shownMtime = item.mtime;
+    rowShown = current;
+  };
+
+  // Live updates, every 4 s while the page is open: the list on the left picks up new and changing results, and a
+  // result a job is still writing is patched in place (only the sprites that changed are redrawn, nothing else flickers).
+  const itemsSig = (list) => list.map((i) => [i.path, i.count, i.tried, i.busy, i.empty, i.cover].join()).join("|");
+  const patchView = async () => {
+    const shown = current;
+    let d2;
+    try { d2 = await api("/results/detail?path=" + encodeURIComponent(shown)); } catch { return; }
+    if (current !== shown || !document.body.contains(view)) return;
+    const sets = d2.type === "batch" ? d2.sets : d2.type === "single" ? [d2] : d2.subjects.flatMap((x) => x.cells);
+    let rebuild = false;
+    for (const x of sets) {
+      const old = liveRows.get(rowKey(x));
+      if (!old) {  // a new sprite of a batch: its row goes in its class's panel, in order
+        const panel = d2.type === "batch" ? view.querySelector(`[data-class="${CSS.escape(x.class)}"]`) : null;
+        if (!panel) { rebuild = true; continue; }
+        const args = [x.target, null, true];
+        const el = makeRowFn(x, ...args);
+        const next = sets.slice(sets.indexOf(x) + 1).map((y) => liveRows.get(rowKey(y))).find((e) => e && e.el.parentNode === panel);
+        panel.insertBefore(el, next ? next.el : null);
+        liveRows.set(rowKey(x), { el, sig: rowSig(x), args });
+        continue;
+      }
+      const sig = rowSig(x);
+      if (sig === old.sig) continue;
+      const el = makeRowFn(x, ...old.args);
+      old.el.replaceWith(el);
+      liveRows.set(rowKey(x), { el, sig, args: old.args });
+    }
+    if (rebuild) { await drawView(); return; }  // a sprite appeared that has no row yet: draw the whole result once
+    const count = view.querySelector("[data-count]");
+    if (count && d2.type === "batch") {
+      const picked = d2.sets.filter((x) => x.variants.some((v) => S.picks[v.path])).length;
+      count.textContent = `${d2.sets.length} sprites made, ${picked} picked`;
     }
   };
-  let liveTimer = null;
+  let shownBusy = false, shownMtime = 0, rowShown = null, liveRows = new Map(), makeRowFn = null;
+  const rowKey = (x) => x.path || x.target || x.name;
+  const rowSig = (x) => (x.done ? "d" : "r") + "|" + (x.orig || "") + "|" + x.variants.map((v) => v.path).join(",");
+  const tick = async () => {
+    if (!document.body.contains(view)) return;
+    if (!document.hidden) {
+      try {
+        const fresh = await api("/results");
+        const listChanged = itemsSig(fresh) !== itemsSig(items);
+        items = fresh;
+        if (listChanged) redrawItems();
+        const it = current && items.find((i) => i.path === current);
+        if (it && it.busy && shownBusy) await patchView();
+        else if (it && (shownBusy !== !!it.busy || (!it.busy && it.mtime !== shownMtime))) await drawView();  // finished (or changed): settle the tags and buttons
+        else if (!it && current && rowShown === current) { /* the result was removed elsewhere: leave the view as it is */ }
+      } catch { /* the app is restarting: try again next time */ }
+    }
+    liveTimer = setTimeout(tick, 4000);
+  };
+  let liveTimer = setTimeout(tick, 4000);
   onLeave(() => clearTimeout(liveTimer));
 
   drawList();
