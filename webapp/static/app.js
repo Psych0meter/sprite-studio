@@ -552,7 +552,21 @@ async function recolourDialog(v, done) {
 
 /** Clean up one variant again from its saved raw render: the raw render next to the result, the clean-up's
  *  settings as sliders, a live preview (nothing is written until "Keep it"). */
-const CLEAN_DEFAULTS = { palette: "job", mirror: "auto", colours: 64, edge: 50, outline: true, tidy: true, min_part: 0.4, key_tol: 70, keep_green: "auto" };
+/** Colours that are almost the same as an earlier (or heavier) one: [{drop, keep}] indexes, for the palette editor's merge. */
+function nearDuplicates(cols, limit = 18) {
+  const rgb = cols.map((c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)));
+  const dist = (a, b) => Math.sqrt(2 * (a[0] - b[0]) ** 2 + 4 * (a[1] - b[1]) ** 2 + 3 * (a[2] - b[2]) ** 2);
+  const out = [], dropped = new Set();
+  for (let i = 0; i < rgb.length; i++) {
+    if (dropped.has(i)) continue;
+    for (let j = i + 1; j < rgb.length; j++) {
+      if (!dropped.has(j) && dist(rgb[i], rgb[j]) < limit) { dropped.add(j); out.push({ drop: j, keep: i }); }
+    }
+  }
+  return out;
+}
+
+const CLEAN_DEFAULTS = { palette: "job", mirror: "auto", colours: 64, edge: 50, outline: true, outline_style: "dark", tidy: true, min_part: 0.4, key_tol: 70, keep_green: "auto" };
 
 async function cleanupDialog(v, set, done) {
   await loadPalettes();
@@ -562,7 +576,7 @@ async function cleanupDialog(v, set, done) {
   const preview = h("div", { class: "pal-stage " + ltClass(), style: { minHeight: "120px", display: "inline-block" } }, h("span", { class: "muted small" }, "Working…"));
   const note = h("div", { class: "small muted", style: { marginTop: "8px", minHeight: "1.2em" } });
   const keepBtn = h("button", { class: "btn primary", disabled: true }, "Keep it as a new variant");
-  const body = () => ({ path: v.path, palette: f.palette, mirror: f.mirror, colours: f.colours, edge: f.edge / 100, outline: f.outline,
+  const body = () => ({ path: v.path, palette: f.palette, mirror: f.mirror, colours: f.colours, edge: f.edge / 100, outline: f.outline, outline_style: f.outline_style,
     tidy: f.tidy, min_part: f.min_part / 100, key_tol: f.key_tol, keep_green: f.keep_green === "on" ? true : f.keep_green === "off" ? false : "auto" });
   const run = async () => {
     const mine = ++ticket;
@@ -604,12 +618,14 @@ async function cleanupDialog(v, set, done) {
         ...S.palettes.map((p) => [p.id, p.label])], "The palette maps every pixel onto its colours: it is the biggest change from the raw render."),
       select("mirror", "Symmetry", [["auto", "Like the original"], ["none", "None"], ["left", "Left half mirrored"], ["right", "Right half mirrored"]],
         "Mirroring copies one half onto the other and drops what differs left and right."),
-      slider("colours", "Colours at most", 2, 64, 1, "", "Fewer colours: flatter, more graphic. 64 is the standard's limit."),
+      slider("colours", "Colours at most", 2, 256, 1, "", "Fewer colours: flatter, more graphic. 64 is the usual limit for a sprite; a few colours well chosen read better than many close ones."),
       slider("edge", "Edge", 20, 80, 5, " %", "How much of a pixel's block must be part of the sprite to draw it. Lower: a fuller silhouette; higher: a thinner one."),
       slider("min_part", "Loose specks", 0, 5, 0.1, " %", "Separate bits smaller than this share of the sprite are dropped."),
       slider("key_tol", "Background tolerance", 20, 140, 5, "", "How close to the green a pixel must be to count as background. Higher removes more fringe, and may eat green-tinted parts of the sprite."),
       check("tidy", "Tidy lone pixels", "A pixel that matches none of its neighbours takes theirs."),
-      check("outline", "Dark outline", "A dark line around the silhouette (glowing edges are kept)."),
+      check("outline", "Outline", "A one-pixel line around the silhouette (glowing edges are kept)."),
+      select("outline_style", "Outline style", [["dark", "Dark: the darkest colour"], ["selective", "Selective: a darker shade of the sprite's own colour"]],
+        "Selective outlining softens the silhouette and makes the sprite read as one form; a dark outline separates it more from any background."),
       select("keep_green", "Greens of its own", [["auto", "Detect"], ["on", "Keep them"], ["off", "Treat as background"]]),
       h("button", { class: "btn sm ghost", style: { marginTop: "6px" }, onclick: () => { Object.assign(f, CLEAN_DEFAULTS); drawControls(); later(); } }, "Reset the settings"));
   };
@@ -797,7 +813,7 @@ routes.generate = async (main, _parts, params) => {
   const saved = store.get("gen2", {});
   const f = Object.assign({
     model: "", group: "", kind: "", refs_kind: "", extra: "", colours: "", start: "none", init: "", sketch: "",
-    denoise: "", count: 4, seed: "", size: "", mirror: "auto", lora: "", strength: 1.0, name: "", keep_green: "auto", no_tidy: false, palette: "", fill: "",
+    denoise: "", count: 4, seed: "", size: "", mirror: "auto", lora: "", strength: 1.0, name: "", keep_green: "auto", no_tidy: false, outline_style: "dark", palette: "", fill: "",
   }, saved, { init: "", sketch: "" });
   for (const k of ["model", "group", "kind"]) if (params.get(k)) f[k] = params.get(k);
   const asked = S.catalog.models.find((x) => x.id === params.get("model"));
@@ -915,7 +931,11 @@ routes.generate = async (main, _parts, params) => {
     adv.append(h("div", { class: "field", style: { marginTop: "14px" } }, h("label", { for: "f-pal" }, "Palette"),
       h("select", { id: "f-pal", onchange: (e) => { f.palette = e.target.value; remember(); draw(); } }, paletteOptions(f.palette, g && g.palette)),
       h("div", { class: "hint" }, "Colours and tuning put on the results. ", h("a", { href: "#/palettes" }, "Palettes"))));
-    adv.append(h("label", { class: "check small", style: { marginTop: "12px" } }, h("input", { type: "checkbox", checked: f.no_tidy, onchange: (e) => { f.no_tidy = e.target.checked; remember(); } }), "No dark outline"));
+    adv.append(h("label", { class: "check small", style: { marginTop: "12px" } }, h("input", { type: "checkbox", checked: f.no_tidy, onchange: (e) => { f.no_tidy = e.target.checked; remember(); } }), "No outline"));
+    adv.append(h("div", { class: "field" }, h("label", { for: "f-outline" }, "Outline style"),
+      h("select", { id: "f-outline", onchange: (e) => { f.outline_style = e.target.value; remember(); } },
+        [["dark", "Dark: the darkest colour"], ["selective", "Selective: a darker shade of the sprite's own colour"]].map(([v, l]) => h("option", { value: v, selected: v === f.outline_style }, l))),
+      h("div", { class: "hint" }, "Selective outlining softens the silhouette; a dark outline separates the sprite more from any background.")));
     adv.append(h("div", { class: "field" }, h("label", { for: "f-name" }, "Name of the results"),
       h("input", { id: "f-name", type: "text", value: f.name, placeholder: `${f.kind || f.model}_${f.group}`, oninput: (e) => { f.name = e.target.value; remember(); } })));
     form.append(adv);
@@ -2005,7 +2025,8 @@ async function modelEditor(main, mid, tab) {
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Kinds"),
         h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: "", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
         h("p", { class: "small muted" }, "Optional second axis: a size class. Its words go into the captions too; its size sets the pixel grid of training and the size of what is generated. A model without kinds uses each sprite's own size."),
-        m.kinds.length ? h("div", { class: "table-wrap" }, kt) : h("p", { class: "muted" }, "No kinds.")),
+        m.kinds.length ? h("div", { class: "table-wrap" }, kt) : h("p", { class: "muted" }, "No kinds."),
+        m.kinds.some((k) => !k.tile && Number(k.size) > 200) ? h("div", { class: "hint", style: { marginTop: "8px" } }, "A sprite rarely needs more than about 200 px. Smaller sprites keep the pixel-art look, are quicker to train and are easier for the model to get right.") : null),
       saveBar());
   };
 
@@ -2135,7 +2156,7 @@ async function modelEditor(main, mid, tab) {
 routes.palettes = async (main, parts) => {
   await loadCatalog();
   await loadPalettes();
-  main.append(head("Palettes", "Colours, and a tuning, put on what is generated: lighten a group that comes out too dark, keep a project's colours, reuse another game's. Set a group's palette in Models (Groups) or below, or pick one for a single run on Generate and Batch.",
+  main.append(head("Palettes", "Colours, and a tuning, put on what is generated: lighten a group that comes out too dark, keep a project's colours, reuse another project's. Set a group's palette in Models (Groups) or below, or pick one for a single run on Generate and Batch.",
     h("button", { class: "btn", onclick: () => importInput.click() }, "Import a file"),
     h("button", { class: "btn primary", onclick: () => newFromGroup() }, "New palette")));
   const importInput = h("input", { type: "file", accept: ".hex,.gpl,.json,.txt,.png,.gif,.bmp", hidden: true });
@@ -2214,7 +2235,7 @@ routes.palettes = async (main, parts) => {
         h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { gid = e.target.value; } },
           how === "auto" ? null : h("option", { value: "" }, "Every group"), mm.groups.map((g) => h("option", { value: g.id, selected: g.id === gid }, g.label)))),
         how === "model" && mm.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { kid = e.target.value; } }, h("option", { value: "" }, "Every kind"), mm.kinds.map((k) => h("option", { value: k.id, selected: k.id === kid }, k.label)))) : null,
-        how !== "auto" ? h("div", { class: "field" }, h("label", {}, "Colours at most"), h("input", { type: "number", min: 2, max: 64, value: n, oninput: (e) => { n = e.target.value; } })) : null));
+        how !== "auto" ? h("div", { class: "field" }, h("label", {}, "Colours at most"), h("input", { type: "number", min: 2, max: 256, value: n, oninput: (e) => { n = e.target.value; } })) : null));
       if (how === "auto") {
         // what the group is compared with: the other groups of a model that has several
         const several = ms.filter((x) => x.groups.length > 1);
@@ -2279,6 +2300,8 @@ routes.palettes = async (main, parts) => {
     const sw = h("div", {});
     const drawSwatches = () => {
       sw.innerHTML = "";
+      const count = $("#pal-count");
+      if (count) count.textContent = `Colours (${edit.colours.length})`;
       const tuned = tuneColours(edit.colours, edit.tune);
       sw.append(h("div", { class: "swatch-edit" }, edit.colours.map((c, i) => {
         const pick = h("input", { type: "color", value: c, oninput: (e) => { edit.colours[i] = e.target.value; changed(); } });
@@ -2289,6 +2312,18 @@ routes.palettes = async (main, parts) => {
       }), h("label", { class: "swatch add", title: "Add a colour" }, "+", h("input", { type: "color", value: "#808080", onchange: (e) => {
         edit.colours.push(e.target.value); if (edit.weights.length) edit.weights.push(1); changed();
       } }))));
+      const twins = nearDuplicates(edit.colours);
+      if (twins.length) {
+        sw.append(h("div", { class: "note warn", style: { margin: "8px 0" } },
+          `${twins.length} colour${twins.length === 1 ? " is" : "s are"} almost the same as another one: near-twins make a sprite look blurry and waste the palette. `,
+          h("button", { class: "btn sm", style: { marginLeft: "8px" }, onclick: () => {
+            const drop = new Set(twins.map((t) => t.drop));
+            const keep = edit.colours.map((_, i) => i).filter((i) => !drop.has(i));
+            if (edit.weights.length) { for (const t of twins) edit.weights[t.keep] = (edit.weights[t.keep] || 0) + (edit.weights[t.drop] || 0); edit.weights = keep.map((i) => edit.weights[i]); }
+            edit.colours = keep.map((i) => edit.colours[i]);
+            changed();
+          } }, "Merge them")));
+      }
       if (edit.colours.length) sw.append(h("p", { class: "small muted" }, "Top: the colour, click to change it. Bottom strip: after the tuning. Sorted by how they were made; " + (edit.weights.length ? "hover shows how much of the art each covered." : "")));
     };
 
@@ -2390,7 +2425,7 @@ routes.palettes = async (main, parts) => {
       const colSel = h("select", {},
         h("optgroup", { label: "Whole models" }, ms.map((m) => opt({ model: m.id }, `${m.label}: every sprite`))),
         groupOpts((m, g) => `${g.label}: its sprites`, true), batchOpts(true));
-      const nIn = h("input", { type: "number", min: 2, max: 64, value: 32, style: { width: "70px" } });
+      const nIn = h("input", { type: "number", min: 2, max: 256, value: 32, style: { width: "70px" } });
       const colBtn = h("button", { class: "btn sm", onclick: async () => {
         colBtn.disabled = true;
         const r = await attempt(() => api("/palettes/colours", { body: { sprites: JSON.parse(colSel.value), n: Number(nIn.value) } }));
@@ -2443,7 +2478,7 @@ routes.palettes = async (main, parts) => {
           slider("hue", "Hue", -180, 180, "degrees"),
           slider("light", "Light from the top", -100, 100, "for sprites lit from below")),
         autoRow,
-        h("div", { class: "label", style: { marginTop: "14px" } }, `Colours (${edit.colours.length})`), sw, colRow,
+        h("div", { class: "label", id: "pal-count", style: { marginTop: "14px" } }, `Colours (${edit.colours.length})`), sw, colRow,
         h("label", { class: "check small", style: { marginTop: "10px" } }, h("input", { type: "checkbox", checked: edit.words, onchange: (e) => { edit.words = e.target.checked; dirty = true; saveBtn.disabled = false; } }),
           "Also name these colours in the prompt (instead of the colours read from the group's sprites)"),
         h("div", { class: "row", style: { marginTop: "14px" } }, h("span", { class: "label" }, "Export"),

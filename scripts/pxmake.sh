@@ -28,6 +28,8 @@
 #                    left or right                                    [auto]
 #   --keep-green     keep the sprite's own greens (automatic when it has some)
 #   --no-tidy        no lone-pixel clean-up and no dark outline
+#   --outline-style S  dark (the darkest colour, default) or selective (a darker
+#                    shade of the sprite's own colour)
 #   --fill PCT       50 to 100: the share of the canvas the sprite's longest
 #                    side takes (100: edge to edge). Default: the kind's (or
 #                    the model's) fill for new sprites and sketches; a
@@ -75,6 +77,7 @@ while [ $# -gt 0 ]; do
 	--mirror) mirror="$2"; shift 2 ;;
 	--keep-green) post_opts+=(--keep-green); shift ;;
 	--no-tidy) post_opts+=(--no-tidy); shift ;;
+	--outline-style) post_opts+=(--outline-style "$2"); shift 2 ;;
 	--palette) palette="$2"; shift 2 ;;
 	--fill) fill="$2"; shift 2 ;;
 	--keep-edge) keep_edge="$2"; shift 2 ;;

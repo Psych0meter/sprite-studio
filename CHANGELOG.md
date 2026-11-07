@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Colours**: palettes and the clean-up can hold up to 256 colours (was 64): taking colours from sprites, *Colours at most* in Clean up again, `--max-colours`. The default stays 64.
+- **Outline style**: *Selective* outlining paints the outline in a darker shade of the sprite's own colours instead of the darkest one (Generate › More settings, Clean up again, `pxmake.sh --outline-style`).
+- **Palettes**: a warning and a *Merge them* button for near-twin colours.
+- **Models**: a hint when a kind is larger than about 200 px.
+
 - **Templates**: a built-in "Tiles (floors, walls)" model, a Tile kind that keeps the original's edge.
 - **Tiles**: a kind can be a **Tile** (floors, walls: opaque, full colour, no
   background removal, colour limit or outline) and have **Keep edge (px)**:
@@ -24,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Menu**: the version of the app is shown at the bottom of the left menu.
 
 ### Changed
+- **Prompts**: the negative prompt also rejects pillow shading, anti-aliased edges and jagged lines (the training captions are unchanged).
 - **Wording**: the app, guide and examples no longer speak of ships, factions or hulls: groups are "teams or families", examples use neutral units, projects are not "games". Stored names (`game` source folder, `PX_GAME`) and the hard-surface colour words are unchanged, so saved models and trained LoRAs keep working.
 
 - **Results**: the render time of each image is on its own line under the name; a

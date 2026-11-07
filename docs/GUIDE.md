@@ -153,6 +153,34 @@ mixes up.
 - **One framing**: every image on flat green (`#00ff00`), centred, on the
   same pixel grid. Pick another key colour for a model whose art is green.
 
+### 4.1.1 What good pixel art looks like
+
+The app follows the rules of thumb of Derek Yu's pixel-art tutorial where a
+tool can:
+
+- **A one-pixel outline, no stray pixels.** The clean-up draws a one-pixel
+  outline and *tidies* lone pixels; edges are hard (no anti-aliasing on the
+  outside, so the sprite sits on any background without a halo).
+- **Selective outlining.** *Outline style: Selective* paints each outline
+  pixel in a darker shade of its own colour instead of the palette's darkest
+  colour: softer, and the sprite reads as one form. Dark is better when the
+  sprite must stand out from a busy background.
+- **Few colours, reused.** Fewer, well-chosen colours read better than many
+  close ones. The palette editor warns about near-twin colours (they look
+  blurry and waste the palette) and merges them in one click.
+- **No gradients, no pillow shading.** The negative prompt rejects gradients,
+  pillow shading (shading inward from the outline), anti-aliased edges and
+  jagged lines; shading comes from the training sprites.
+- **One light, from the top.** See 4.3 (*relight*) and the palette's
+  *Light from the top*.
+- **Keep sprites small.** A sprite rarely needs more than about 200 px; the
+  Models page says so for bigger kinds.
+
+By hand (the tool cannot do these for you): keep curves even (steps of 6, 3,
+2, 1 rather than 3, 1, 3), shade the parts farthest from the light first and
+add highlights last, and keep to about two darker and two lighter shades of
+each base colour.
+
 ### 4.2 The pixel grid
 
 Stable Diffusion works on a picture 8 times smaller than the image, so its
@@ -265,7 +293,9 @@ On any variant in Results:
     dropped.
   - *Background tolerance*: how close to the green a pixel must be to count
     as background. Higher removes more fringe but may eat green-tinted parts.
-  - *Tidy lone pixels*, *Dark outline*, *Greens of its own*.
+  - *Colours at most*: 2 to 256 (64 by default).
+  - *Tidy lone pixels*, *Outline* and its *style* (dark, or selective: see
+    4.1.1), *Greens of its own*.
 
   Not available for touch-ups (redo them from Generate) or for variants
   whose raw render was deleted.
@@ -328,7 +358,8 @@ epoch only when the name says it (`_e6`); otherwise the epoch reads `?`.
 
 ### 5.7 Tiles: floors, walls, anything that must join
 
-Sprites are pixel art with a background to remove and 64 colours at most.
+Sprites are pixel art with a background to remove and 64 colours by default
+(up to 256).
 A **tile** is the opposite: opaque art in full colour (a floor, a wall) that
 must meet its neighbours. Tick **Tile** on its kind (Models › Groups and
 kinds). Results of a tile kind are the render's tile cut out and scaled to
@@ -367,7 +398,7 @@ out dark. A palette fixes colours after rendering, without retraining.
   model, or another model for a one-group model). It can become the group's
   palette at once.
 - **A model's colours** / **a batch's colours**: the colours of a group, a
-  kind or a batch's results, merged down to 2 to 64 colours, each weighted
+  kind or a batch's results, merged down to 2 to 256 colours, each weighted
   by how much of the art it covers.
 - **Import a file**: `.hex` (Lospec, Aseprite), `.gpl` (GIMP, Krita), a
   palette `.json`, or an image.

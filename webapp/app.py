@@ -61,6 +61,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(SCRIPTS))
 
 import pxmodel  # noqa: E402  (the sprite models: scripts/pxmodel.py)
+from pxtool import MAX_COLOURS  # noqa: E402  (the most colours a palette holds)
 
 
 def pm():
@@ -1308,6 +1309,8 @@ async def api_generate(request: Request):
         cmd.append("--keep-green")
     if b.get("no_tidy"):
         cmd.append("--no-tidy")
+    if b.get("outline_style") in ("dark", "selective"):
+        cmd += ["--outline-style", b["outline_style"]]
     if b.get("palette"):
         cmd += ["--palette", palette_ref(b["palette"])]
     if b.get("fill") not in (None, ""):
@@ -2491,7 +2494,7 @@ async def api_palette_extract(request: Request):
         label = label or " ".join(x for x in [m["label"], g["label"] if g else ""] if x)
     if not paths:
         raise HTTPException(400, "no sprite to take colours from")
-    n = max(2, min(64, body_get(b, "n", 32, int)))
+    n = max(2, min(MAX_COLOURS, body_get(b, "n", 32, int)))
     pal = pm().pxtool.extract_palette(paths, n)
     label = label or Path(paths[0]).stem
     pid = free_palette_id(b.get("id") or label)
@@ -2571,7 +2574,7 @@ async def api_palette_colours(request: Request):
     paths, what = sprite_set(b.get("sprites") or {})
     if not paths:
         raise HTTPException(400, f"no sprite in {what}")
-    pal = pm().pxtool.extract_palette(paths, max(2, min(64, body_get(b, "n", 32, int))))
+    pal = pm().pxtool.extract_palette(paths, max(2, min(MAX_COLOURS, body_get(b, "n", 32, int))))
     return {"colours": pal["colours"], "weights": pal["weights"], "what": f"{len(paths)} sprite(s): {what}"}
 
 
@@ -2726,11 +2729,12 @@ def cleanup_inputs(b: dict) -> dict:
             "keep_green": bool(green),
             "palette": pal,
             "fill": max(0, min(100, fill or 0)),
-            "colours": num("colours", 64, 2, 64, int),
+            "colours": num("colours", 64, 2, MAX_COLOURS, int),
             "edge": num("edge", 0.5, 0.2, 0.8),
             "min_part": num("min_part", 0.004, 0, 0.05),
             "key_tol": num("key_tol", 70, 20, 140, int),
             "outline": b.get("outline", True) is not False,
+            "outline_style": "selective" if b.get("outline_style") == "selective" else "dark",
             "tidy": b.get("tidy", True) is not False,
         },
     }

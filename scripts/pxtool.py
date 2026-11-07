@@ -4,7 +4,7 @@
   pxtool.py describe <sprite>... [--glows] [--neutral]   colour words for the prompt
   pxtool.py init     <sprite> <out.png> [--size 64] [--mask MASK] [--canvas 512]
   pxtool.py post     <render.png> <out.png> [--size 128] [--grid INIT.json] [--mirror auto --orig SPRITE]
-                     [--max-colours 64] [--edge 0.5] [--no-outline] [--min-part 0.004] [--key-tol 70]
+                     [--max-colours 64] [--outline-style dark|selective] [--edge 0.5] [--no-outline] [--min-part 0.004] [--key-tol 70]
                      [--keep-green] [--no-tidy] [--keep-mask MASK --base SPRITE] [--legacy --margin 2]
   pxtool.py sheet    <out.png> <folder>... [--cell 160]
   pxtool.py palette-extract | palette-apply | palette-autotune | palette-words | palette-export
@@ -16,7 +16,7 @@ start a generation from; it writes the pixel grid next to it.
 `post` turns a render into a sprite: the green background removed by
 flood fill from the border (so light pixels of the sprite stay), green shadows and
 edge blends removed, holes inside the sprite filled, small loose specks
-dropped (real side parts kept), the render's own colours kept (64 at most),
+dropped (real side parts kept), the render's own colours kept (256 at most, 64 by default),
 one sprite pixel per block of the pixel grid (majority vote, the grid's
 phase matched to the render), lone pixels tidied, a dark outline, an optional mirror. It also writes
 a 4x preview and prints the sprite-standard checks.
@@ -85,6 +85,10 @@ def _quantize(cnt, k):
 
 def _is_glow(c):
     return _sat(c) > 0.45 and _val(c) > 0.45
+
+
+MAX_COLOURS = 256  # the most colours a palette or a clean-up can hold
+STANDARD_COLOURS = 64  # the usual sprite limit (the default; the standard check is relaxed above it)
 
 
 def palette_of(cnt, max_colours=64):
@@ -254,7 +258,7 @@ TUNE_KEYS = ("hue", "saturation", "brightness", "contrast")
 
 def load_palette(path):
     """A palette from .json, .hex (one colour per line, Lospec), .gpl (GIMP) or
-    an image (its colours, 64 at most)."""
+    an image (its colours, 256 at most)."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".json":
         with open(path) as fh:
@@ -272,7 +276,7 @@ def load_palette(path):
                     cols.append(rgb_to_hex([int(m.group(i)) for i in (1, 2, 3)]))
         pal = {"colours": cols}
     else:
-        pal = extract_palette([path], 64)
+        pal = extract_palette([path], MAX_COLOURS)
     pal.setdefault("id", re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_"))
     pal.setdefault("label", pal["id"])
     pal.setdefault("colours", [])
@@ -632,11 +636,13 @@ def _symmetric(path, threshold=0.9):
     return (a & m).sum() / max(1, (a | m).sum()) >= threshold
 
 
-def _tidy(canvas, pal, outline=True):
+def _tidy(canvas, pal, outline=True, style="dark"):
     """Pixel-art tidying at the final size: lone pixels that match none of
     their 8 neighbours take the neighbourhood's colour (the speckle the
     model leaves), and the edge of the silhouette gets a dark outline, as in
-    the hand-drawn sprites (glows on the edge are kept)."""
+    the hand-drawn sprites (glows on the edge are kept). style "selective":
+    each outline pixel takes a darker shade of its own colour (selective
+    outlining) instead of the palette's darkest colour."""
     h, w = canvas.shape[:2]
     alpha = canvas[..., 3] > 0
     rgb = canvas[..., :3].astype(np.int64)
@@ -660,9 +666,18 @@ def _tidy(canvas, pal, outline=True):
     darkest = pal[np.argmin(_luma(pal))]
     inner = ndimage.binary_erosion(alpha)
     edge = alpha & ~inner
+    luma = _luma(pal)
     for y, x in zip(*np.nonzero(edge), strict=False):
-        if not _is_glow(tuple(int(v) for v in out[y, x, :3])):
-            out[y, x, :3] = darkest
+        own = tuple(int(v) for v in out[y, x, :3])
+        if _is_glow(own):
+            continue
+        if style == "selective":
+            darker = pal[luma < _luma(np.array([own]))[0] * 0.75]
+            if len(darker):
+                target = np.array(own) * 0.55
+                out[y, x, :3] = darker[(((darker - target) ** 2) * np.array([3, 4, 2])).sum(1).argmin()]
+                continue
+        out[y, x, :3] = darkest
     return out
 
 
@@ -822,6 +837,7 @@ def post(
     fill=0,
     colours=64,
     outline=True,
+    outline_style="dark",
     edge=0.5,
     tile=False,
     keep_edge=0,
@@ -841,9 +857,9 @@ def post(
     cut by the canvas nor lost in empty space. 0: the render's own scale.
     Fine-tuning: min_part (loose parts dropped, share of the body), key_tol
     (how far from the key green a pixel is still background), colours (the
-    most the sprite keeps, 2 to 64), edge (0.2 to 0.8: the share of a block
+    most the sprite keeps, 2 to 256), edge (0.2 to 0.8: the share of a block
     that must be body to draw its pixel; lower = a fuller silhouette),
-    outline (the dark edge line; tidy=False drops it too)."""
+    outline (the dark edge line; tidy=False drops it too), outline_style ("dark" or "selective")."""
     if tile:
         return tile_post(src, dst, size, orig=orig, grid=grid, keep_edge=int(keep_edge or 0))
     a = np.array(Image.open(src).convert("RGBA"))
@@ -886,11 +902,11 @@ def post(
         rgb = rgb.copy()
         rgb[holes] = rgb[iy[holes], ix[holes]]
     fg = filled
-    # The render's own colours (64 at most): the LoRA already draws the
+    # The render's own colours (256 at most, 64 by default): the LoRA already draws the
     # group's colours and contrast, the clean-up only keeps them.
     cols, counts = np.unique(rgb[fg], axis=0, return_counts=True)
     cnt = Counter({tuple(int(v) for v in c): int(n) for c, n in zip(cols, counts, strict=False)})
-    colours = max(2, min(64, int(colours or 64)))
+    colours = max(2, min(MAX_COLOURS, int(colours or STANDARD_COLOURS)))
     pal = np.array(palette_of(cnt, colours)) if cnt else np.array([[0, 0, 0]])
 
     if fg.sum() < 64:
@@ -929,7 +945,7 @@ def post(
         canvas = _legacy_fit(rgb, fg, pal, size, margin, mirror)
         ow = size
     if tidy:
-        canvas = _tidy(canvas, pal, outline)
+        canvas = _tidy(canvas, pal, outline, outline_style)
     # Last pass at the final size: any pixel still green is background
     # fringe; on the edge it goes, inside it takes the colour of the nearest
     # clean body pixel.
@@ -958,9 +974,9 @@ def post(
             canvas[..., 3] = np.where(canvas[..., 3] > 127, 255, 0)
             op = canvas[..., 3] > 0
             cols, counts = np.unique(canvas[op][:, :3], axis=0, return_counts=True)
-            if len(cols) > 64:  # back within the sprite standard
+            if len(cols) > colours:  # back within the colour limit
                 cnt = Counter({tuple(int(v) for v in c): int(n) for c, n in zip(cols, counts, strict=False)})
-                canvas[op, :3] = _snap(canvas[op][:, :3][None], np.array(palette_of(cnt, 64)))[0]
+                canvas[op, :3] = _snap(canvas[op][:, :3][None], np.array(palette_of(cnt, colours)))[0]
     img = Image.fromarray(canvas, "RGBA")
     img.save(dst)
     img.resize((img.width * 4, img.height * 4), Image.Resampling.NEAREST).save(dst.rsplit(".", 1)[0] + "_x4.png")
@@ -970,8 +986,9 @@ def post(
     lab, parts = ndimage.label(canvas[..., 3] > 0)
     print(f"{dst}: {img.width}x{img.height}, {ncol} colours, {parts} separate part(s)")
     problems = []
-    if ncol > 64:
-        problems.append("more than 64 colours")
+    limit = max(STANDARD_COLOURS, colours)
+    if ncol > limit:
+        problems.append(f"more than {limit} colours")
     if img.width % 8 or img.height % 8:
         problems.append("size not a multiple of 8")
     print("sprite standard:", "ok" if not problems else "; ".join(problems))
@@ -1011,9 +1028,15 @@ def main():
     )
     o.add_argument("--orig", default=None, help="the sprite being redone (for --mirror auto)")
     o.add_argument("--no-tidy", action="store_true", help="no lone-pixel clean-up and no outline")
+    o.add_argument(
+        "--outline-style",
+        choices=("dark", "selective"),
+        default="dark",
+        help="dark: the darkest colour; selective: a darker shade of the sprite's own colour",
+    )
     o.add_argument("--no-outline", action="store_true", help="keep the lone-pixel clean-up, no dark outline")
     o.add_argument("--key-tol", type=int, default=70, help="how far from the key green a pixel is still background")
-    o.add_argument("--max-colours", type=int, default=64, help="the most colours the sprite keeps (2 to 64)")
+    o.add_argument("--max-colours", type=int, default=64, help="the most colours the sprite keeps (2 to 256)")
     o.add_argument("--edge", type=float, default=0.5, help="share of a block that must be body to draw its pixel")
     o.add_argument("--margin", type=int, default=2, help="empty pixels around the sprite (icons: 0)")
     o.add_argument(
@@ -1097,6 +1120,7 @@ def main():
             key_tol=a.key_tol,
             colours=a.max_colours,
             outline=not a.no_outline,
+            outline_style=a.outline_style,
             edge=a.edge,
             mirror=a.mirror,
             orig=a.orig,

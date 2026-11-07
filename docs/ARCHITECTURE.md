@@ -89,12 +89,12 @@ mask init denoise size refs palette fill tile edge`), then `prompt:`, `negative:
    images and runs the workflow (txt2img, img2img, or masked img2img).
 4. `pxtool.py post` per render: background removed by flood fill from the
    border (key colour and its shades), loose specks dropped, holes filled,
-   palette of at most 64 colours from the render, one sprite pixel per
+   palette of at most `--max-colours` (2 to 256, 64 by default) colours from the render, one sprite pixel per
    `k x k` block (majority vote, grid phase searched), or a fit to the
    requested *fill*; lone pixels tidied, dark outline, mirror; then the
    palette (relight, tune, match, snap) and the touch-up merge. The
    clean-up's settings (`--max-colours`, `--edge`, `--min-part`, `--key-tol`,
-   `--no-outline`, `--no-tidy`, `--mirror`, `--palette`, `--fill`) are
+   `--no-outline`, `--outline-style dark|selective`, `--no-tidy`, `--mirror`, `--palette`, `--fill`) are
    arguments of `pxtool.post`, whose defaults are what `pxmake.sh` uses.
    A kind with `tile` (opaque full-colour art: floors, walls) skips all of
    this: `pxtool.tile_post` cuts the sprite's rectangle out of the render

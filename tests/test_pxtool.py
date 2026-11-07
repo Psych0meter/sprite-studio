@@ -167,3 +167,27 @@ def test_tile_post_keeps_full_colour_and_the_originals_edge(tmp_path):
     # without keep_edge nothing of the original shows
     pxtool.tile_post(str(tmp_path / "raw.png"), str(out), size, orig=str(orig), grid=str(grid))
     assert tuple(np.array(Image.open(out))[16, 0, :3]) == (10, 200, 10)
+
+
+def test_selective_outline_uses_a_darker_shade_of_the_sprites_own_colour():
+    red, dark_red, black = (140, 90, 90), (80, 50, 50), (5, 5, 5)
+    canvas = np.zeros((12, 12, 4), np.uint8)
+    canvas[3:9, 3:9] = (*red, 255)
+    pal = np.array([red, dark_red, black])
+    dark = pxtool._tidy(canvas, pal, True, "dark")
+    selective = pxtool._tidy(canvas, pal, True, "selective")
+    assert tuple(dark[3, 3, :3]) == black  # the darkest colour of the palette
+    assert tuple(selective[3, 3, :3]) == dark_red  # a darker red, not black
+    assert tuple(selective[5, 5, :3]) == red  # the inside is untouched
+
+
+def test_the_colour_limit_goes_up_to_256(tmp_path):
+    assert pxtool.MAX_COLOURS == 256
+    rng = np.random.default_rng(1)
+    a = np.zeros((40, 40, 4), np.uint8)
+    a[..., :3] = rng.integers(0, 256, (40, 40, 3))
+    a[..., 3] = 255
+    path = tmp_path / "noise.png"
+    Image.fromarray(a).save(path)
+    assert len(pxtool.extract_palette([str(path)], 256)["colours"]) > 64
+    assert len(pxtool.extract_palette([str(path)], 64)["colours"]) <= 64

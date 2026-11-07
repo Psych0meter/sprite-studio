@@ -544,7 +544,10 @@ def prompt(m, group_id, kind_id=None, extra="", colours="", refs_kind=None, excl
     }
 
 
-BASE_NEGATIVE = "blurry, 3d render, perspective, side view, text, watermark, soft shadow, gradient"
+BASE_NEGATIVE = (
+    "blurry, 3d render, perspective, side view, text, watermark, soft shadow, gradient, "
+    "pillow shading, anti-aliased edges, jagged uneven lines"
+)
 
 
 def negative(m, kind=None):
