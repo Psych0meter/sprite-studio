@@ -786,6 +786,31 @@ routes[""] = async (main) => {
   const recent = h("div", { class: "panel" });
   main.append(cards, h("div", { style: { height: "16px" } }), recent);
 
+  // Are ComfyUI and kohya sd-scripts behind their upstream? Only looks (git fetch); updating stays a manual step.
+  let updates = null;
+  let updating = false;
+  const updatesBox = () => {
+    const howTo = { "ComfyUI": "git pull, then pip install -r requirements.txt in its .venv, then restart ComfyUI",
+      "kohya sd-scripts": "git pull, then pip install -r requirements.txt in the training env (lora/venv); no training should be running" };
+    return h("div", { style: { margin: "8px 0 10px" } },
+      h("div", { class: "row", style: { gap: "8px" } },
+        h("button", { class: "btn sm ghost", disabled: updating, title: "Looks at the upstream repositories of ComfyUI and kohya sd-scripts (git fetch). Nothing is changed.",
+          onclick: async () => {
+            updating = true; drawCards();
+            try { updates = await api("/updates"); } catch (err) { toast(String(err.message || err), true); }
+            updating = false; drawCards();
+          } }, updating ? "Checking…" : "Check for updates"),
+        updates ? h("span", { class: "muted small" }, "checked " + fmtTime(updates.checked)) : null),
+      updates ? updates.items.map((it) => h("div", { class: "small", style: { marginTop: "6px" } },
+        it.ok ? [
+          h("strong", {}, it.name + ": "),
+          it.behind ? h("span", { class: "tag amber" }, `${it.behind} newer commit${it.behind === 1 ? "" : "s"}, latest ${it.latest}`) : h("span", { class: "tag ok" }, "up to date (" + it.current + ")"),
+          it.behind ? h("details", {}, h("summary", { style: { cursor: "pointer" } }, "What is new, and how to update"),
+            h("ul", { class: "small mono", style: { margin: "6px 0 6px 18px", padding: 0 } }, it.commits.map((c) => h("li", {}, c))),
+            h("p", { class: "muted small" }, `Installed ${it.current} on ${it.branch}${it.dirty ? " (with local changes)" : ""}, in ${it.path}. To update: ${howTo[it.name] || "git pull"}.`)) : null,
+        ] : [h("strong", {}, it.name + ": "), h("span", { class: "muted" }, "could not check (" + (it.error || "unknown") + ")")])) : null);
+  };
+
   const drawCards = () => {
     const st = S.status;
     if (!st) return;
@@ -794,6 +819,7 @@ routes[""] = async (main) => {
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "ComfyUI"), h("span", { class: "status " + (c.up ? "done" : "failed") }, c.up ? "running" : "stopped")),
       h("p", { class: "muted small" }, c.up ? `${c.device || "GPU"}, ComfyUI ${c.version || ""}` : "Generation needs it running. Training stops it on its own and starts it again afterwards."),
+      updatesBox(),
       h("div", { class: "row" },
         c.up ? h("button", { class: "btn sm", onclick: () => attempt(() => api("/comfy/restart", { body: {} }), "Restarting ComfyUI") }, "Restart")
           : h("button", { class: "btn sm primary", onclick: () => attempt(() => api("/comfy/start", { body: {} }), "Starting ComfyUI") }, "Start"),
@@ -1069,12 +1095,47 @@ routes.results = async (main, _parts, params) => {
     drawView();
   };
 
+  // What is in the bin: put back or erase single results.
+  const viewBin = async () => {
+    const layer = h("div", { class: "modal dialog-layer" });
+    const close = async () => {
+      layer.remove(); document.removeEventListener("keydown", onKey, true);
+      bin = await api("/results/bin"); items = await api("/results"); drawList(); drawView();
+    };
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); } };
+    const box = h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true", style: { maxWidth: "640px", width: "100%" } });
+    layer.append(box);
+    layer.addEventListener("click", (e) => { if (e.target === layer) close(); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(layer);
+    const draw = async () => {
+      const info = await api("/results/bin?items=1");
+      bin = info;
+      box.innerHTML = "";
+      box.append(h("h2", {}, "Bin"), h("p", { class: "dialog-text" }, info.count ? `${info.count} deleted result${info.count === 1 ? "" : "s"}, ${(info.bytes / 1048576).toFixed(1)} MB, newest first.` : "The bin is empty."));
+      const list = h("div", { class: "bin-list" });
+      for (const it of info.items || []) {
+        list.append(h("div", { class: "bin-row" },
+          h("img", { src: fileUrl(it.cover), alt: "", loading: "lazy" }),
+          h("div", { style: { flex: "1", minWidth: "0" } }, h("div", { class: "mono small", style: { overflowWrap: "anywhere" } }, it.name),
+            h("div", { class: "muted small" }, `deleted ${fmtTime(it.deleted)}, ${(it.bytes / 1048576).toFixed(1)} MB`)),
+          h("button", { class: "btn sm", disabled: !it.restorable, title: it.restorable ? "Put it back in the results" : "A result with this name exists again",
+            onclick: async () => { const r = await attempt(() => api("/results/bin/restore", { body: { ids: [it.id] } })); if (r) { toast(r.restored.length ? "Put back: " + r.restored.join(", ") : "Nothing put back", !r.restored.length); draw(); } } }, "Put back"),
+          h("button", { class: "btn sm ghost danger", title: "Erase it for good",
+            onclick: async () => { if (await askConfirm(`Erase ${it.name} for good?`, { danger: true, ok: "Erase", title: "Erase from the bin" })) { if (await attempt(() => api("/results/bin/empty", { body: { ids: [it.id] } }))) draw(); } } }, "Erase")));
+      }
+      box.append(list, h("div", { class: "row", style: { marginTop: "16px", justifyContent: "flex-end" } }, h("button", { class: "btn primary", onclick: close }, "Close")));
+    };
+    draw();
+  };
+
   const binBar = () => {
     const nEmpty = items.filter((i) => i.empty).length;
     return h("div", { class: "results-tools" },
       nEmpty ? h("button", { class: "btn sm", title: "Results with nothing rendered in them (every sprite failed, or a stopped job)",
         onclick: () => removeResults({ empty: true }, `the ${nEmpty} empty result${nEmpty === 1 ? "" : "s"}`) }, `Delete empty (${nEmpty})`) : null,
       bin.count ? h("span", { class: "muted small" }, `In the bin: ${bin.count} (${(bin.bytes / 1048576).toFixed(1)} MB)`) : null,
+      bin.count ? h("button", { class: "btn sm ghost", onclick: viewBin }, "View bin") : null,
       bin.count ? h("button", { class: "btn sm ghost", onclick: async () => {
         const r = await attempt(() => api("/results/bin/restore", { body: { count: 1 } }));
         if (!r) return;
@@ -1701,7 +1762,7 @@ routes.loras = async (main) => {
 
 routes.lorafiles = async (main) => {
   await loadCatalog();
-  const state = Object.assign({ model: "", find: "", sort: "date" }, store.get("lorafiles", {}));
+  const state = Object.assign({ model: "", find: "", sort: "date", dir: 1 }, store.get("lorafiles", {}));
   const keep = () => store.set("lorafiles", state);
   const picked = new Set();
   const paging = { page: 0, size: store.get("lorafiles_size", 25) };
@@ -1721,13 +1782,20 @@ routes.lorafiles = async (main) => {
     const q = state.find.trim().toLowerCase();
     const shown = files.filter((f) => (!state.model || f.model === state.model || (state.model === "-" && !f.model)) && (!q || f.name.toLowerCase().includes(q)));
     const sorts = {
+      // each sort is the natural order of its column: newest, A to Z, smallest epoch first, largest
       date: (a, b) => b.mtime - a.mtime,
       name: (a, b) => a.name.localeCompare(b.name),
       model: (a, b) => (a.model_label || "~").localeCompare(b.model_label || "~") || (a.epoch || 0) - (b.epoch || 0),
+      base: (a, b) => String(a.base).localeCompare(String(b.base)) || a.name.localeCompare(b.name),
+      epoch: (a, b) => (a.epoch ?? 1e9) - (b.epoch ?? 1e9) || a.name.localeCompare(b.name),
       size: (a, b) => b.size - a.size,
+      results: (a, b) => (b.results || 0) - (a.results || 0),
     };
-    shown.sort(sorts[state.sort] || sorts.date);
-    const filterKey = [state.model, state.find, state.sort].join("|");
+    const sortBy = (k) => { if (state.sort === k) state.dir = -(state.dir || 1); else { state.sort = k; state.dir = 1; } keep(); load(); };
+    const th = (k, label, title) => h("th", { class: "sortable", title: (title ? title + ". " : "") + "Click to sort", "aria-sort": state.sort === k ? ((state.dir || 1) > 0 ? "ascending" : "descending") : "none", onclick: () => sortBy(k) },
+      label + (state.sort === k ? ((state.dir || 1) > 0 ? " ▲" : " ▼") : ""));
+    shown.sort((a, b) => (state.dir || 1) * (sorts[state.sort] || sorts.date)(a, b));
+    const filterKey = [state.model, state.find, state.sort, state.dir].join("|");
     if (filterKey !== lastFilter) { paging.page = 0; lastFilter = filterKey; }
     const pg = pageOf(shown, paging);
     const total = files.reduce((n, f) => n + f.size, 0);
@@ -1738,8 +1806,8 @@ routes.lorafiles = async (main) => {
         models.map(([id, label]) => h("option", { value: id, selected: id === state.model }, label)),
         files.some((f) => !f.model) ? h("option", { value: "-", selected: state.model === "-" }, "No model") : null),
       h("input", { type: "search", placeholder: "Find a name", style: { width: "220px" }, value: state.find, "aria-label": "Find", oninput: (e) => { state.find = e.target.value; keep(); }, onchange: () => load() }),
-      h("select", { "aria-label": "Sort", style: { width: "auto" }, onchange: (e) => { state.sort = e.target.value; keep(); load(); } },
-        [["date", "Newest first"], ["name", "Name"], ["model", "Model, then epoch"], ["size", "Largest first"]].map(([v, t]) => h("option", { value: v, selected: v === state.sort }, t))),
+      h("select", { "aria-label": "Sort", style: { width: "auto" }, onchange: (e) => { state.sort = e.target.value; state.dir = 1; keep(); load(); } },
+        [["date", "Date"], ["name", "Name"], ["model", "Model, then epoch"], ["base", "Base"], ["epoch", "Epoch"], ["size", "Size"], ["results", "Results"]].map(([v, t]) => h("option", { value: v, selected: v === state.sort }, t))),
       h("span", { class: "muted small", style: { marginLeft: "auto" } }, `${files.length} files, ${fmtMB(total)}` + (data.disk_free != null ? `, ${(data.disk_free / 1073741824).toFixed(0)} GB free on the disk` : ""))));
     if (!shown.length) {
       body.append(h("p", { class: "muted" }, files.length ? "No file matches." : "No LoRA installed yet: train a model, then Use an epoch on the Train page."));
@@ -1762,8 +1830,8 @@ routes.lorafiles = async (main) => {
         h("button", { class: "btn sm ghost", onclick: () => { picked.clear(); load(); } }, "Clear")] : null));
     const allBox = h("input", { type: "checkbox", "aria-label": "Select all", checked: shown.every((f) => picked.has(f.name)), onchange: (e) => { shown.forEach((f) => (e.target.checked ? picked.add(f.name) : picked.delete(f.name))); load(); } });
     body.append(h("div", { class: "panel", style: { padding: 0, overflowX: "auto" } }, h("table", { class: "lora-table" },
-      h("thead", {}, h("tr", {}, h("th", {}, allBox), h("th", {}, "Name"), h("th", {}, "Model"), h("th", {}, "Base"), h("th", {}, "Epoch"), h("th", {}, "Date"), h("th", {}, "Size"),
-        h("th", { title: "Result folders rendered with this file" }, "Results"), h("th", {}, ""))),
+      h("thead", {}, h("tr", {}, h("th", {}, allBox), th("name", "Name"), th("model", "Model"), th("base", "Base"), th("epoch", "Epoch"), th("date", "Date"), th("size", "Size"),
+        th("results", "Results", "Result folders rendered with this file"), h("th", {}, ""))),
       h("tbody", {}, pg.rows.map((f) => h("tr", {},
         h("td", {}, h("input", { type: "checkbox", "aria-label": "Select " + f.name, checked: picked.has(f.name), onchange: (e) => { if (e.target.checked) picked.add(f.name); else picked.delete(f.name); load(); } })),
         h("td", {}, h("div", { class: "mono small" }, f.name), f.in_use ? h("span", { class: "tag ok", title: `The ${f.in_use} LoRA that ${f.model_label} generates with` }, `in use, ${f.in_use}`) : null),
@@ -2125,7 +2193,33 @@ async function modelEditor(main, mid, tab) {
     const sync = () => { m.previews = rows.map((r) => r.text.trim() + (r.avoid.trim() ? " --n " + r.avoid.trim() : "")).filter((l) => l.trim()); dirty = true; };
     const list = h("div", {});
     const startsRight = (t) => t.trim().split(/[\s,]+/)[0] === m.trigger;
+    // The prompt with the trigger word first: a first word that looks like a stale or mistyped trigger
+    // (one word, repeated or close to the trigger) is replaced; anything else gets the trigger put in front.
+    const fixedStart = (t) => {
+      const parts = t.trim().split(",").map((x) => x.trim()).filter(Boolean);
+      const first = parts[0] || "";
+      const stale = /^[a-z0-9_]+$/i.test(first) && parts.length > 1 &&
+        (parts[1].toLowerCase().startsWith(first.toLowerCase()) || m.trigger.startsWith(first) || first.startsWith(m.trigger.slice(0, 2)));
+      return [m.trigger, ...(stale ? parts.slice(1) : parts)].join(", ");
+    };
+    const wrong = () => rows.filter((r) => r.text.trim() && !startsRight(r.text));
+    const fixBar = h("div", {});
+    const drawFixBar = () => {
+      fixBar.innerHTML = "";
+      const bad = wrong();
+      if (!bad.length) return;
+      fixBar.append(h("div", { class: "note warn", style: { display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "10px" } },
+        h("span", {}, `${bad.length} prompt${bad.length === 1 ? " does" : "s do"} not start with the trigger word ${m.trigger}.`),
+        h("button", { class: "btn sm primary", onclick: async () => {
+          const cut = (s) => (s.length > 70 ? s.slice(0, 70) + "…" : s);
+          const lines = bad.map((r) => `${cut(r.text.trim())}\n  →  ${cut(fixedStart(r.text))}`).join("\n\n");
+          if (!(await askConfirm(`These starts will change (the rest of each prompt is kept):\n\n${lines}`, { ok: `Fix ${bad.length}`, title: "Put the trigger word first" }))) return;
+          bad.forEach((r) => { r.text = fixedStart(r.text); });
+          sync(); drawRows(); toast(`${bad.length} prompt${bad.length === 1 ? "" : "s"} fixed. Save to keep them.`);
+        } }, `Auto-fix ${bad.length}`)));
+    };
     const drawRows = () => {
+      drawFixBar();
       list.innerHTML = "";
       if (!rows.length) list.append(h("p", { class: "muted" }, "No prompt of your own: training uses the automatic ones (see below)."));
       rows.forEach((r, i) => {
@@ -2135,7 +2229,7 @@ async function modelEditor(main, mid, tab) {
           if (!r.text.trim()) return;
           if (startsRight(r.text)) check.append(h("span", { class: "tag ok" }, "starts with " + m.trigger));
           else check.append(h("span", { class: "tag amber", title: "The captions the LoRA learned start with its trigger word" }, "should start with " + m.trigger), " ",
-            h("button", { class: "btn sm", onclick: () => { r.text = m.trigger + ", " + r.text.trim().replace(/^[^,]*,\s*/, ""); sync(); drawRows(); } }, "Fix"));
+            h("button", { class: "btn sm", onclick: () => { r.text = fixedStart(r.text); sync(); drawRows(); } }, "Fix"));
         };
         const ta = h("textarea", { rows: 3, class: "mono", oninput: (e) => { r.text = e.target.value; sync(); paint(); } }, r.text);
         const avoid = h("input", { type: "text", value: r.avoid, placeholder: "e.g. organic, creature, animal",
@@ -2167,7 +2261,7 @@ async function modelEditor(main, mid, tab) {
       h("h2", {}, "Preview prompts"),
       h("p", { class: "small muted", style: { maxWidth: "80ch" } }, "Test prompts for training: each is one row of the checkpoint grid on the Train page, drawn at every saved epoch with the same seed, so the columns can be compared. Write new designs the training set does not contain, to see the style rather than copies."),
       h("p", { class: "small muted", style: { maxWidth: "80ch" } }, "Write them like the training captions: the trigger word " + m.trigger + " first, then the group's and kind's words, then what it looks like. A good set has one prompt per kind. Previews rendered afterwards use the first 2."),
-      list,
+      fixBar, list,
       h("div", { class: "row", style: { gap: "8px", marginTop: "4px" } },
         h("button", { class: "btn", onclick: () => { rows.push({ text: m.trigger + ", ", avoid: "" }); sync(); drawRows(); } }, "Add an empty prompt")),
       h("div", { style: { marginTop: "14px" } }, h("div", { class: "label" }, "Or build one from a group and a kind"), adder),
@@ -2586,7 +2680,11 @@ routes.palettes = async (main, parts) => {
 routes.jobs = async (main, parts) => {
   if (parts[0]) return jobDetail(main, parts[0]);
   main.append(head("Jobs", "Everything the app ran. GPU jobs run one at a time, in order; training sets are built at once.",
-    h("button", { class: "btn ghost", onclick: async () => { if (await attempt(() => api("/jobs", { method: "DELETE" }), "Finished jobs cleared")) route(); } }, "Clear finished")));
+    h("div", { class: "row", style: { gap: "8px" } },
+      h("button", { class: "btn ghost", title: "Removes the jobs that succeeded; failed and cancelled ones stay so you can read why", onclick: async () => { if (await attempt(() => api("/jobs?only=done", { method: "DELETE" }), "Successful jobs cleared")) route(); } }, "Clear successful"),
+      h("button", { class: "btn ghost danger", title: "Removes every job that is not running or waiting, failed ones too", onclick: async () => {
+        if (await askConfirm("Remove every finished job, the failed and cancelled ones too, with their logs?", { danger: true, ok: "Clear all", title: "Clear finished jobs" })) { if (await attempt(() => api("/jobs", { method: "DELETE" }), "Finished jobs cleared")) route(); }
+      } }, "Clear all finished"))));
   const box = h("div", { class: "panel" });
   main.append(box);
   let timer;

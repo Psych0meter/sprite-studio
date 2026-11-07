@@ -122,7 +122,8 @@ training run draws at each epoch. One row per prompt:
 - the prompt itself, and *Words to avoid* (optional);
 - a check that the prompt starts with the model's trigger word: without it
   the LoRA is not called, and the preview looks like plain Stable Diffusion.
-  **Fix** puts the trigger first;
+  **Fix** puts the trigger first, and **Auto-fix** at the top does it for every
+  prompt that needs it, after showing each old and new start;
 - the first 2 rows are marked: they are the ones rendered afterwards when a
   card cannot render previews during training (see Train);
 - move up, move down and remove.
@@ -350,7 +351,8 @@ shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
   LoRA can be installed again. Deleting the one in use leaves the model
   without a LoRA until you install another.
 - **Compare** (with files ticked) opens Compare LoRAs with them selected.
-- Filter by model, find a name, sort by date, name, model or size. The top
+- Filter by model, find a name, sort by clicking a column header (again to
+  reverse) or with the Sort list. The top
   right shows the total size and the free disk space.
 
 A file copied into the folder by hand shows its model from its name and its
@@ -384,7 +386,8 @@ keep (*Export picks* copies them to `output/picked/`, named after the sprite
 they replace), compare side by side. **Delete** a result, one sprite of a
 batch, its failed sprites, or every empty result: they go to the output
 folder's `.bin`, where *Undo last delete* puts them back until you *Empty
-bin*.
+bin*. **View bin** lists what was deleted, with *Put back* and *Erase* for
+each.
 
 ## 7. Palettes
 
@@ -429,7 +432,8 @@ a batch. The preview is computed exactly as generation will do it.
 | PyTorch build | CUDA 12.8 for RTX 50 cards, 12.6 for the others (GTX 10 included); `install.sh` stops if the build has no kernels for the card |
 | Training precision | Automatic: bf16 on RTX 30 and newer, fp16 on RTX 20, full precision on older cards; SDXL always in half precision |
 | ComfyUI during training | stopped on cards under 15 GB (Settings: auto, always, never) |
-| Time estimates | measured from your own finished jobs and training runs |
+| Time estimates | measured from your own jobs that finished without error (failed, cancelled and partly failed ones are ignored) |
+| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only); updating stays a manual `git pull` |
 
 ## 9. Troubleshooting
 

@@ -585,8 +585,8 @@ def speed() -> dict:
     with _lock:
         jobs = sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
     for j in jobs:
-        if j["status"] != "done":
-            continue
+        if j["status"] != "done" or j.get("returncode") != 0 or j.get("error"):
+            continue  # only runs that really finished: not failed, cancelled, interrupted or partly failed ones
         if j["kind"] in ("generate", "batch", "matrix", "previews") and len(per_image) < 200:
             per_image += [int(x) for x in re.findall(r"\] seed=\d+\s+(\d+) s", read_log(j, 200000))][-50:]
         elif j["kind"] == "train" and j.get("started") and j.get("ended"):
@@ -1124,6 +1124,49 @@ def api_status():
     }
 
 
+def _git(repo: Path, *args: str, timeout: int = 60) -> str:
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout, check=False)
+    if r.returncode:
+        raise OSError((r.stderr or r.stdout).strip() or f"git {args[0]} failed")
+    return r.stdout.strip()
+
+
+def check_repo_update(name: str, repo: Path) -> dict:
+    """Compares a git checkout with its upstream branch (fetch only: nothing is changed or installed)."""
+    info: dict[str, Any] = {"name": name, "path": str(repo)}
+    if not (repo / ".git").exists():
+        return {**info, "ok": False, "error": "not a git checkout"}
+    try:
+        _git(repo, "fetch", "--quiet", "--tags", "origin", timeout=90)
+        upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        behind = int(_git(repo, "rev-list", "--count", "HEAD..@{u}"))
+        info.update(
+            ok=True,
+            branch=_git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
+            upstream=upstream,
+            current=_git(repo, "describe", "--tags", "--always"),
+            latest=_git(repo, "describe", "--tags", "--always", "@{u}"),
+            behind=behind,
+            dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),
+            commits=_git(repo, "log", "--format=%h %s", "-n", "8", "HEAD..@{u}").splitlines() if behind else [],
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        info.update(ok=False, error=str(e)[:300])
+    return info
+
+
+@app.get("/api/updates")
+def api_updates():
+    """Are there newer ComfyUI and kohya sd-scripts versions? Only looks (git fetch); the update is a manual step."""
+    return {
+        "checked": time.time(),
+        "items": [
+            check_repo_update("ComfyUI", setting_path("comfy_dir")),
+            check_repo_update("kohya sd-scripts", setting_path("lora_home") / "sd-scripts"),
+        ],
+    }
+
+
 @app.post("/api/comfy/{action}")
 def api_comfy(action: str):
     if action not in ("start", "stop", "restart"):
@@ -1347,9 +1390,15 @@ def api_job_retry(jid: str):
 
 
 @app.delete("/api/jobs")
-def api_jobs_clear():
+def api_jobs_clear(only: str = ""):
+    """Removes finished jobs: only the successful ones with ?only=done, else every one that is not running or waiting."""
     with _lock:
-        for jid in [k for k, j in JOBS.jobs.items() if j["status"] not in ("running", "queued")]:
+        gone = (
+            [k for k, j in JOBS.jobs.items() if j["status"] == "done"]
+            if only == "done"
+            else [k for k, j in JOBS.jobs.items() if j["status"] not in ("running", "queued")]
+        )
+        for jid in gone:
             j = JOBS.jobs.pop(jid)
             with contextlib.suppress(OSError):
                 os.unlink(j["log"])
@@ -2410,28 +2459,52 @@ async def api_results_delete(request: Request):
     return {"deleted": done, "bin": bin_info()}
 
 
-def bin_info() -> dict:
+def bin_info(listing: bool = False) -> dict:
     b = results_bin()
     items = [d for d in b.iterdir() if d.is_dir()] if b.is_dir() else []
-    return {"count": len(items), "bytes": sum(_du(d) for d in items), "path": str(b)}
+    info: dict[str, Any] = {"count": len(items), "bytes": sum(_du(d) for d in items), "path": str(b)}
+    if listing:  # what is in it, newest deletion first
+        rows = []
+        for d in sorted(items, key=lambda x: x.name, reverse=True):
+            origin = d / ".origin"
+            rel = origin.read_text().strip() if origin.exists() else d.name.split("_", 1)[-1]
+            cover = next((p for p in sorted(d.rglob("*.png")) if "raw" not in p.parts and "_x4" not in p.name), None)
+            stamp = d.name.split("_", 1)[0]
+            rows.append(
+                {
+                    "id": d.name,
+                    "name": rel,
+                    "deleted": int(stamp) / 1e9 if stamp.isdigit() else d.stat().st_mtime,
+                    "bytes": _du(d),
+                    "cover": str(cover) if cover else None,
+                    "restorable": origin.exists() and not (setting_path("px_output") / rel).exists(),
+                }
+            )
+        info["items"] = rows
+    return info
 
 
 @app.get("/api/results/bin")
-def api_results_bin():
-    return bin_info()
+def api_results_bin(items: int = 0):
+    return bin_info(bool(items))
 
 
 @app.post("/api/results/bin/restore")
 async def api_results_restore(request: Request):
-    """Puts back the last deleted results (body: {"count": n}, default 1)."""
+    """Puts back the last deleted results (body: {"count": n}, default 1), or the ones named in {"ids": [...]}."""
     b = await request.json()
     items = (
         sorted((d for d in results_bin().iterdir() if d.is_dir()), key=lambda d: d.name)
         if results_bin().is_dir()
         else []
     )
+    if isinstance(b.get("ids"), list):
+        ids = {str(x) for x in b["ids"]}
+        chosen = [d for d in items if d.name in ids]
+    else:
+        chosen = items[-max(1, int(b.get("count", 1))) :]
     restored = []
-    for d in items[-max(1, int(b.get("count", 1))) :]:
+    for d in chosen:
         origin = d / ".origin"
         if not origin.exists():
             continue
@@ -2449,10 +2522,21 @@ async def api_results_restore(request: Request):
 
 
 @app.post("/api/results/bin/empty")
-def api_results_bin_empty():
+async def api_results_bin_empty(request: Request):
+    """Erases the bin for good, or only the folders named in the body's {"ids": [...]}."""
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
     b = results_bin()
     if b.is_dir():
-        shutil.rmtree(b)
+        if isinstance(body, dict) and isinstance(body.get("ids"), list):
+            for name in {str(x) for x in body["ids"]}:
+                d = b / Path(name).name
+                if d.is_dir() and d.parent == b:
+                    shutil.rmtree(d)
+        else:
+            shutil.rmtree(b)
     return bin_info()
 
 

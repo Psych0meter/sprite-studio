@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Updates**: *Check for updates* on the Overview's ComfyUI card looks at the upstream repositories of ComfyUI and kohya sd-scripts (a git fetch, nothing is changed) and lists the newer commits and how to update.
+- **Preview prompts**: *Auto-fix* proposes to put the trigger word first in every prompt that does not start with it (a stale or mistyped first word is replaced), showing each old and new start before changing anything.
+- **Results**: *View bin* lists the deleted results (cover, name, date, size) with *Put back* and *Erase* for each.
 - **Colours**: palettes and the clean-up can hold up to 256 colours (was 64): taking colours from sprites, *Colours at most* in Clean up again, `--max-colours`. The default stays 64.
 - **Outline style**: *Selective* outlining paints the outline in a darker shade of the sprite's own colours instead of the darkest one (Generate › More settings, Clean up again, `pxmake.sh --outline-style`).
 - **Palettes**: a warning and a *Merge them* button for near-twin colours.
@@ -29,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Menu**: the version of the app is shown at the bottom of the left menu.
 
 ### Changed
+
+- **LoRA files**: click a column header to sort by it (click again to reverse).
+- **Jobs**: *Clear successful* removes only the jobs that succeeded, so failed ones stay readable; *Clear all finished* (with a confirmation) removes every finished job.
+- **Time estimates**: the measured speed (seconds per image, minutes per training) uses only jobs that finished without error, no longer failed, cancelled or partly failed ones.
 - **Long lists**: Jobs and LoRA files show 25, 50 or 100 rows per page with the same page controls (the choice is remembered), and the Overview's LoRA list scrolls instead of stretching the page.
 - **Results**: the list on the left now updates by itself (new results, running batches, sprite counts) every 30 seconds, and a result a job is still writing is patched in place: only the sprites that changed are redrawn, so the page no longer reloads completely and keeps its scroll position and open images. When the job finishes, the page settles once.
 - **Security**: found by an outside audit. A plain run now listens on this machine only (`SG_WEB_HOST`); the service made by `install.sh` still listens on every address and keeps a password, port or host added to its unit, and the installer says when no password is set. Changes sent from another website are refused. Requests, uploaded images (checked as real images, at most 64 million pixels) and zips (5000 files, 1 GB unpacked) have size limits. `/api/file` serves only images and small text files, no longer model weights or code. A password with accents no longer crashes the login.

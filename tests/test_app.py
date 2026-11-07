@@ -1,5 +1,7 @@
 """The web app's API, on empty isolated folders (no GPU, no ComfyUI)."""
 
+import shutil
+
 import numpy as np
 from PIL import Image
 
@@ -270,3 +272,90 @@ def test_cleanup_refuses_a_tile(client, env):
     (job / "job.txt").write_text(txt.replace("\n", " tile=1 edge=8\n", 1))
     r = client.post("/api/results/cleanup", json={"path": str(job / "run_s7.png")})
     assert r.status_code == 400 and "tile" in r.text
+
+
+def test_bin_listing_restore_and_erase_by_id(client, env):
+    for n in ("run_1", "run_2"):
+        job = env["output"] / n
+        job.mkdir()
+        (job / "job.txt").write_text(f"name={n} model=units group=red\nprompt: x\n")
+        Image.fromarray(np.zeros((8, 8, 4), np.uint8), "RGBA").save(job / f"{n}_s1.png")
+        client.post("/api/results/delete", json={"paths": [str(job)]})
+    info = client.get("/api/results/bin?items=1").json()
+    assert info["count"] == 2 and [i["name"] for i in info["items"]] == ["run_2", "run_1"]
+    assert all(i["restorable"] and i["cover"] for i in info["items"])
+    assert "items" not in client.get("/api/results/bin").json()
+    first, second = info["items"][1]["id"], info["items"][0]["id"]
+    assert client.post("/api/results/bin/restore", json={"ids": [first]}).json()["restored"] == ["run_1"]
+    assert (env["output"] / "run_1").is_dir() and not (env["output"] / "run_2").exists()
+    assert client.post("/api/results/bin/empty", json={"ids": [second]}).json()["count"] == 0
+    assert client.post("/api/results/bin/empty", json={"ids": ["../x"]}).status_code == 200
+
+
+def test_jobs_clear_only_successful(client):
+    import app as webapp
+
+    with webapp._lock:
+        for jid, status in (("a", "done"), ("b", "failed"), ("c", "running")):
+            webapp.JOBS.jobs[jid] = {"id": jid, "status": status, "log": "/nonexistent", "created": 1.0}
+    try:
+        assert client.delete("/api/jobs?only=done").status_code == 200
+        assert sorted(webapp.JOBS.jobs) == ["b", "c"]
+        assert client.delete("/api/jobs").status_code == 200
+        assert sorted(webapp.JOBS.jobs) == ["c"]
+    finally:
+        webapp.JOBS.jobs.clear()
+
+
+def test_updates_compares_with_upstream(client, env, tmp_path):
+    import subprocess
+
+    def git(cwd, *a):
+        subprocess.run(
+            ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True
+        )
+
+    up = tmp_path / "up"
+    up.mkdir()
+    git(up, "init", "-q", "-b", "main")
+    (up / "f").write_text("1")
+    git(up, "add", "f")
+    git(up, "commit", "-q", "-m", "first")
+    # the ComfyUI folder itself is the checkout
+    shutil.rmtree(env["comfy"])
+    subprocess.run(["git", "clone", "-q", str(up), str(env["comfy"])], check=True, capture_output=True)
+    (up / "f").write_text("2")
+    git(up, "commit", "-qam", "second")
+    items = {i["name"]: i for i in client.get("/api/updates").json()["items"]}
+    assert items["ComfyUI"]["ok"] and items["ComfyUI"]["behind"] == 1
+    assert items["ComfyUI"]["commits"][0].endswith("second")
+    assert not items["kohya sd-scripts"]["ok"]
+
+
+def test_speed_ignores_jobs_that_did_not_really_finish(client):
+    import app as webapp
+
+    def job(jid, status, rc, error, minutes):
+        return {
+            "id": jid,
+            "kind": "train",
+            "status": status,
+            "returncode": rc,
+            "error": error,
+            "log": "/x",
+            "created": float(len(jid)),
+            "started": 1.0,
+            "ended": 1.0 + minutes * 60.0,
+            "meta": {"model": "sd15"},
+        }
+
+    with webapp._lock:
+        webapp.JOBS.jobs.clear()
+        webapp.JOBS.jobs["ok"] = job("ok", "done", 0, None, 30)
+        webapp.JOBS.jobs["cancel"] = job("cancel", "cancelled", -15, None, 2)
+        webapp.JOBS.jobs["fail"] = job("fail", "failed", 1, "boom", 1)
+        webapp.JOBS.jobs["part"] = job("part!", "done", 4, "2 failed", 3)
+    try:
+        assert webapp.speed()["train_minutes"] == {"sd15": 30}
+    finally:
+        webapp.JOBS.jobs.clear()

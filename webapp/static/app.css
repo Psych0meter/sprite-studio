@@ -359,7 +359,12 @@ img.px { image-rendering: pixelated; image-rendering: crisp-edges; display: bloc
 .dialog-layer { z-index: 200; display: grid; place-items: center; }
 .dialog-box { max-width: 460px; width: calc(100% - 32px); }
 .dialog-box h2 { margin: 0 0 8px; }
-.dialog-text { color: var(--muted); margin: 0; line-height: 1.5; }
+.dialog-text { color: var(--muted); margin: 0; line-height: 1.5; white-space: pre-line; }
+.bin-list { max-height: 55vh; overflow: auto; margin: 12px 0 0; }
+.bin-row { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.bin-row img { width: 40px; height: 40px; object-fit: contain; image-rendering: pixelated; background: var(--panel-2, transparent); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text, inherit); }
 .dialog-input { width: 100%; }
 .btn.danger-solid { background: var(--red, #e5484d); border-color: transparent; color: #fff; }
 

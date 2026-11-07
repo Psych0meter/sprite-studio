@@ -157,6 +157,14 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   (generation, batches, comparisons, training); the CPU lane runs at once
   (training sets, setup). Jobs are processes in their own group (cancel
   kills the group), logged to `logs/<id>.log`, persisted in `jobs.json`.
+  `DELETE /api/jobs` clears the finished ones (`?only=done`: the successful
+  ones only). The speed estimates (`speed()`) read only jobs that exited 0
+  without an error.
+- **Updates**: `GET /api/updates` runs `git fetch` in the ComfyUI folder and
+  in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
+  never pulls or installs.
+- **Bin**: `GET /api/results/bin?items=1` lists the deleted folders; restore
+  and empty take `{"ids": [...]}` for single ones.
   Training stops ComfyUI first (sudo rule for `systemctl`) when the card
   is small, and starts it again.
 - **Progress** is parsed from the logs (training steps and epochs, batch
