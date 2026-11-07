@@ -1,0 +1,351 @@
+"""Accounts: sign-in, the rules of passwords, each user's own space, sharing, what an administrator sees."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from conftest import ADMIN_PASSWORD, make_sprite
+
+PW = "a long enough password"
+
+
+def signed_in(web, name, password=PW, role="user", must_change=False):
+    """A second browser: its own cookie jar, signed in as `name` (created on the fly)."""
+    if name not in web.module.ACCOUNTS.users():
+        web.module.ACCOUNTS.create(name, password, role=role, must_change=must_change)
+    c = TestClient(web.module.app)
+    r = c.post("/api/auth/login", json={"username": name, "password": password})
+    assert r.status_code == 200, r.text
+    return c
+
+
+@pytest.fixture
+def team(client):
+    """The administrator (client), and two users with their own browser."""
+    return client, signed_in(client, "ann"), signed_in(client, "bob")
+
+
+def make_model(c, mid="units", trigger="pxunit"):
+    r = c.post("/api/models", json={"id": mid, "label": mid.title(), "trigger": trigger})
+    assert r.status_code == 200, r.text
+
+
+# ---- signing in
+
+
+def test_nothing_is_served_before_signing_in(web):
+    assert web.get("/api/status").status_code == 401
+    assert web.get("/api/models").status_code == 401
+    assert "Sign in" in web.get("/").text
+    assert web.get("/api/auth/state").json() == {"setup": True, "user": None}
+
+
+def test_the_first_administrator_needs_the_setup_code(web):
+    bad = web.post("/api/auth/setup", json={"username": "root", "password": ADMIN_PASSWORD, "code": "nope"})
+    assert bad.status_code == 403
+    code = web.module.ACCOUNTS.setup_code()
+    ok = web.post("/api/auth/setup", json={"username": "root", "password": ADMIN_PASSWORD, "code": code})
+    assert ok.status_code == 200 and ok.json()["role"] == "admin"
+    assert web.get("/api/status").status_code == 200
+    assert web.module.ACCOUNTS.setup_code() is None  # once only
+    again = TestClient(web.module.app).post(
+        "/api/auth/setup", json={"username": "evil", "password": ADMIN_PASSWORD, "code": code}
+    )
+    assert again.status_code in (403, 409)
+
+
+def test_what_existed_before_accounts_goes_to_the_first_administrator(web, env):
+    from pxmodel import ROOTS  # noqa: F401  (the scripts are on the path)
+
+    (env["output"] / "old_run").mkdir()
+    (env["output"] / "old_run" / "job.txt").write_text("name=old\n")
+    code = web.module.ACCOUNTS.setup_code()
+    web.post("/api/auth/setup", json={"username": "root", "password": ADMIN_PASSWORD, "code": code})
+    assert web.module.ACCOUNTS.entry("result", "old_run")["owner"] == "root"
+
+
+def test_wrong_passwords_lock_the_account_for_a_while(client):
+    web = TestClient(client.module.app)
+    for _ in range(12):
+        r = web.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+    assert r.status_code == 429
+    # even the right password waits
+    assert web.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD}).status_code == 429
+
+
+def test_the_session_cookie_is_http_only_and_logout_ends_it(client):
+    r = TestClient(client.module.app).post("/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD})
+    assert "httponly" in r.headers["set-cookie"].lower() and "samesite=lax" in r.headers["set-cookie"].lower()
+    assert client.post("/api/auth/logout", json={}).status_code == 200
+    assert client.get("/api/status").status_code == 401
+
+
+def test_passwords_are_stored_hashed_and_sessions_only_as_digests(client):
+    state = client.module.STATE_DIR
+    assert ADMIN_PASSWORD not in (state / "users.json").read_text()
+    token = client.cookies.get("sg_session")
+    assert token and token not in (state / "sessions.json").read_text()
+
+
+# ---- passwords
+
+
+def test_password_policy(client):
+    assert client.post("/api/users", json={"username": "short", "password": "tiny"}).status_code == 400
+    assert client.post("/api/users", json={"username": "x", "password": PW}).status_code == 400  # name too short
+    assert client.post("/api/users", json={"username": "same", "password": "same"}).status_code == 400
+    assert client.post("/api/users", json={"username": "okay", "password": PW}).status_code == 200
+
+
+def test_a_user_changes_their_own_password_and_other_sessions_end(team, client):
+    _, ann, _ = team
+    other = TestClient(client.module.app)
+    other.post("/api/auth/login", json={"username": "ann", "password": PW})
+    assert ann.post("/api/auth/password", json={"current": "wrong", "new": "another long password"}).status_code == 403
+    assert ann.post("/api/auth/password", json={"current": PW, "new": "another long password"}).status_code == 200
+    assert ann.get("/api/status").status_code == 200  # this browser got a fresh session
+    assert other.get("/api/status").status_code == 401  # the others were signed out
+    assert (
+        TestClient(client.module.app).post("/api/auth/login", json={"username": "ann", "password": PW}).status_code
+        == 401
+    )
+
+
+def test_an_administrator_can_force_a_password_change(client):
+    client.post("/api/users", json={"username": "cat", "password": PW, "must_change": True})
+    cat = TestClient(client.module.app)
+    assert cat.post("/api/auth/login", json={"username": "cat", "password": PW}).json()["must_change"] is True
+    r = cat.get("/api/models")
+    assert r.status_code == 403 and r.json()["must_change"] is True
+    assert cat.post("/api/auth/password", json={"current": PW, "new": PW}).status_code == 400  # must differ
+    assert cat.post("/api/auth/password", json={"current": PW, "new": "brand new password"}).status_code == 200
+    assert cat.get("/api/models").status_code == 200
+
+
+def test_an_administrator_reset_forces_a_change_and_ends_sessions(team, client):
+    _, ann, _ = team
+    assert client.patch("/api/users/ann", json={"password": "temporary password"}).status_code == 200
+    assert ann.get("/api/status").status_code == 401
+    ann2 = TestClient(client.module.app)
+    me = ann2.post("/api/auth/login", json={"username": "ann", "password": "temporary password"}).json()
+    assert me["must_change"] is True
+
+
+# ---- users
+
+
+def test_only_administrators_manage_users_and_settings(team):
+    admin, ann, _ = team
+    for method, url in (
+        ("get", "/api/users"),
+        ("get", "/api/settings"),
+        ("post", "/api/comfy/stop"),
+        ("get", "/api/updates"),
+    ):
+        assert getattr(ann, method)(url).status_code == 403, url
+    assert ann.post("/api/users", json={"username": "eve", "password": PW}).status_code == 403
+    assert admin.get("/api/users").status_code == 200
+    assert [u["username"] for u in ann.get("/api/users/names").json()] == ["admin", "bob"]
+
+
+def test_the_last_administrator_cannot_be_removed_or_demoted(client):
+    assert client.patch("/api/users/admin", json={"role": "user"}).status_code == 409
+    assert client.patch("/api/users/admin", json={"disabled": True}).status_code == 409
+    assert client.delete("/api/users/admin?transfer_to=admin").status_code == 400
+
+
+def test_a_disabled_user_is_signed_out_and_cannot_come_back(team, client):
+    _, ann, _ = team
+    client.patch("/api/users/ann", json={"disabled": True})
+    assert ann.get("/api/status").status_code == 401
+    assert (
+        TestClient(client.module.app).post("/api/auth/login", json={"username": "ann", "password": PW}).status_code
+        == 401
+    )
+
+
+def test_removing_a_user_hands_their_resources_over(team, client):
+    admin, ann, bob = team
+    make_model(ann)
+    r = admin.delete("/api/users/ann?transfer_to=bob")
+    assert r.status_code == 200 and r.json()["transferred"] == 1
+    assert [m["id"] for m in bob.get("/api/models").json()] == ["units"]
+    assert ann.get("/api/status").status_code == 401
+
+
+# ---- each user's own space
+
+
+def test_models_are_private_to_their_owner_and_visible_to_administrators(team):
+    admin, ann, bob = team
+    make_model(ann)
+    assert [m["id"] for m in ann.get("/api/models").json()] == ["units"]
+    assert bob.get("/api/models").json() == []
+    assert bob.get("/api/models/units").status_code == 404
+    assert bob.put("/api/models/units", json={"label": "mine now"}).status_code == 404
+    assert bob.delete("/api/models/units").status_code == 404
+    seen = admin.get("/api/models").json()
+    assert [(m["id"], m["owner"]) for m in seen] == [("units", "ann")]
+    assert admin.get("/api/models/units").json()["owner"] == "ann"
+
+
+def test_the_catalog_and_projects_show_only_your_own(team):
+    admin, ann, bob = team
+    ann.post("/api/models", json={"id": "units", "label": "Units", "trigger": "pxunit", "project": "Ann's game"})
+    assert [p["name"] for p in bob.get("/api/projects").json()] == []
+    assert [p["name"] for p in ann.get("/api/projects").json()] == ["Ann's game"]
+    assert bob.get("/api/catalog").json()["models"] == []
+    assert bob.get("/api/catalog").json()["settings"] == {}  # folders and addresses are for administrators
+    assert "px_output" in admin.get("/api/catalog").json()["settings"]
+
+
+def test_results_files_are_private_and_the_paths_are_checked(team, env):
+    admin, ann, bob = team
+    run = env["output"] / "ann_run"
+    run.mkdir()
+    (run / "job.txt").write_text("name=ann_run kind=small\n")
+    make_sprite(run / "ann_run_s1.png")
+    web = admin.module
+    web.ACCOUNTS.claim("result", "ann_run", "ann")
+    assert [r["title"] for r in ann.get("/api/results").json()] == ["ann_run"]
+    assert bob.get("/api/results").json() == []
+    assert ann.get("/api/file", params={"path": str(run / "ann_run_s1.png")}).status_code == 200
+    assert bob.get("/api/file", params={"path": str(run / "ann_run_s1.png")}).status_code == 404
+    assert bob.post("/api/results/delete", json={"paths": [str(run)]}).status_code == 404
+    assert run.exists()
+    assert admin.get("/api/file", params={"path": str(run / "ann_run_s1.png")}).status_code == 200
+    # outside the data folders, or in ComfyUI's folders: refused to users
+    assert bob.get("/api/file", params={"path": "/etc/passwd"}).status_code == 403
+    assert bob.get("/api/file", params={"path": str(env["lora"] / "units" / "model.json")}).status_code in (403, 404)
+
+
+def test_palettes_are_private_until_shared(team):
+    admin, ann, bob = team
+    body = {"label": "Warm", "colours": ["#401010", "#ff8080"], "mode": "snap"}
+    assert ann.put("/api/palettes/warm", json=body).status_code == 200
+    assert [p["id"] for p in ann.get("/api/palettes").json()] == ["warm"]
+    assert bob.get("/api/palettes").json() == []
+    assert bob.get("/api/palettes/warm").status_code == 404
+    clash = bob.put("/api/palettes/warm", json=body)
+    assert clash.status_code == 400  # (the id is taken: it does not say whose)
+    assert [p["owner"] for p in admin.get("/api/palettes").json()] == ["ann"]
+
+
+def test_jobs_are_private_but_the_queue_shows_the_gpu_is_busy(team):
+    admin, ann, bob = team
+    app = admin.module
+    job = app.JOBS.submit("test", "Ann's secret job", ["true"], lane="cpu")
+    assert job["owner"] == ""  # (submitted by the app itself, no request)
+    job["owner"] = "ann"
+    assert any(j["title"] == "Ann's secret job" for j in ann.get("/api/jobs").json())
+    assert not any(j["title"] == "Ann's secret job" for j in bob.get("/api/jobs").json())
+    assert bob.get(f"/api/jobs/{job['id']}").status_code == 404
+    assert bob.get(f"/api/jobs/{job['id']}/log").status_code == 404
+    assert bob.post(f"/api/jobs/{job['id']}/cancel", json={}).status_code == 404
+    assert any(j["title"] == "Ann's secret job" for j in admin.get("/api/jobs").json())
+
+
+def test_picks_are_per_user(team, env):
+    admin, ann, bob = team
+    run = env["output"] / "shared_run"
+    run.mkdir()
+    (run / "job.txt").write_text("name=shared_run\n")
+    png = make_sprite(run / "shared_run_s1.png")
+    admin.module.ACCOUNTS.claim("result", "shared_run", "ann")
+    admin.module.ACCOUNTS.share("result", "shared_run", [], True, by="ann")
+    ann.post("/api/picks", json={"path": str(png), "picked": True})
+    assert list(ann.get("/api/picks").json()) == [str(png)]
+    assert bob.get("/api/picks").json() == {}
+    bob.post("/api/picks", json={"path": str(png), "picked": True, "as": "mine"})
+    assert ann.get("/api/picks").json()[str(png)]["as"] != "mine"
+    out = bob.post("/api/picks/export", json={}).json()
+    assert "bob" in out["folder"]
+
+
+# ---- sharing
+
+
+def test_a_shared_model_can_be_used_but_not_changed(team):
+    admin, ann, bob = team
+    make_model(ann)
+    assert ann.put("/api/acl/model/units", json={"users": ["bob"]}).status_code == 200
+    assert [(m["id"], m["access"]) for m in bob.get("/api/models").json()] == [("units", "read")]
+    assert bob.get("/api/models/units").json()["access"] == "read"
+    refused = bob.put("/api/models/units", json={"label": "mine"})
+    assert refused.status_code == 403 and "ask its owner" in refused.json()["error"]
+    assert bob.delete("/api/models/units").status_code == 403
+    # using it: the request goes on to the next check (here, no LoRA installed) instead of being refused
+    group = ann.get("/api/models/units").json()["model"]["groups"][0]["id"]
+    r = bob.post("/api/generate", json={"model": "units", "group": group})
+    assert r.status_code == 400 and "No LoRA installed" in r.json()["error"]
+    # a copy is theirs
+    assert bob.post("/api/models", json={"id": "bobs", "label": "Bob's", "copy": "units"}).status_code == 200
+    assert [m["id"] for m in ann.get("/api/models").json()] == ["units"]
+
+
+def test_sharing_with_everyone_and_taking_it_back(team):
+    _, ann, bob = team
+    make_model(ann)
+    ann.put("/api/acl/model/units", json={"all": True})
+    assert bob.get("/api/models/units").status_code == 200
+    ann.put("/api/acl/model/units", json={"all": False, "users": []})
+    assert bob.get("/api/models/units").status_code == 404
+
+
+def test_only_the_owner_shares_and_only_an_administrator_changes_the_owner(team):
+    admin, ann, bob = team
+    make_model(ann)
+    ann.put("/api/acl/model/units", json={"users": ["bob"]})
+    assert bob.get("/api/acl/model/units").status_code == 403
+    assert bob.put("/api/acl/model/units", json={"all": True}).status_code == 403
+    assert ann.put("/api/acl/model/units", json={"owner": "bob"}).status_code == 403
+    assert admin.put("/api/acl/model/units", json={"owner": "bob", "users": ["ann"]}).status_code == 200
+    assert admin.get("/api/models/units").json()["owner"] == "bob"
+    assert ann.get("/api/models/units").json()["access"] == "read"
+
+
+def test_sharing_with_someone_who_does_not_exist_is_refused(team):
+    _, ann, _ = team
+    make_model(ann)
+    assert ann.put("/api/acl/model/units", json={"users": ["nobody"]}).status_code == 400
+    assert ann.put("/api/acl/model/nothing_here", json={"all": True}).status_code == 404
+    assert ann.put("/api/acl/user/units", json={"all": True}).status_code == 404
+
+
+def test_a_shared_palette_is_used_in_a_batch_but_not_changed(team):
+    admin, ann, bob = team
+    body = {"label": "Warm", "colours": ["#401010", "#ff8080"], "mode": "snap"}
+    ann.put("/api/palettes/warm", json=body)
+    ann.put("/api/acl/palette/warm", json={"users": ["bob"]})
+    assert bob.get("/api/palettes/warm").json()["access"] == "read"
+    assert bob.put("/api/palettes/warm", json=body).status_code == 403
+    assert bob.delete("/api/palettes/warm").status_code == 403
+    assert admin.get("/api/palettes").json()[0]["shared_with"] == ["bob"]
+
+
+def test_a_result_folder_name_taken_by_someone_else_is_refused(team):
+    admin, _, _ = team
+    app = admin.module
+    app.ACCOUNTS.claim("result", "batch-mine", "ann")
+    (app.setting_path("px_output") / "batch-mine").mkdir()
+    token = app.acc.CURRENT.set(app.acc.Who("bob", "user"))
+    try:
+        with pytest.raises(app.HTTPException) as e:
+            app.claim_folder("batch-mine")
+        assert e.value.status_code == 400 and "belongs to someone else" in e.value.detail
+        app.claim_folder("batch-new")  # a new name is claimed
+        assert app.ACCOUNTS.entry("result", "batch-new")["owner"] == "bob"
+    finally:
+        app.acc.CURRENT.reset(token)
+    app.claim_folder("batch-mine")  # the app itself is trusted
+
+
+def test_a_comparison_only_uses_loras_of_models_you_may_use(team, env):
+    admin, ann, bob = team
+    make_model(ann)
+    (env["comfy"] / "models" / "loras" / "pxunit.safetensors").write_bytes(b"x")
+    r = bob.post("/api/matrix", json={"model": "units", "loras": ["pxunit.safetensors"]})
+    assert r.status_code == 404  # the model is not shared with bob: it does not exist for him
+    ann.put("/api/acl/model/units", json={"users": ["bob"]})
+    assert bob.get("/api/loras").json()["files"][0]["name"] == "pxunit.safetensors"
+    assert bob.post("/api/loras/delete", json={"names": ["pxunit.safetensors"]}).status_code == 403
+    assert (env["comfy"] / "models" / "loras" / "pxunit.safetensors").exists()

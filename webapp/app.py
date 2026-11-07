@@ -34,7 +34,6 @@ import io
 import json
 import os
 import re
-import secrets
 import shutil
 import signal
 import subprocess
@@ -46,11 +45,12 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import deque
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 
@@ -62,8 +62,79 @@ LOG_DIR = STATE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(SCRIPTS))
 
+import accounts as acc  # noqa: E402  (users, sessions, ownership: webapp/accounts.py)
+import auth_routes  # noqa: E402  (sign in, users, sharing)
+
 import pxmodel  # noqa: E402  (the sprite models: scripts/pxmodel.py)
 from pxtool import MAX_COLOURS  # noqa: E402  (the most colours a palette holds)
+
+ACCOUNTS = acc.Accounts(STATE_DIR)
+acc_cookie = auth_routes.COOKIE
+WRITING: ContextVar[bool] = ContextVar("request_writes", default=False)  # the request changes something
+
+
+def who_now() -> acc.Who | None:
+    """The signed-in user of this request (None: the app itself, e.g. a job finishing in the background)."""
+    return acc.CURRENT.get()
+
+
+def is_admin() -> bool:
+    w = who_now()
+    return w is None or w.admin
+
+
+def need_admin() -> None:
+    if not is_admin():
+        raise HTTPException(403, "only an administrator can do this")
+
+
+def need(kind: str, key: str, write: bool | None = None) -> None:
+    """Refuses (404: it does not exist for you, 403: it is shared with you to use, not to change) what the signed-in
+    user may not touch. `write` defaults to what the request does (a GET reads, anything else changes)."""
+    w = who_now()
+    if w is None:
+        return
+    a = ACCOUNTS.access(w, kind, key)
+    if a is None:
+        raise HTTPException(404, "not found")
+    if (WRITING.get() if write is None else write) and a != "write":
+        raise HTTPException(403, f"{key} is shared with you to use, not to change: ask its owner, or make your own")
+
+
+def can(kind: str, key: str, write: bool = False) -> bool:
+    try:
+        need(kind, key, write)
+    except HTTPException:
+        return False
+    return True
+
+
+def tagged(kind: str, key: str, row: dict) -> dict:
+    """A list row with who owns it and who it is shared with (what the pages show next to it)."""
+    w = who_now()
+    row.update(ACCOUNTS.tag(kind, key))
+    row["access"] = "write" if w is None or ACCOUNTS.access(w, kind, key) == "write" else "read"
+    return row
+
+
+def claim_folder(name: str) -> None:
+    """A job writes into this result folder: it is the user's, or new. Someone else's is refused (a batch name
+    that exists already would otherwise continue their batch)."""
+    w = who_now()
+    if w is None:
+        return
+    if ACCOUNTS.access(w, "result", name) == "write":
+        return
+    if ACCOUNTS.entry("result", name) or (setting_path("px_output") / name).exists():
+        raise HTTPException(400, f"{name} exists already and belongs to someone else: give it another name")
+    ACCOUNTS.claim("result", name, w.name)
+
+
+def claim(kind: str, key: str) -> None:
+    """The signed-in user owns what they create."""
+    w = who_now()
+    if w is not None:
+        ACCOUNTS.claim(kind, key, w.name)
 
 
 def pm():
@@ -94,9 +165,11 @@ def body_model(b: dict) -> str:
     return b["model"]
 
 
-def model_cfg(mid: str) -> dict:
+def model_cfg(mid: str, write: bool | None = None) -> dict:
+    """The model; `write=False` for what only uses it (generating with it), else a change needs the owner."""
     if not re.fullmatch(r"[a-z0-9_]{1,40}", mid or ""):
         raise HTTPException(400, "a model id is lowercase letters, digits and _")
+    need("model", mid, write)
     try:
         return pm().load(mid)
     except SystemExit as e:
@@ -164,16 +237,72 @@ def roots() -> list[Path]:
     )
 
 
-def safe_path(p: str) -> Path:
-    """A path the browser may read: under one of the data folders."""
+def safe_path(p: str, write: bool | None = None) -> Path:
+    """A path the browser may use: under one of the data folders, and, for a signed-in user, in something they may
+    reach (their own results and models, what is shared with them, the shared source folders to read)."""
     try:
         rp = Path(p).resolve()
     except (OSError, RuntimeError):
         raise HTTPException(400, "bad path") from None
     for r in roots():
         if rp == r or r in rp.parents:
+            gate_path(r, rp, write)
             return rp
     raise HTTPException(403, "outside the data folders")
+
+
+def is_recoloured(p: Path, out_root: Path) -> bool:
+    return p.relative_to(out_root).parts[0] == "recoloured"
+
+
+def can_path(p: str) -> bool:
+    try:
+        safe_path(p, write=False)
+    except HTTPException:
+        return False
+    return True
+
+
+def gate_path(root: Path, rp: Path, write: bool | None) -> None:
+    w = who_now()
+    if w is None or w.admin:
+        return
+    s = settings()
+    parts = rp.relative_to(root).parts
+    if root == Path(s["px_output"]).resolve():
+        if not parts:
+            if WRITING.get() if write is None else write:
+                raise HTTPException(403, "only an administrator can do this")
+            return
+        top = parts[0]
+        if top == "picked":  # exported picks: each user has a folder of their own
+            if len(parts) > 1 and parts[1] == w.name:
+                return
+            raise HTTPException(404, "not found")
+        if top in ("uploads", "recoloured"):  # sketches and masks sent for a generation: a folder per user
+            if len(parts) > 1 and parts[1] == w.name:
+                return
+            raise HTTPException(404, "not found")
+        if top == ".bin":  # a deleted result belongs to whoever owned the result
+            origin = root / ".bin" / parts[1] / ".origin" if len(parts) > 1 else None
+            try:
+                key = origin.read_text().strip().split("/")[0] if origin else ""
+            except OSError:
+                key = ""
+            if not key:
+                raise HTTPException(404, "not found")
+            need("result", key, write)
+            return
+        need("result", top, write)
+    elif root == Path(s["lora_home"]).resolve():
+        if not parts or not re.fullmatch(r"[a-z0-9_]{1,40}", parts[0]):
+            raise HTTPException(403, "only an administrator can do this")
+        need("model", parts[0], write)
+    elif root in [Path(v).resolve() for v in sources().values()]:  # the shared source folders: read only
+        if WRITING.get() if write is None else write:
+            raise HTTPException(403, "only an administrator can change the shared source folders")
+    else:  # ComfyUI's folders
+        raise HTTPException(403, "only an administrator can do this")
 
 
 # ---- limits: what the app accepts from the browser
@@ -282,6 +411,7 @@ class Jobs:
         jid = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         job = {
             "id": jid,
+            "owner": (who_now().name if who_now() else ""),
             "kind": kind,
             "title": title,
             "lane": lane,
@@ -446,11 +576,30 @@ class Jobs:
         return job
 
     def view(self, job: dict, with_progress: bool = True) -> dict:
+        if not job_mine(job):  # somebody else's job: the queue shows that the GPU is busy, nothing more
+            keys = ("id", "owner", "kind", "lane", "status", "created", "started", "ended")
+            v = {k: job.get(k) for k in keys}
+            v.update(title="another user's job", foreign=True, position=None)
+            v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
+            return v
         v = {k: job[k] for k in job if k not in ("env",)}
         v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
         if with_progress:
             v["progress"] = progress(job)
         return v
+
+
+def job_mine(job: dict) -> bool:
+    """Whether the signed-in user may see this job's details (their own; an administrator sees all)."""
+    w = who_now()
+    return w is None or w.admin or job.get("owner") == w.name
+
+
+def job_get(jid: str) -> dict:
+    j = JOBS.jobs.get(jid)
+    if not j or not job_mine(j):
+        raise HTTPException(404, "no such job")
+    return j
 
 
 def _quote(s: str) -> str:
@@ -745,7 +894,7 @@ def scan_results() -> list[dict]:
     if not out_root.is_dir():
         return items
     for d in out_root.iterdir():
-        if not d.is_dir() or d.name in ("uploads", "picked") or d.name.startswith("."):
+        if not d.is_dir() or d.name in ("uploads", "picked", "recoloured") or d.name.startswith("."):
             continue
         try:
             mtime = d.stat().st_mtime
@@ -801,6 +950,7 @@ def scan_results() -> list[dict]:
                     "empty": not vs,
                 }
             )
+    items = [tagged("result", Path(i["path"]).name, i) for i in items if can("result", Path(i["path"]).name)]
     busy = busy_outputs()
     for i in items:
         i["busy"] = any(i["path"] == b or b.startswith(i["path"] + "/") for b in busy)
@@ -830,7 +980,7 @@ def delete_result(path: str) -> str:
     if p == out_root or out_root not in p.parents or not p.is_dir():
         raise HTTPException(400, f"not a result folder: {path}")
     rel = p.relative_to(out_root)
-    if rel.parts[0] in ("uploads", "picked") or rel.parts[0].startswith("."):
+    if rel.parts[0] in ("uploads", "picked", "recoloured") or rel.parts[0].startswith("."):
         raise HTTPException(400, f"{rel.parts[0]} is not a result")
     if len(rel.parts) > 1 and not rel.parts[0].startswith(("batch-", "matrix-")):
         raise HTTPException(400, "only whole results, or one sprite of a batch, can be deleted")
@@ -844,12 +994,14 @@ def delete_result(path: str) -> str:
     if len(rel.parts) == 3 and rel.parts[0].startswith("batch-"):
         refresh_batch_sheet(out_root / rel.parts[0], rel.parts[1])
     with _lock:
-        picks = _load("picks.json", {})
-        gone = [k for k in picks if k == str(p) or k.startswith(str(p) + "/")]
-        for k in gone:
-            picks.pop(k)
-        if gone:
-            _save("picks.json", picks)
+        d = picks_load()
+        changed = False
+        for picks in d["users"].values():  # (everybody's stars on it)
+            for k in [k for k in picks if k == str(p) or k.startswith(str(p) + "/")]:
+                picks.pop(k)
+                changed = True
+        if changed:
+            _save("picks.json", d)
     return str(rel)
 
 
@@ -1019,6 +1171,8 @@ def require_lora(m: dict, chosen: str = "") -> None:
     if not lora_dir().is_dir():
         return  # ComfyUI's folder isn't visible from here: let the job tell
     name = chosen or m["trigger"] + ".safetensors"
+    if chosen and (lora_dir() / name).is_file():
+        lora_file(name, write=False)  # (a LoRA of a model the user cannot see is not theirs to use)
     if not (lora_dir() / name).is_file():
         raise HTTPException(
             400,
@@ -1032,7 +1186,7 @@ def require_lora(m: dict, chosen: str = "") -> None:
 
 app = FastAPI(title="Sprite Studio", version=VERSION, docs_url=None, redoc_url=None)
 JOBS = Jobs()
-PASSWORD = os.environ.get("SG_WEB_PASSWORD", "")
+LOGIN_PAGE = HERE / "static" / "login.html"
 
 
 class BodyTooLarge(Exception):
@@ -1086,6 +1240,9 @@ async def no_stale_pages(request: Request, call_next):
     response = await call_next(request)
     if not request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-cache"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
     return response
 
 
@@ -1124,20 +1281,44 @@ async def _big_image(request: Request, exc: Exception):
     return JSONResponse({"error": f"image too large (over {MAX_PIXELS // 1_000_000} million pixels)"}, status_code=400)
 
 
+PUBLIC_API = {"/api/auth/state", "/api/auth/login", "/api/auth/setup"}
+OWN_ACCOUNT_API = {
+    "/api/auth/me",
+    "/api/auth/password",
+    "/api/auth/logout",
+}  # all a user who must change their password may use
+ADMIN_ONLY = re.compile(r"^/api/(settings$|comfy/|updates$|train/setup-sdxl$|users(?!/names$))")
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
-    if PASSWORD:
-        h = request.headers.get("authorization", "")
-        ok = False
-        if h.startswith("Basic "):
-            try:
-                given = base64.b64decode(h[6:]).decode().split(":", 1)[1]
-                ok = secrets.compare_digest(given.encode(), PASSWORD.encode())
-            except (ValueError, IndexError):
-                ok = False
-        if not ok:
-            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Sprite Studio"'})
-    return await call_next(request)
+    """Everything needs a signed-in user (a session cookie): the login page is what a visitor gets, the API answers
+    401. Someone who must change their password may only do that. Administrator-only routes are refused to users."""
+    path = request.url.path
+    who = ACCOUNTS.session(request.cookies.get(acc_cookie, ""))
+    token = acc.CURRENT.set(who)
+    writing = WRITING.set(request.method not in ("GET", "HEAD", "OPTIONS"))
+    try:
+        if path.startswith("/api/"):
+            if path not in PUBLIC_API:
+                if not who:
+                    return JSONResponse({"error": "sign in", "login": True}, status_code=401)
+                if who.must_change and path not in OWN_ACCOUNT_API:
+                    return JSONResponse({"error": "change your password first", "must_change": True}, status_code=403)
+                if ADMIN_ONLY.match(path) and not who.admin:
+                    return JSONResponse({"error": "only an administrator can do this"}, status_code=403)
+        elif (not who or who.must_change) and path in ("/", "/index.html"):
+            return HTMLResponse(LOGIN_PAGE.read_text(), headers={"Cache-Control": "no-store"})
+        return await call_next(request)
+    finally:
+        acc.CURRENT.reset(token)
+        WRITING.reset(writing)
+
+
+@app.exception_handler(acc.AccountError)
+async def _account_error(request: Request, exc: Exception):
+    assert isinstance(exc, acc.AccountError)
+    return JSONResponse({"error": exc.message}, status_code=exc.status)
 
 
 def body_get(b: dict, key: str, default: Any = None, kind: type = str) -> Any:
@@ -1251,16 +1432,27 @@ def api_catalog():
         "sources": sources(),
         "speed": speed(),
         "gpu_mb": gpu_memory_mb(),
-        "loras": loras,
-        "settings": settings(),
+        "loras": [
+            x for x in loras if lora_allowed(next((r["model"] for r in lora_rows(True) if r["name"] == x["name"]), ""))
+        ],
+        "settings": settings() if is_admin() else {},
     }
 
 
 # ---- projects: a name on each model (one per game); empty ones are kept in projects.json
 
 
+def project_registry() -> dict:
+    """The projects created with no model yet: [owner, name] pairs ("" owner: from before there were accounts)."""
+    d = _load("projects.json", {})
+    if "entries" not in d:
+        d = {"entries": [["", n] for n in d.get("names", [])]}
+    return d
+
+
 def project_list() -> list[dict]:
-    names = set(_load("projects.json", {"names": []}).get("names", []))
+    w = who_now()
+    names = {n for o, n in project_registry()["entries"] if w is None or w.admin or o == w.name}
     models: dict[str, list[str]] = {}
     for m in models_summary():
         models.setdefault(m.get("project") or "", []).append(m["id"])
@@ -1280,12 +1472,15 @@ def project_name(v: Any) -> str:
 
 
 def _set_project_names(add: str = "", drop: str = "") -> None:
+    w = who_now()
+    me = w.name if w else ""
     with _lock:
-        d = _load("projects.json", {"names": []})
-        names = [x for x in d.get("names", []) if x != drop]
-        if add and add not in names:
-            names.append(add)
-        _save("projects.json", {"names": names})
+        d = project_registry()
+        # a user's project names are theirs; an administrator's changes reach everyone's
+        entries = [e for e in d["entries"] if not (e[1] == drop and (w is None or w.admin or e[0] == me))]
+        if add and [me, add] not in entries:
+            entries.append([me, add])
+        _save("projects.json", {"entries": entries})
 
 
 @app.get("/api/projects")
@@ -1313,7 +1508,7 @@ async def api_project_rename(request: Request):
             m = p.load(mid)
         except SystemExit:
             continue
-        if (m.get("project") or "") == old:
+        if (m.get("project") or "") == old and can("model", mid, write=True):
             m["project"] = new
             p.save(m)
     _set_project_names(add=new, drop=old)
@@ -1335,7 +1530,7 @@ async def api_project_delete(request: Request):
             m = p.load(mid)
         except SystemExit:
             continue
-        if (m.get("project") or "") == name:
+        if (m.get("project") or "") == name and can("model", mid, write=True):
             m["project"] = dest
             p.save(m)
     _set_project_names(drop=name)
@@ -1405,7 +1600,8 @@ async def api_upload(request: Request):
     b = await request.json()
     raw = decode_data_url(b.get("data"))
     check_image(raw, "PNG")
-    folder = setting_path("px_output") / "uploads"
+    w = who_now()
+    folder = setting_path("px_output") / "uploads" / (w.name if w else "_app")
     folder.mkdir(parents=True, exist_ok=True)
     f = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name_ok(b.get('name', 'sketch.png'))}"
     if f.suffix != ".png":
@@ -1420,14 +1616,16 @@ async def api_upload(request: Request):
 @app.get("/api/jobs")
 def api_jobs():
     with _lock:
-        return [JOBS.view(j, j["status"] == "running") for j in sorted(JOBS.jobs.values(), key=lambda j: -j["created"])]
+        return [
+            JOBS.view(j, j["status"] == "running")
+            for j in sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
+            if job_mine(j) or j["status"] in ("running", "queued")
+        ]
 
 
 @app.get("/api/jobs/{jid}")
 def api_job(jid: str):
-    j = JOBS.jobs.get(jid)
-    if not j:
-        raise HTTPException(404, "no such job")
+    j = job_get(jid)
     v = JOBS.view(j)
     if j.get("out") and j["kind"] == "generate" and Path(j["out"]).is_dir():
         v["result"] = result_set(Path(j["out"]))
@@ -1436,9 +1634,7 @@ def api_job(jid: str):
 
 @app.get("/api/jobs/{jid}/log", response_class=PlainTextResponse)
 def api_job_log(jid: str, tail: int = 60000):
-    j = JOBS.jobs.get(jid)
-    if not j:
-        raise HTTPException(404, "no such job")
+    j = job_get(jid)
     text = read_log(j, tail)
     # tqdm redraws one line with \r: keep only the last state of each line
     return "\n".join(line.split("\r")[-1] for line in text.split("\n"))
@@ -1446,14 +1642,13 @@ def api_job_log(jid: str, tail: int = 60000):
 
 @app.post("/api/jobs/{jid}/cancel")
 def api_job_cancel(jid: str):
+    job_get(jid)
     return JOBS.view(JOBS.cancel(jid), False)
 
 
 @app.post("/api/jobs/{jid}/retry")
 def api_job_retry(jid: str):
-    j = JOBS.jobs.get(jid)
-    if not j:
-        raise HTTPException(404, "no such job")
+    j = job_get(jid)
     cmd = list(j["cmd"])
     out = j["out"]
     if j["kind"] == "generate" and "--out" in cmd:
@@ -1467,9 +1662,9 @@ def api_jobs_clear(only: str = ""):
     """Removes finished jobs: only the successful ones with ?only=done, else every one that is not running or waiting."""
     with _lock:
         gone = (
-            [k for k, j in JOBS.jobs.items() if j["status"] == "done"]
+            [k for k, j in JOBS.jobs.items() if j["status"] == "done" and job_mine(j)]
             if only == "done"
-            else [k for k, j in JOBS.jobs.items() if j["status"] not in ("running", "queued")]
+            else [k for k, j in JOBS.jobs.items() if j["status"] not in ("running", "queued") and job_mine(j)]
         )
         for jid in gone:
             j = JOBS.jobs.pop(jid)
@@ -1495,7 +1690,7 @@ async def api_generate(request: Request):
     if not 1 <= count <= 32:
         raise HTTPException(400, "between 1 and 32 images")
     stamp = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
-    m = model_cfg(body_model(b))
+    m = model_cfg(body_model(b), write=False)
     group = next((g for g in m["groups"] if g["id"] == b.get("group")), None)
     if not group:
         raise HTTPException(400, "choose a group")
@@ -1505,6 +1700,7 @@ async def api_generate(request: Request):
     require_lora(m, name_ok(b["lora"]) if b.get("lora") else "")
     name = name_ok(b.get("name") or f"{kind['id'] if kind else m['id']}_{group['id']}")
     out = str(setting_path("px_output") / f"{name}_{stamp}")
+    claim_folder(Path(out).name)
     cmd = [
         str(SCRIPTS / "pxmake.sh"),
         "--model",
@@ -1543,13 +1739,13 @@ async def api_generate(request: Request):
     if start == "sprite":
         if not b.get("init"):
             raise HTTPException(400, "pick the sprite to start from")
-        cmd += ["--init", str(safe_path(b["init"]))]
+        cmd += ["--init", str(safe_path(b["init"], write=False))]
         if b.get("mask"):
-            cmd += ["--mask", str(safe_path(b["mask"]))]
+            cmd += ["--mask", str(safe_path(b["mask"], write=False))]
     elif start == "sketch":
         if not b.get("sketch"):
             raise HTTPException(400, "upload a sketch")
-        cmd += ["--sketch", str(safe_path(b["sketch"]))]
+        cmd += ["--sketch", str(safe_path(b["sketch"], write=False))]
     if start in ("sprite", "sketch") and b.get("denoise") not in (None, ""):
         cmd += ["--denoise", str(body_get(b, "denoise", 0.6, float))]
     if b.get("colours"):
@@ -1589,7 +1785,7 @@ def default_batch_tag(m: dict, b: dict) -> str:
 
 
 def batch_cmd(b: dict) -> list[str]:
-    m = model_cfg(body_model(b))
+    m = model_cfg(body_model(b), write=False)
     cmd = [
         str(SCRIPTS / "pxbatch.sh"),
         "--model",
@@ -1634,11 +1830,12 @@ def fill_value(v: Any) -> int:
 @app.post("/api/batch")
 async def api_batch(request: Request):
     b = await request.json()
-    require_lora(model_cfg(body_model(b)), name_ok(b["lora"]) if b.get("lora") else "")
+    require_lora(model_cfg(body_model(b), write=False), name_ok(b["lora"]) if b.get("lora") else "")
     plan = await api_batch_plan(request)
     cmd = batch_cmd(b)
     tag = cmd[cmd.index("--tag") + 1]
     out = str(setting_path("px_output") / f"batch-{tag}")
+    claim_folder(Path(out).name)
     return JOBS.submit(
         "batch", f"Batch {tag}", cmd, env=lora_env(b), out=out, meta={"total": len(plan["todo"]), "request": b}
     )
@@ -1650,10 +1847,13 @@ async def api_matrix(request: Request):
     loras = [name_ok(x) for x in b.get("loras") or []]
     if not loras:
         raise HTTPException(400, "choose at least one LoRA")
+    for x in loras:
+        if existing_lora(x):
+            lora_file(x, write=False)  # (only LoRAs of models the user may use)
     strengths = " ".join(str(float(s)) for s in re.split(r"[ ,]+", str(b.get("strengths") or "1.0")) if s)
     tag = name_ok(b.get("tag") or f"{dt.datetime.now():%Y%m%d-%H%M}")
     labels = [re.sub(r"\.safetensors$", "", x) for x in loras]
-    m = model_cfg(body_model(b))
+    m = model_cfg(body_model(b), write=False)
     env = {
         "MODEL": m["id"],
         "LORAS": " ".join(f"{ln}:{f}" for ln, f in zip(labels, loras, strict=False)),
@@ -1662,6 +1862,7 @@ async def api_matrix(request: Request):
         "SEED": str(body_get(b, "seed", 1000, int)),
     }
     out = str(setting_path("px_output") / f"matrix-{tag}")
+    claim_folder(Path(out).name)
     return JOBS.submit(
         "matrix",
         f"LoRA comparison: {m['label']} {tag}",
@@ -1686,6 +1887,7 @@ def api_train(cat: str, model: str = "sd15"):
             JOBS.view(j)
             for j in sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
             if j["kind"] in ("train", "dataset", "setup", "previews")
+            and job_mine(j)
             and j["meta"].get("category") in (cat, None)
             and model_ok(j["meta"].get("model")) == model
         ][:5]
@@ -1775,7 +1977,9 @@ def follow_up(job: dict) -> None:
         return
     cat, model = job["meta"]["category"], model_ok(job["meta"].get("model"))
     try:
-        submit_previews(cat, model)
+        queued = submit_previews(cat, model)
+        if isinstance(queued, dict):  # (the previews belong to whoever trained)
+            queued["owner"] = job.get("owner", "")
     except HTTPException as e:
         JOBS._log(job, f"previews not queued: {e.detail}")
 
@@ -1858,6 +2062,10 @@ async def api_train_install(cat: str, request: Request):
     if src.suffix != ".safetensors" or not src.is_file():
         raise HTTPException(400, "not a checkpoint")
     name = lora_filename(b.get("as") or model_cfg(cat)["trigger"])
+    if not is_admin() and lora_guess_model(name, model_triggers()) != cat:
+        raise HTTPException(
+            400, f"a LoRA file's name starts with the model's trigger word ({model_cfg(cat)['trigger']})"
+        )
     install_lora(src, name, cat)
     return {"installed": name, "lora": lora_info(name)}
 
@@ -1913,7 +2121,15 @@ def lora_guess_model(name: str, models: dict[str, dict]) -> str:
     return best
 
 
-def lora_rows() -> list[dict]:
+def lora_allowed(model: str, write: bool = False) -> bool:
+    """A LoRA file follows its model's rules; one with no known model is for administrators."""
+    w = who_now()
+    if w is None or w.admin:
+        return True
+    return bool(model) and can("model", model, write)
+
+
+def lora_rows(everything: bool = False) -> list[dict]:
     models = model_triggers()
     rec = _load("installed.json", {})
     counts = lora_results_count()
@@ -1930,6 +2146,8 @@ def lora_rows() -> list[dict]:
             em = re.search(r"_e(\d+)(?:_xl)?$", f.stem) or re.search(r"-(\d+)$", f.stem)
             epoch = int(em.group(1)) if em else None
         d = defaults.get(f.name)
+        if not everything and not lora_allowed(model):
+            continue
         rows.append(
             {
                 "name": f.name,
@@ -1947,6 +2165,7 @@ def lora_rows() -> list[dict]:
                 "in_use": d[1] if d else "",
                 "in_use_model": d[0] if d else "",
                 "results": counts.get(f.name, 0),
+                **ACCOUNTS.tag("model", model or "-"),
             }
         )
     return rows
@@ -1969,10 +2188,13 @@ def existing_lora(name: str) -> Path | None:
     return None
 
 
-def lora_file(name: str) -> Path:
+def lora_file(name: str, write: bool = True) -> Path:
     f = existing_lora(name)
     if f is None:
         raise HTTPException(404, f"{lora_filename(name)} is not in ComfyUI's models/loras")
+    row = next((r for r in lora_rows(True) if r["name"] == f.name), None)
+    if not lora_allowed((row or {}).get("model", ""), write):
+        raise HTTPException(404 if not lora_allowed((row or {}).get("model", "")) else 403, "not yours to change")
     return f
 
 
@@ -1981,11 +2203,12 @@ async def api_loras_use(request: Request):
     """Installs a LoRA file as its model's default (<trigger>.safetensors, or <trigger>_xl.safetensors for SDXL)."""
     b = await request.json()
     src = lora_file(b.get("name", ""))
-    row = next((r for r in lora_rows() if r["name"] == src.name), None)
+    row = next((r for r in lora_rows(True) if r["name"] == src.name), None)
     mid = b.get("model") or (row or {}).get("model")
     models = model_triggers()
     if mid not in models:
         raise HTTPException(400, "Which model is this LoRA for? Its name does not tell.")
+    need("model", mid, True)
     dst = models[mid]["trigger"] + ("_xl" if "_xl" in src.stem else "") + ".safetensors"
     if dst == src.name:
         raise HTTPException(400, "This LoRA is already the one in use.")
@@ -2027,6 +2250,7 @@ async def api_loras_delete(request: Request):
         for n in names:
             f = existing_lora(n)
             if f is not None:
+                lora_file(f.name)  # (refused when it is not the user's)
                 f.unlink()
                 done.append(f.name)
                 rec.pop(f.name, None)
@@ -2044,6 +2268,8 @@ def models_summary() -> list[dict]:
         try:
             m = p.load(mid)
         except SystemExit:
+            continue
+        if not can("model", mid):
             continue
         sd = Path(p.sprites_dir(mid))
         out.append(
@@ -2074,6 +2300,7 @@ def models_summary() -> list[dict]:
                 "lora": model_loras(m),
             }
         )
+        tagged("model", mid, out[-1])
     return out
 
 
@@ -2159,11 +2386,13 @@ def api_model(mid: str):
     template = next((k for k, t in p.template_sets().items() if mid in t["models"]), None)
     return {
         "model": m,
+        "access": tagged("model", mid, {})["access"],
+        **ACCOUNTS.tag("model", mid),
         "sprites": ss,
         "auto_previews": previews,
         "template": template,
         "saved": (Path(p.model_dir(mid)) / "model.json").exists(),
-        "dir": p.model_dir(mid),
+        "dir": p.model_dir(mid) if is_admin() else "",
     }
 
 
@@ -2218,7 +2447,7 @@ def create_model(b: dict) -> dict:
         m = p.from_template(sid, tid, mid, b.get("project") or None)
         m["label"] = b.get("label") or m["label"]
     elif b.get("copy"):
-        base = model_cfg(b["copy"])
+        base = model_cfg(b["copy"], write=False)
         m = p.normalise(dict(base, sprites={}), mid)
         m["label"] = b.get("label") or mid
         keep = [g for g in m["groups"] if g["id"] in (b.get("groups") or [])]
@@ -2241,6 +2470,7 @@ def create_model(b: dict) -> dict:
         m["project"] = b["project"].strip()[:60]
     check_model(m)
     p.save(m)
+    claim("model", mid)
     return api_model(mid)
 
 
@@ -2275,6 +2505,7 @@ async def api_template_add(sid: str, request: Request):
         if (b.get("models") and mid not in b["models"]) or (Path(p.model_dir(mid)) / "model.json").exists():
             continue
         p.save(p.from_template(sid, mid, project=b.get("project") or None))
+        claim("model", mid)
         made.append(mid)
     return {"created": made}
 
@@ -2315,8 +2546,10 @@ async def api_model_import_file(request: Request):
             m["project"] = b["project"].strip()[:60]
         check_model(m)
         p.save(m)
+        claim("model", new_id)
         made.append(new_id)
     if b.get("save_template"):
+        need_admin()  # (template sets are shared by everyone)
         folder = Path(p.HOME) / ".templates"
         folder.mkdir(parents=True, exist_ok=True)
         (folder / f"{name_ok(b.get('template_name') or made[0])}.json").write_text(json.dumps(data, indent=1))
@@ -2407,6 +2640,7 @@ def api_model_delete(mid: str):
     dst = Path(pm().HOME) / ".deleted" / f"{mid}-{dt.datetime.now():%Y%m%d-%H%M%S}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+    ACCOUNTS.forget("model", mid)
     return {"moved_to": str(dst)}
 
 
@@ -2528,16 +2762,32 @@ async def api_results_delete(request: Request):
     b = await request.json()
     paths = list(b.get("paths") or [])
     if b.get("empty"):
-        paths += [i["path"] for i in scan_results() if i["empty"]]
+        paths += [i["path"] for i in scan_results() if i["empty"] and i.get("access") == "write"]
     if not paths:
         raise HTTPException(400, "nothing to delete")
     done = [delete_result(x) for x in dict.fromkeys(paths)]
     return {"deleted": done, "bin": bin_info()}
 
 
+def bin_owner_key(d: Path) -> str:
+    """The result a binned folder came from (its top folder), "" when unknown."""
+    try:
+        return (d / ".origin").read_text().strip().split("/")[0]
+    except OSError:
+        return ""
+
+
+def bin_visible(d: Path, write: bool = False) -> bool:
+    w = who_now()
+    if w is None or w.admin:
+        return True
+    key = bin_owner_key(d)
+    return bool(key) and can("result", key, write)
+
+
 def bin_info(listing: bool = False) -> dict:
     b = results_bin()
-    items = [d for d in b.iterdir() if d.is_dir()] if b.is_dir() else []
+    items = [d for d in b.iterdir() if d.is_dir() and bin_visible(d)] if b.is_dir() else []
     info: dict[str, Any] = {"count": len(items), "bytes": sum(_du(d) for d in items), "path": str(b)}
     if listing:  # what is in it, newest deletion first
         rows = []
@@ -2570,7 +2820,7 @@ async def api_results_restore(request: Request):
     """Puts back the last deleted results (body: {"count": n}, default 1), or the ones named in {"ids": [...]}."""
     b = await request.json()
     items = (
-        sorted((d for d in results_bin().iterdir() if d.is_dir()), key=lambda d: d.name)
+        sorted((d for d in results_bin().iterdir() if d.is_dir() and bin_visible(d, True)), key=lambda d: d.name)
         if results_bin().is_dir()
         else []
     )
@@ -2609,10 +2859,12 @@ async def api_results_bin_empty(request: Request):
         if isinstance(body, dict) and isinstance(body.get("ids"), list):
             for name in {str(x) for x in body["ids"]}:
                 d = b / Path(name).name
-                if d.is_dir() and d.parent == b:
+                if d.is_dir() and d.parent == b and bin_visible(d, True):
                     shutil.rmtree(d)
         else:
-            shutil.rmtree(b)
+            for d in list(b.iterdir()):  # (a user empties only what is theirs)
+                if d.is_dir() and bin_visible(d, True):
+                    shutil.rmtree(d)
     return bin_info()
 
 
@@ -2632,6 +2884,7 @@ def palette_ref(ref: str) -> str:
         return ref
     if not PAL_ID.fullmatch(ref or "") or not (pal_dir() / f"{ref}.json").is_file():
         raise HTTPException(400, f"no palette {ref}")
+    need("palette", ref, False)
     return ref
 
 
@@ -2681,6 +2934,7 @@ def read_palette(pid: str) -> dict:
     f = pal_dir() / f"{pid}.json"
     if not f.is_file():
         raise HTTPException(404, f"no palette {pid}")
+    need("palette", pid)
     return pm().pxtool.load_palette(str(f)) | {"id": pid, "mtime": f.stat().st_mtime}
 
 
@@ -2691,7 +2945,8 @@ def palette_users(pid: str) -> list[str]:
             m = pm().load(mid)
         except SystemExit:
             continue
-        out += [f"{m['label']}: {g['label']}" for g in m["groups"] if g.get("palette") == pid]
+        if can("model", mid):
+            out += [f"{m['label']}: {g['label']}" for g in m["groups"] if g.get("palette") == pid]
     return out
 
 
@@ -2708,7 +2963,7 @@ def api_palettes():
     out = []
     for f in sorted(pal_dir().glob("*.json")) if pal_dir().is_dir() else []:
         try:
-            out.append(read_palette(f.stem) | {"used_by": palette_users(f.stem)})
+            out.append(tagged("palette", f.stem, read_palette(f.stem) | {"used_by": palette_users(f.stem)}))
         except HTTPException:
             continue
     return out
@@ -2716,19 +2971,26 @@ def api_palettes():
 
 @app.get("/api/palettes/{pid}")
 def api_palette(pid: str):
-    return read_palette(pid) | {"used_by": palette_users(pid)}
+    return tagged("palette", pid, read_palette(pid) | {"used_by": palette_users(pid)})
 
 
 @app.put("/api/palettes/{pid}")
 async def api_palette_save(pid: str, request: Request):
     if not PAL_ID.fullmatch(pid):
         raise HTTPException(400, "a palette id is lowercase letters, digits and _")
-    return save_palette(clean_palette(await request.json(), pid))
+    if (pal_dir() / f"{pid}.json").exists():
+        if not can("palette", pid):
+            raise HTTPException(400, f"a palette {pid} exists already: choose another name")
+        need("palette", pid)  # (changing one needs it to be yours)
+    out = save_palette(clean_palette(await request.json(), pid))
+    claim("palette", pid)
+    return out
 
 
 @app.delete("/api/palettes/{pid}")
 def api_palette_delete(pid: str):
     read_palette(pid)
+    need("palette", pid, True)
     for mid in pm().list_models():  # groups using it go back to no palette
         try:
             m = pm().load(mid)
@@ -2740,6 +3002,7 @@ def api_palette_delete(pid: str):
                     g["palette"] = ""
             pm().save(m)
     (pal_dir() / f"{pid}.json").unlink()
+    ACCOUNTS.forget("palette", pid)
     return {"ok": True}
 
 
@@ -2747,14 +3010,14 @@ def api_palette_delete(pid: str):
 async def api_palette_extract(request: Request):
     """A palette from sprites: a model's group (and kind), or given files."""
     b = await request.json()
-    paths = [str(safe_path(x)) for x in b.get("paths") or []]
+    paths = [str(safe_path(x, write=False)) for x in b.get("paths") or []]
     label = b.get("label") or ""
     if b.get("batch"):
         files, what = sprite_set({"batch": b["batch"], "group": b.get("group") or ""})
         paths += files
         label = label or what.replace("the results of batch ", "Batch ")
     elif b.get("model"):
-        m = model_cfg(b["model"])
+        m = model_cfg(b["model"], write=False)
         ss = [
             x
             for x in pm().sprites(m)
@@ -2772,14 +3035,16 @@ async def api_palette_extract(request: Request):
     src = f"{len(paths)} sprite(s)" + (
         f" of {label}" if b.get("model") or b.get("batch") else f": {', '.join(Path(x).name for x in paths[:3])}"
     )
-    return save_palette(clean_palette(pal | {"label": label, "source": src}, pid))
+    out = save_palette(clean_palette(pal | {"label": label, "source": src}, pid))
+    claim("palette", pid)
+    return out
 
 
 def sprite_set(spec: dict) -> tuple[list[str], str]:
     """Sprites named by a form: {"model", "group", "kind", "others": true (every group but that one)},
     {"batch": <a batch folder>} (its results), or {"paths": [...]}. Returns them and a label."""
     if spec.get("batch"):
-        d = safe_path(spec["batch"])
+        d = safe_path(spec["batch"], write=False)
         files = [str(f) for f in sorted(d.glob("*/*/*.png")) if is_variant(f)]
         if spec.get("group"):  # only the sprites made for that group (from each job.txt)
             keep = []
@@ -2791,7 +3056,7 @@ def sprite_set(spec: dict) -> tuple[list[str], str]:
             files = keep
         return files, f"the results of batch {d.name[6:]}" + (f" ({spec['group']})" if spec.get("group") else "")
     if spec.get("model"):
-        m = model_cfg(spec["model"])
+        m = model_cfg(spec["model"], write=False)
         g = spec.get("group") or ""
         ss = [
             x
@@ -2809,7 +3074,7 @@ def sprite_set(spec: dict) -> tuple[list[str], str]:
             else f"every sprite of {m['label']}"
         )
         return [x["path"] for x in ss], what
-    return [str(safe_path(x)) for x in spec.get("paths") or []], "the chosen sprites"
+    return [str(safe_path(x, write=False)) for x in spec.get("paths") or []], "the chosen sprites"
 
 
 @app.post("/api/palettes/autotune")
@@ -2872,12 +3137,14 @@ async def api_palette_import(request: Request):
     if not pal.get("colours"):
         raise HTTPException(400, f"no colour found in {name}")
     pid = free_palette_id(b.get("id") or Path(name).stem)
-    return save_palette(
+    out = save_palette(
         clean_palette(
             pal | {"label": pal.get("label") if ext == ".json" else Path(name).stem, "source": f"imported from {name}"},
             pid,
         )
     )
+    claim("palette", pid)
+    return out
 
 
 @app.get("/api/palettes/{pid}/export")
@@ -2905,12 +3172,20 @@ async def api_palette_apply(request: Request):
     out_root = setting_path("px_output").resolve()
     made = []
     for x in b.get("paths") or []:
-        src = safe_path(x)
+        src = safe_path(x, write=False)
         if src.suffix != ".png" or not src.is_file():
             raise HTTPException(400, f"not a sprite: {x}")
         # Results are recoloured next to themselves; any other sprite (a game sprite, a model's) into
         # the output folder's recoloured/, never over the original.
-        folder = src.parent if out_root in src.parents else out_root / "recoloured"
+        mine = True
+        if out_root in src.parents:
+            try:
+                safe_path(x, write=True)
+            except HTTPException:
+                mine = False  # shared with you to use: the copy goes to your own folder
+        w = who_now()
+        own = out_root / "recoloured" / (w.name if w else "_app")
+        folder = src.parent if out_root in src.parents and mine and not is_recoloured(src, out_root) else own
         folder.mkdir(parents=True, exist_ok=True)
         stem = re.sub(r"_pal-[a-z0-9_]+$", "", src.stem)
         dst = folder / f"{stem}_pal-{pal['id']}.png"
@@ -2943,7 +3218,7 @@ def _has_green(img_path: Path) -> bool:
 
 def cleanup_inputs(b: dict) -> dict:
     """What a clean-up of one variant needs, from its folder and the settings asked for."""
-    src = safe_path(b.get("path", ""))
+    src = safe_path(b.get("path", ""), write=False)
     m = CLEAN_SEED.search(src.stem)
     if src.suffix != ".png" or not src.is_file() or not m:
         raise HTTPException(400, "this sprite has no saved render to clean up again")
@@ -3035,6 +3310,7 @@ def api_results_cleanup(b: dict):
                 raise HTTPException(422, notes.strip() or "nothing came out of this clean-up")
             data = base64.b64encode(dst.read_bytes()).decode()
         return {"image": "data:image/png;base64," + data, "notes": notes.strip()}
+    safe_path(b.get("path", ""), write=True)  # (saving adds to the result: it must be yours)
     base_stem = re.sub(r"_c\d+$", "", inp["stem"])
     n = 1
     while (inp["folder"] / f"{base_stem}_c{n}.png").exists():
@@ -3072,23 +3348,48 @@ def api_result_detail(path: str):
     return r
 
 
+def picks_load() -> dict:
+    """picks.json: {"users": {name: {path: {"as", "time"}}}} (before accounts it was one flat {path: {...}})."""
+    d = _load("picks.json", {})
+    if "users" not in d:
+        d = {"users": {"": d} if d else {}}
+    return d
+
+
+def picks_name() -> str:
+    w = who_now()
+    return w.name if w else ""
+
+
+def picks_mine(d: dict) -> dict:
+    """The signed-in user's picks inside `d` (an administrator also gets the ones from before accounts)."""
+    me = picks_name()
+    mine = d["users"].setdefault(me, {})
+    if is_admin() and me and "" in d["users"]:
+        mine.update(d["users"].pop(""))
+    return mine
+
+
 @app.get("/api/picks")
 def api_picks():
-    return _load("picks.json", {})
+    with _lock:
+        d = picks_load()
+        return {k: v for k, v in picks_mine(d).items() if can_path(k)}
 
 
 @app.post("/api/picks")
 async def api_pick(request: Request):
     b = await request.json()
-    p = str(safe_path(b.get("path", "")))
+    p = str(safe_path(b.get("path", ""), write=False))
     with _lock:
-        picks = _load("picks.json", {})
+        d = picks_load()
+        picks = picks_mine(d)
         if b.get("picked"):
             picks[p] = {"as": name_ok(b.get("as") or Path(p).stem), "time": time.time()}
         else:
             picks.pop(p, None)
-        _save("picks.json", picks)
-    return picks
+        _save("picks.json", d)
+        return dict(picks)
 
 
 @app.post("/api/picks/to-model")
@@ -3099,9 +3400,10 @@ async def api_picks_to_model(request: Request):
     b = await request.json()
     if not isinstance(b, dict):
         raise HTTPException(400, "send a JSON object")
-    picks = _load("picks.json", {})
+    with _lock:
+        picks = dict(picks_mine(picks_load()))
     if isinstance(b.get("paths"), list):
-        wanted = {str(safe_path(x)) for x in b["paths"]}
+        wanted = {str(safe_path(x, write=False)) for x in b["paths"]}
         picks = {k: v for k, v in picks.items() if k in wanted}
     ready, skipped = [], []  # (source, base name) of the sprites that are real PNG images
     for k, v in picks.items():
@@ -3166,17 +3468,19 @@ async def api_picks_to_model(request: Request):
     pm().save(m)
     if b.get("unpick"):  # only the picks that really became sprites lose their star
         with _lock:
-            now = _load("picks.json", {})
+            d = picks_load()
+            mine = picks_mine(d)
             for k in copied:
-                now.pop(k, None)
-            _save("picks.json", now)
+                mine.pop(k, None)
+            _save("picks.json", d)
     return {"model": mid, "saved": saved, "skipped": skipped}
 
 
 @app.post("/api/picks/export")
 def api_picks_export():
-    picks = _load("picks.json", {})
-    dest = setting_path("px_output") / "picked"
+    with _lock:
+        picks = dict(picks_mine(picks_load()))
+    dest = setting_path("px_output") / "picked" / (picks_name() or "_app")
     dest.mkdir(parents=True, exist_ok=True)
     done = []
     for path, info in picks.items():
@@ -3236,27 +3540,64 @@ async def http_error(request: Request, exc: HTTPException):
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
+# ---- accounts: what exists before the first one belongs to the first administrator
+
+
+def resource_exists(kind: str, key: str) -> bool:
+    if kind == "model":
+        return (Path(pm().model_dir(key)) / "model.json").exists() if re.fullmatch(r"[a-z0-9_]{1,40}", key) else False
+    if kind == "result":
+        return not key.startswith(".") and (setting_path("px_output") / key).is_dir()
+    if kind == "palette":
+        return bool(PAL_ID.fullmatch(key)) and (pal_dir() / f"{key}.json").is_file()
+    return False
+
+
+def adopt_existing(admin: str) -> None:
+    for mid in pm().list_models():
+        ACCOUNTS.claim("model", mid, admin)
+    out = setting_path("px_output")
+    for d in out.iterdir() if out.is_dir() else []:
+        if d.is_dir() and d.name not in ("uploads", "picked", "recoloured") and not d.name.startswith("."):
+            ACCOUNTS.claim("result", d.name, admin)
+    for f in pal_dir().glob("*.json") if pal_dir().is_dir() else []:
+        ACCOUNTS.claim("palette", f.stem, admin)
+    with _lock:
+        reg = project_registry()
+        _save("projects.json", {"entries": [[o or admin, n] for o, n in reg["entries"]]})
+        for j in JOBS.jobs.values():
+            j.setdefault("owner", admin)
+        JOBS.persist()
+
+
+app.include_router(auth_routes.make_router(ACCOUNTS, adopt_existing, resource_exists))
 app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
+
+
+def announce_setup() -> None:
+    """With no account yet, the page asks for a one-time code to create the administrator: it is printed here."""
+    if os.environ.get("SG_WEB_PASSWORD"):
+        print(
+            "NOTE: SG_WEB_PASSWORD is no longer used: sign in with an account (Users page). Remove it from the service.",
+            file=sys.stderr,
+        )
+    code = ACCOUNTS.setup_code()
+    if code:
+        print(
+            f"Sprite Studio has no account yet. Open the page and create the administrator with this setup code: {code}\n"
+            f"(it is also in {STATE_DIR / 'setup_code'}). Lost an administrator password later: python3 webapp/users_cli.py reset <name>",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.environ.get("SG_WEB_HOST", "127.0.0.1")
-    if host not in ("127.0.0.1", "localhost", "::1") and not PASSWORD:
-        if os.environ.get("SG_WEB_ALLOW_OPEN") != "1":
-            sys.exit(
-                f"Refusing to listen on {host} with no password: anyone who can reach the port could start jobs, change\n"
-                "settings and delete files. Set SG_WEB_PASSWORD, keep SG_WEB_HOST=127.0.0.1, or, on a network you trust,\n"
-                "set SG_WEB_ALLOW_OPEN=1."
-            )
-        print(
-            f"WARNING: listening on {host} with no SG_WEB_PASSWORD (SG_WEB_ALLOW_OPEN=1): the app is open to its network.",
-            file=sys.stderr,
-        )
+    announce_setup()
     uvicorn.run(
         app,
-        host=host,
+        host=os.environ.get("SG_WEB_HOST", "127.0.0.1"),
         port=int(os.environ.get("SG_WEB_PORT", "8189")),
         log_level="warning",
     )

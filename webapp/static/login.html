@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprite Studio: sign in</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cpath fill='%23f0b13c' d='M3 0h2v1H3zM2 1h4v2H2zM1 3h6v2H1zM0 5h3v2H0zM5 5h3v2H5zM3 5h2v1H3z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+<style>
+  .gate { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+  .gate form { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 24px; }
+  .gate .brand { display: flex; align-items: center; gap: 10px; font-weight: 680; font-size: 17px; margin-bottom: 18px; }
+  .gate .brand svg { width: 26px; height: 26px; color: var(--amber); }
+  .gate label { display: block; margin: 12px 0 4px; font-size: 12.5px; color: var(--muted); }
+  .gate input { width: 100%; }
+  .gate .btn { width: 100%; margin-top: 18px; }
+  .gate .msg { min-height: 20px; margin-top: 12px; font-size: 13px; }
+</style>
+</head>
+<body>
+<main class="gate">
+  <form id="form" autocomplete="on">
+    <div class="brand">
+      <svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true"><path fill="currentColor" d="M3 0h2v1H3zM2 1h4v2H2zM1 3h6v2H1zM0 5h3v2H0zM5 5h3v2H5zM3 5h2v1H3z"/></svg>
+      <span>Sprite Studio</span>
+    </div>
+    <h1 id="title">Sign in</h1>
+    <p id="intro" class="small muted"></p>
+    <div id="fields"></div>
+    <div id="msg" class="msg err-text" role="alert"></div>
+    <button id="go" class="btn primary" type="submit">Sign in</button>
+  </form>
+</main>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const form = $("#form");
+let mode = "login";
+
+function field(id, label, type, extra) {
+  const wrap = document.createElement("div");
+  const l = document.createElement("label");
+  l.htmlFor = id;
+  l.textContent = label;
+  const i = document.createElement("input");
+  i.id = id; i.name = id; i.type = type;
+  Object.assign(i, extra || {});
+  wrap.append(l, i);
+  return wrap;
+}
+
+function show(m, user) {
+  mode = m;
+  const f = $("#fields");
+  f.replaceChildren();
+  $("#msg").textContent = "";
+  $("#go").disabled = false;
+  if (m === "login") {
+    $("#title").textContent = "Sign in";
+    $("#intro").textContent = "";
+    f.append(field("username", "User name", "text", { autocomplete: "username", autofocus: true, autocapitalize: "none", spellcheck: false }),
+             field("password", "Password", "password", { autocomplete: "current-password" }));
+    $("#go").textContent = "Sign in";
+  } else if (m === "setup") {
+    $("#title").textContent = "Create the administrator";
+    $("#intro").textContent = "No account exists yet. The setup code was printed when the service started (journalctl -u spritegen-web) and is in the setup_code file of the state folder.";
+    f.append(field("code", "Setup code", "text", { autocomplete: "off", autofocus: true, spellcheck: false }),
+             field("username", "User name", "text", { autocomplete: "username", autocapitalize: "none", spellcheck: false }),
+             field("password", "Password (10 characters or more)", "password", { autocomplete: "new-password" }),
+             field("again", "Password again", "password", { autocomplete: "new-password" }));
+    $("#go").textContent = "Create the account";
+  } else {
+    $("#title").textContent = "Choose a new password";
+    $("#intro").textContent = (user ? user + ", an" : "An") + " administrator asks you to choose your own password before you go on.";
+    f.append(field("current", "Current password", "password", { autocomplete: "current-password", autofocus: true }),
+             field("password", "New password (10 characters or more)", "password", { autocomplete: "new-password" }),
+             field("again", "New password again", "password", { autocomplete: "new-password" }));
+    $("#go").textContent = "Change the password";
+  }
+}
+
+async function post(path, body) {
+  const r = await fetch("/api/auth/" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const v = (id) => ($("#" + id) || {}).value || "";
+  const go = $("#go");
+  go.disabled = true;
+  $("#msg").textContent = "";
+  try {
+    if (mode !== "login" && v("password") !== v("again")) throw new Error("The two passwords differ.");
+    if (mode === "login") {
+      const me = await post("login", { username: v("username"), password: v("password") });
+      if (me.must_change) return show("change", me.username);
+    } else if (mode === "setup") {
+      await post("setup", { code: v("code").trim(), username: v("username"), password: v("password") });
+    } else {
+      await post("password", { current: v("current"), new: v("password") });
+    }
+    location.replace("/");
+  } catch (err) {
+    $("#msg").textContent = err.message;
+    go.disabled = false;
+  }
+});
+
+(async () => {
+  try {
+    const s = await (await fetch("/api/auth/state")).json();
+    if (s.user && s.user.must_change) return show("change", s.user.username);
+    if (s.user) return location.replace("/");
+    show(s.setup ? "setup" : "login");
+  } catch (_) {
+    show("login");
+  }
+})();
+</script>
+</body>
+</html>

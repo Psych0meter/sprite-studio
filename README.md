@@ -35,6 +35,9 @@ web app and a set of command-line tools.
   export them, recolour, clean up again from the raw render with live
   settings (colours, edge, outline, symmetry, palette), delete (with a bin
   and undo).
+- **Users**: everyone signs in; each user has their own models, results,
+  palettes and jobs, can share them (read-only use) with chosen users or
+  everyone, and administrators manage the accounts and see everything.
 - **Any NVIDIA card**: PyTorch build, training precision and memory savers
   chosen from the card; time estimates measured on yours.
 
@@ -68,7 +71,8 @@ cd sprite-studio
 sudo scripts/install.sh
 ```
 
-Then open `http://<machine>:8189`, create a model in **Models**, add its
+Then open `http://<machine>:8189`, create the administrator with the setup code
+printed in the service's log (`journalctl -u spritegen-web`), create a model in **Models**, add its
 sprites, and train it on the **Train** page. The full walk-through, with GPU
 passthrough for containers, is in [docs/INSTALL.md](docs/INSTALL.md); how
 to get good sprites out of it is in [docs/GUIDE.md](docs/GUIDE.md).
@@ -98,7 +102,7 @@ Each script prints its options with `-h` (or at the top of the file).
 
 ```
 scripts/        command-line tools (Python 3, Bash)
-webapp/         the web app: app.py (FastAPI), run.sh, static/ (HTML, CSS, app.js, palette.js)
+webapp/         the web app: app.py (FastAPI), accounts.py, auth_routes.py, users_cli.py, run.sh, static/ (HTML, CSS, app.js, accounts.js, palette.js)
 docs/           installation, user guide, architecture
 tests/          pytest suite (no GPU needed)
 VERSION         the current version

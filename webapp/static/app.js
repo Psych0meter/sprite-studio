@@ -39,6 +39,7 @@ async function api(path, opts = {}) {
   const text = await r.text();
   let data = text;
   try { data = JSON.parse(text); } catch (_) { /* plain text */ }
+  if (data && typeof data === "object" && (data.login || data.must_change)) { location.reload(); return new Promise(() => {}); } // signed out, or must change the password: the sign-in page
   if (!r.ok) {
     const msg = (data && data.error) || (data && data.detail) || r.statusText;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
@@ -887,11 +888,11 @@ routes[""] = async (main) => {
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "ComfyUI"), h("span", { class: "status " + (c.up ? "done" : "failed") }, c.up ? "running" : "stopped")),
       h("p", { class: "muted small" }, c.up ? `${c.device || "GPU"}, ComfyUI ${c.version || ""}` : "Generation needs it running. Training stops it on its own and starts it again afterwards."),
-      updatesBox(),
-      h("div", { class: "row" },
+      isAdmin() ? updatesBox() : null,
+      isAdmin() ? h("div", { class: "row" },
         c.up ? h("button", { class: "btn sm", onclick: () => attempt(() => api("/comfy/restart", { body: {} }), "Restarting ComfyUI") }, "Restart")
           : h("button", { class: "btn sm primary", onclick: () => attempt(() => api("/comfy/start", { body: {} }), "Starting ComfyUI") }, "Start"),
-        c.up ? h("button", { class: "btn sm ghost", onclick: () => attempt(() => api("/comfy/stop", { body: {} }), "Stopping ComfyUI") }, "Stop") : null)));
+        c.up ? h("button", { class: "btn sm ghost", onclick: () => attempt(() => api("/comfy/stop", { body: {} }), "Stopping ComfyUI") }, "Stop") : null) : null));
     const run = st.running;
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "Working on"), h("a", { href: "#/jobs", class: "small" }, "All jobs")),
@@ -1240,7 +1241,10 @@ routes.results = async (main, _parts, params) => {
             h("div", { class: "s" }, i.type === "batch" ? h("span", { class: "tag amber" }, "batch") : i.type === "matrix" ? h("span", { class: "tag" }, "LoRA test") : null,
               i.empty ? [" ", h("span", { class: "tag bad", title: "Nothing was rendered: see the job's log on the Jobs page" }, "empty")] : null,
               i.busy ? [" ", h("span", { class: "tag" }, "running")] : null,
-              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)))));
+              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
+            ownerBadge(i) || i.access === "write" ? h("div", { class: "row", style: { gap: "6px", marginTop: "3px" } }, ownerBadge(i),
+              i.access === "write" ? h("button", { class: "btn sm ghost", type: "button", style: { padding: "0 6px", minHeight: "20px" },
+                onclick: (e) => { e.stopPropagation(); shareDialog("result", i.path.split("/").pop(), i.title, async () => { items = await api("/results"); drawItems(); }); } }, "Share") : null) : null)));
       }
     };
     drawItems();
@@ -2045,7 +2049,8 @@ routes.models = async (main, parts) => {
       h("div", { class: "row between" }, h("h2", { style: { margin: 0 } }, m.label), h("span", { class: "tag mono" }, m.trigger)),
       h("p", { class: "small muted", style: { margin: "8px 0 0" } }, `${m.sprites} sprites, ${m.groups.length} group${m.groups.length === 1 ? "" : "s"}`,
         m.kinds.length ? `, ${m.kinds.length} kinds` : ""),
-      h("p", { class: "small", style: { margin: "6px 0 0", color: "var(--muted)" } }, m.groups.map((g) => g.label).join(", "))))));
+      h("p", { class: "small", style: { margin: "6px 0 0", color: "var(--muted)" } }, m.groups.map((g) => g.label).join(", ")),
+      ownerBadge(m) ? h("p", { style: { margin: "8px 0 0" } }, ownerBadge(m)) : null))));
   }
 
   // new model
@@ -2171,8 +2176,10 @@ async function modelEditor(main, mid, tab) {
   main.append(headEl, body);
   const drawHead = () => {
     headEl.innerHTML = "";
-    headEl.append(head(m.label, null, h("a", { class: "btn ghost", href: "#/models" }, "All models"),
-      h("a", { class: "btn", href: "#/train/" + mid }, "Train it"), h("a", { class: "btn", href: "#/generate?model=" + mid }, "Generate")));
+    headEl.append(head(m.label, null, ownerBadge(d), shareButton("model", mid, d, m.label, async () => { await reload(); draw(); }),
+      h("a", { class: "btn ghost", href: "#/models" }, "All models"),
+      d.access === "read" ? null : h("a", { class: "btn", href: "#/train/" + mid }, "Train it"), h("a", { class: "btn", href: "#/generate?model=" + mid }, "Generate")));
+    if (d.access === "read") headEl.append(h("div", { class: "note warn", style: { marginBottom: "12px" } }, `${d.owner} shares this model with you to use: generate with it and look at its sprites. To change it, ask ${d.owner}, or make your own copy from Models → New model → A copy of a model.`));
     headEl.append(h("div", { class: "row", style: { marginBottom: "16px" } },
       seg(tabs.map(([id, label]) => ({ id, label })), tab, (t) => { history.replaceState(null, "", `#/models/${mid}/${t}`); tab = t; draw(); }),
       d.saved ? null : h("span", { class: "tag amber" }, "built-in defaults: saved on the first change")));
@@ -2183,7 +2190,7 @@ async function modelEditor(main, mid, tab) {
     if (r) { await reload(); draw(); }
     return r;
   };
-  const saveBar = () => h("div", { class: "row", style: { marginTop: "16px" } },
+  const saveBar = () => d.access === "read" ? null : h("div", { class: "row", style: { marginTop: "16px" } },
     h("button", { class: "btn primary", onclick: () => save() }, "Save"),
     h("button", { class: "btn ghost", onclick: async () => { await reload(); draw(); } }, "Discard changes"),
     h("span", { class: "hint" }, "Saved changes apply to the next training set you build, and to generation at once."));
@@ -2209,7 +2216,7 @@ async function modelEditor(main, mid, tab) {
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
     drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files].filter((f) => /\.(png|zip)$/i.test(f.name))); });
     const imp = { root: "game", glob: "", prefix: "", group: "" };
-    const add = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Add sprites"),
+    const add = h("div", { class: "panel", hidden: d.access === "read" }, h("div", { class: "panel-head" }, h("h2", {}, "Add sprites"),
       m.imports.length ? h("button", { class: "btn", onclick: async () => {
         const r = await attempt(() => api(`/models/${mid}/import`, { body: {} }));
         if (r) { toast(r.imported.length ? `${r.imported.length} sprites imported` : "Nothing new to import"); await reload(); draw(); }
@@ -2472,10 +2479,10 @@ async function modelEditor(main, mid, tab) {
             if (!(await askConfirm("Replace this model's groups, kinds, words and settings with the template's ones? Its sprites stay.", { title: "Use the template's settings", ok: "Replace" }))) return;
             if (await attempt(() => api(`/models/${mid}/reset`, { body: {} }), "Built-in settings restored")) { await reload(); draw(); }
           } }, "Use the template's settings")) : null,
-        h("div", { class: "panel" }, h("h2", {}, "Share"),
+        h("div", { class: "panel" }, h("h2", {}, "Export"),
           h("p", { class: "small muted" }, "A file with this model's groups, kinds, words and settings (no sprites), to import on another machine or as a template for another game (Models → Import a model file)."),
           h("a", { class: "btn", href: `/api/models/${mid}/export`, download: `${mid}.json` }, "Export the model")),
-        h("div", { class: "panel" }, h("h2", {}, "Folder"), h("p", { class: "small mono muted" }, d.dir),
+        h("div", { class: "panel", hidden: d.access === "read" }, h("h2", {}, "Folder"), d.dir ? h("p", { class: "small mono muted" }, d.dir) : null,
           h("button", { class: "btn danger", onclick: async () => {
             if (!(await askConfirm(`Delete the model ${m.label}? Its folder (sprites, training sets, checkpoints) is moved to .deleted, not erased.`, { danger: true, ok: "Delete", title: "Delete the model" }))) return;
             const r = await attempt(() => api("/models/" + mid, { method: "DELETE" }), "Model deleted");
@@ -2535,7 +2542,8 @@ routes.palettes = async (main, parts) => {
     h("div", { style: { minWidth: 0, flex: 1 } }, h("div", { class: "t" }, p.label),
       swatchStrip(p.colours, p.tune),
       h("div", { class: "s" }, `${p.colours.length} colours, ${({ tune: "tuning only", snap: "snap", match: "match light, snap" })[p.mode]}`,
-        p.used_by.length ? `, used by ${p.used_by.length} group${p.used_by.length === 1 ? "" : "s"}` : ""))))),
+        p.used_by.length ? `, used by ${p.used_by.length} group${p.used_by.length === 1 ? "" : "s"}` : ""),
+      ownerBadge(p))))),
     h("button", { class: "btn sm ghost", style: { marginTop: "10px" }, onclick: () => newEmpty() }, "Start an empty one"));
   };
 
@@ -2808,8 +2816,14 @@ routes.palettes = async (main, parts) => {
         h("div", { class: "panel-head" }, h("div", {},
           h("input", { type: "text", value: edit.label, style: { fontSize: "18px", fontWeight: 600, minWidth: "260px" }, oninput: (e) => { edit.label = e.target.value; dirty = true; saveBtn.disabled = false; } }),
           h("div", { class: "small muted", style: { marginTop: "4px" } }, h("span", { class: "mono" }, edit.id), edit.source ? " · " + edit.source : "")),
-        h("div", { class: "row" }, saveBtn,
-          h("button", { class: "btn ghost danger", onclick: async () => {
+        h("div", { class: "row" }, ownerBadge(p), shareButton("palette", p.id, p, p.label, async () => { await loadPalettes(); drawList(); drawEditor(); }),
+          p.access === "read" ? h("button", { class: "btn", title: "It is shared with you to use. Make a copy of your own to change it.", onclick: async () => {
+            let id = (p.id + "_" + ME.username).replace(/[^a-z0-9_]/g, "_").slice(0, 60), k = 2;
+            while (S.palettes.some((x) => x.id === id)) id = `${p.id}_${ME.username}_${k++}`.replace(/[^a-z0-9_]/g, "_").slice(0, 60);
+            const r = await attempt(() => api("/palettes/" + id, { method: "PUT", body: Object.assign({}, edit, { id }) }), "Copy made");
+            if (r) { current = id; dirty = false; await loadPalettes(); drawList(); drawEditor(); }
+          } }, "Make my own copy") : saveBtn,
+          p.access === "read" ? null : h("button", { class: "btn ghost danger", onclick: async () => {
             if (!(await askConfirm(`Delete the palette ${p.label}?` + (p.used_by.length ? ` The groups using it (${p.used_by.join(", ")}) go back to no palette.` : ""), { danger: true, ok: "Delete", title: "Delete the palette" }))) return;
             if (await attempt(() => api("/palettes/" + p.id, { method: "DELETE" }), "Palette deleted")) { current = ""; dirty = false; await loadPalettes(); await loadCatalog(); current = (S.palettes[0] || {}).id || ""; drawList(); drawEditor(); }
           } }, "Delete"))),
@@ -2857,13 +2871,13 @@ routes.jobs = async (main, parts) => {
     if (!jobs.length) { box.append(h("div", { class: "empty" }, "No jobs yet.")); return; }
     const pg = pageOf(jobs, paging);
     box.append(h("table", {}, h("thead", {}, h("tr", {}, ["Job", "Status", "Progress", "Started", "Took", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, pg.rows.map((j) => h("tr", { class: "clickable", onclick: () => { location.hash = "#/jobs/" + j.id; } },
-        h("td", {}, j.title, h("div", { class: "faint small" }, j.kind)),
+      h("tbody", {}, pg.rows.map((j) => h("tr", { class: j.foreign ? "" : "clickable", onclick: () => { if (!j.foreign) location.hash = "#/jobs/" + j.id; } },
+        h("td", {}, j.foreign ? h("span", { class: "muted" }, j.title) : j.title, h("div", { class: "faint small" }, j.kind, j.owner && (isAdmin() || j.foreign) ? " · " + j.owner : "")),
         h("td", {}, statusLabel(j)),
         h("td", { style: { width: "220px" } }, j.status === "running" ? [progressBar(j), h("div", { class: "small muted" }, (j.progress && j.progress.text) || "")] : null),
         h("td", { class: "small muted nowrap" }, fmtTime(j.started || j.created)),
         h("td", { class: "small muted nowrap" }, j.started ? fmtDur((j.ended || Date.now() / 1000) - j.started) : ""),
-        h("td", { class: "nowrap" }, ["running", "queued"].includes(j.status)
+        h("td", { class: "nowrap" }, j.foreign ? null : ["running", "queued"].includes(j.status)
           ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(() => loop.poll({ force: true })); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
             ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(() => loop.poll({ force: true })); } }, "Run again") : null))))));
@@ -2961,6 +2975,7 @@ routes.settings = async (main) => {
 
 // ---------------------------------------------------------------- start
 
+routes.users = (main) => usersPage(main);
+
 setTray(S.tray);
-statusLoop.poll();
-route();
+loadMe().catch(() => {}).finally(() => { statusLoop.poll(); route(); });

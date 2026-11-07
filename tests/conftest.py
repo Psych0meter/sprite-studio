@@ -63,11 +63,25 @@ def pxmodel(env):
     return m
 
 
+ADMIN_PASSWORD = "correct horse battery staple"
+
+
 @pytest.fixture
-def client(env):
-    """The web app on the isolated folders (imported afresh for each test)."""
+def web(env):
+    """The web app on the isolated folders (imported afresh for each test), with nobody signed in."""
     from fastapi.testclient import TestClient
 
     sys.modules.pop("app", None)
     app = importlib.import_module("app")
-    return TestClient(app.app)
+    c = TestClient(app.app)
+    c.module = app
+    return c
+
+
+@pytest.fixture
+def client(web):
+    """The web app with an administrator signed in (accounts: tests/test_accounts.py)."""
+    web.module.ACCOUNTS.create("admin", ADMIN_PASSWORD, role="admin", must_change=False)
+    r = web.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD})
+    assert r.status_code == 200, r.text
+    return web
