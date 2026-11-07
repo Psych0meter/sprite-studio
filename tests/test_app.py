@@ -359,3 +359,32 @@ def test_speed_ignores_jobs_that_did_not_really_finish(client):
         assert webapp.speed()["train_minutes"] == {"sd15": 30}
     finally:
         webapp.JOBS.jobs.clear()
+
+
+def test_picks_become_training_sprites(client, env):
+    src = env["output"] / "run_1"
+    src.mkdir()
+    a = make_sprite(src / "a.png")
+    b = make_sprite(src / "b.png")
+    assert (
+        client.post("/api/picks/to-model", json={"new": {"id": "boss", "label": "Boss"}}).status_code == 400
+    )  # none yet
+    for path, name in ((a, "ship"), (b, "ship")):
+        client.post("/api/picks", json={"path": str(path), "picked": True, "as": name})
+    r = client.post(
+        "/api/picks/to-model", json={"new": {"id": "boss", "label": "Boss ships"}, "group": "main", "unpick": True}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "boss" and r.json()["saved"] == [
+        "ship.png",
+        "ship_2.png",
+    ]  # one pick name twice: the second is numbered
+    assert client.get("/api/picks").json() == {}
+    d = client.get("/api/models/boss").json()
+    assert sorted(s["name"] for s in d["sprites"]) == ["ship.png", "ship_2.png"] and d["sprites"][0]["group"] == "main"
+    # a second round into the existing model never overwrites a sprite
+    client.post("/api/picks", json={"path": str(a), "picked": True, "as": "ship"})
+    r = client.post("/api/picks/to-model", json={"model": "boss", "kind": "nope"})
+    assert r.status_code == 400
+    r = client.post("/api/picks/to-model", json={"model": "boss"})
+    assert r.json()["saved"] == ["ship_3.png"]

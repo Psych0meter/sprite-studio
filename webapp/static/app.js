@@ -1066,7 +1066,9 @@ function readFile(file) {
 
 routes.results = async (main, _parts, params) => {
   main.append(head("Results", "Every generation, batch and LoRA comparison in the output folder. Star the variant to keep, then export the picks.",
-    h("button", { class: "btn", onclick: exportPicks }, "Export picks")));
+    h("div", { class: "row", style: { gap: "8px" } },
+      h("button", { class: "btn", title: "Copy the starred sprites into a new or existing model as training sprites", onclick: () => picksToModel() }, "Train on picks…"),
+      h("button", { class: "btn", onclick: exportPicks }, "Export picks"))));
   const layout = h("div", { class: "split" });
   const listPanel = h("div", { class: "panel" });
   const view = h("div", {});
@@ -1320,6 +1322,64 @@ routes.results = async (main, _parts, params) => {
   drawList();
   drawView();
 };
+
+// The starred sprites become training sprites of a new model, or are added to an existing one.
+async function picksToModel() {
+  const n = Object.keys(S.picks || {}).length;
+  if (!n) { toast("Nothing picked yet: star the variants you want first.", true); return; }
+  await loadCatalog();
+  const models = S.catalog.models;
+  const f = { mode: models.length ? "existing" : "new", model: (models[0] || {}).id || "", label: "", trigger: "", group: "", kind: "", unpick: false };
+  let detail = null;
+  const layer = h("div", { class: "modal dialog-layer" });
+  const box = h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true", style: { maxWidth: "520px", width: "100%" } });
+  layer.append(box);
+  const close = () => { layer.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); } };
+  layer.addEventListener("click", (e) => { if (e.target === layer) close(); });
+  document.addEventListener("keydown", onKey, true);
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+  const loadDetail = async () => {
+    detail = f.mode === "existing" && f.model ? (await api("/models/" + f.model)).model : null;
+    if (!detail || !detail.groups.some((g) => g.id === f.group)) f.group = "";
+    if (!detail || !detail.kinds.some((k) => k.id === f.kind)) f.kind = "";
+  };
+  const draw = () => {
+    box.innerHTML = "";
+    const opt = (v, l, cur) => h("option", { value: v, selected: v === cur }, l);
+    box.append(h("h2", {}, "Train on picks"),
+      h("p", { class: "dialog-text" }, `${n === 1 ? "The starred sprite is" : `The ${n} starred sprites are`} copied (the originals stay in Results) into a model's sprites, named after their pick name. Then train that model on the Train page.`),
+      h("div", { class: "field", style: { marginTop: "14px" } }, seg([{ id: "existing", label: "Existing model" }, { id: "new", label: "New model" }].filter((o) => o.id === "new" || models.length), f.mode,
+        async (v) => { f.mode = v; await loadDetail(); draw(); })),
+      f.mode === "existing"
+        ? h("div", { class: "field" }, h("label", {}, "Model"), h("select", { onchange: async (e) => { f.model = e.target.value; await loadDetail(); draw(); } }, models.map((x) => opt(x.id, x.label || x.id, f.model))))
+        : [h("div", { class: "field" }, h("label", {}, "Name"), h("input", { type: "text", value: f.label, placeholder: "e.g. Boss ships", oninput: (e) => { f.label = e.target.value; } })),
+          h("div", { class: "field" }, h("label", {}, "Trigger word (optional)"), h("input", { type: "text", value: f.trigger, class: "mono", placeholder: "made from the name", oninput: (e) => { f.trigger = e.target.value; } }),
+            h("div", { class: "hint" }, "One group, \"Main\", holds the sprites; describe it in the model afterwards."))],
+      detail ? h("div", { class: "inline-fields" },
+        h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { f.group = e.target.value; } }, opt("", "Automatic (by file name)", f.group), detail.groups.map((g) => opt(g.id, g.label, f.group)))),
+        detail.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { f.kind = e.target.value; } }, opt("", "Automatic (by file name)", f.kind), detail.kinds.map((k) => opt(k.id, k.label, f.kind)))) : null) : null,
+      h("label", { class: "row", style: { gap: "8px", margin: "10px 0" } }, h("input", { type: "checkbox", checked: f.unpick, onchange: (e) => { f.unpick = e.target.checked; } }), h("span", { class: "small" }, "Remove the stars afterwards")),
+      h("div", { class: "row", style: { marginTop: "18px", justifyContent: "flex-end" } },
+        h("button", { class: "btn ghost", onclick: close }, "Cancel"),
+        h("button", { class: "btn primary", onclick: async () => {
+          const body = { group: f.group || null, kind: f.kind || null, unpick: f.unpick };
+          if (f.mode === "new") {
+            if (!f.label.trim()) { toast("Give the new model a name", true); return; }
+            body.new = { id: slug(f.label), label: f.label.trim(), trigger: f.trigger.trim() };
+          } else body.model = f.model;
+          const r = await attempt(() => api("/picks/to-model", { body }));
+          if (!r) return;
+          close();
+          if (f.unpick) S.picks = await api("/picks");
+          toast(`${r.saved.length} sprite${r.saved.length === 1 ? "" : "s"} added to ${r.model}` + (r.skipped.length ? `, ${r.skipped.length} skipped` : ""), !r.saved.length);
+          location.hash = "#/models/" + r.model;
+        } }, "Add to the model")));
+  };
+  document.body.append(layer);
+  await loadDetail();
+  draw();
+}
 
 async function exportPicks() {
   const r = await attempt(() => api("/picks/export", { body: {} }));

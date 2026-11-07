@@ -2128,7 +2128,10 @@ async def api_model_save(mid: str, request: Request):
 
 @app.post("/api/models")
 async def api_model_create(request: Request):
-    b = await request.json()
+    return create_model(await request.json())
+
+
+def create_model(b: dict) -> dict:
     mid = (b.get("id") or "").strip()
     if not re.fullmatch(r"[a-z0-9_]{1,40}", mid):
         raise HTTPException(400, "the id is lowercase letters, digits and _ (it names the model's folder)")
@@ -3013,6 +3016,61 @@ async def api_pick(request: Request):
             picks.pop(p, None)
         _save("picks.json", picks)
     return picks
+
+
+@app.post("/api/picks/to-model")
+async def api_picks_to_model(request: Request):
+    """Copies the picked sprites into a model's sprites: an existing one ({"model": id}) or a new one ({"new":
+    {"id", "label", "trigger", "project"}}), all in one group / kind if given. {"paths": [...]} limits it to some picks."""
+    b = await request.json()
+    picks = _load("picks.json", {})
+    if isinstance(b.get("paths"), list):
+        wanted = {str(safe_path(x)) for x in b["paths"]}
+        picks = {k: v for k, v in picks.items() if k in wanted}
+    sources = [(Path(k), v) for k, v in picks.items() if Path(k).is_file()]
+    if not sources:
+        raise HTTPException(400, "Nothing picked yet: star the variants you want first.")
+    if b.get("new"):
+        mid = (b["new"].get("id") or "").strip()
+        create_model(dict(b["new"], id=mid))
+    else:
+        mid = b.get("model") or ""
+    m = model_cfg(mid)
+    group, kind = b.get("group") or None, b.get("kind") or None
+    if group and group not in [g["id"] for g in m["groups"]]:
+        raise HTTPException(400, f"the model has no group {group}")
+    if kind and kind not in [k["id"] for k in m["kinds"]]:
+        raise HTTPException(400, f"the model has no kind {kind}")
+    folder = Path(pm().sprites_dir(mid))
+    folder.mkdir(parents=True, exist_ok=True)
+    saved, skipped = [], []
+    for src, info in sources:
+        base = re.sub(r"\.png$", "", name_ok(info.get("as") or src.stem), flags=re.I)
+        try:
+            check_image(src.read_bytes(), "PNG")
+        except HTTPException as e:
+            skipped.append(f"{base} ({e.detail})")
+            continue
+        name, n = base + ".png", 2
+        while (folder / name).exists():  # never overwrite a sprite the model already has
+            name, n = f"{base}_{n}.png", n + 1
+        shutil.copy2(src, folder / name)
+        saved.append(name)
+        ov = m["sprites"].setdefault(name, {})
+        if group:
+            ov["group"] = group
+        if kind:
+            ov["kind"] = kind
+        if not ov:
+            m["sprites"].pop(name, None)
+    pm().save(m)
+    if b.get("unpick"):
+        with _lock:
+            now = _load("picks.json", {})
+            for src, _ in sources:
+                now.pop(str(src), None)
+            _save("picks.json", now)
+    return {"model": mid, "saved": saved, "skipped": skipped}
 
 
 @app.post("/api/picks/export")
