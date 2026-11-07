@@ -7,8 +7,8 @@ page of the app. Installation is in [INSTALL.md](INSTALL.md).
 ## 1. The ideas in five minutes
 
 **The base model.** Stable Diffusion turns a text *prompt* into a picture.
-It knows "a spaceship", "pixel art", "seen from above", but it has never
-seen *your* game. Two versions are supported:
+It knows "a robot", "pixel art", "seen from above", but it has never
+seen *your* sprites. Two versions are supported:
 
 | Base model | Renders at | Training on an 8 GB card | Suits |
 |---|---|---|---|
@@ -23,7 +23,7 @@ whole model. In Sprite Studio, one *model* = one LoRA.
 caption, built from the model:
 
 ```
-pxunit, red faction, large unit, armoured hull, top-down view, facing up,
+pxunit, red team, large unit, armoured body, top-down view, facing up,
 dark red metal hull, near-black shadows, bright glowing red lights,
 pixel art, flat green background
 ```
@@ -57,7 +57,7 @@ runs; `dataset_xl/` and `output_xl/` for SDXL).
 
 ### 3.1 Projects and starting points
 
-Models belong to a *project*, one per game. The list at the top of the menu
+Models belong to a *project*, one per project. The list at the top of the menu
 shows one project at a time; projects are created, renamed and deleted at
 the bottom of the Models page (deleting one moves its models, it never
 deletes them).
@@ -67,7 +67,7 @@ To start a model (Models page, *Add models*):
 - **New model**: empty, a copy of another model's settings (optionally with
   only some of its groups), or one model of a template set.
 - **Template sets**: ready-made models. *Generic starting points* holds
-  top-down units in three sizes, side-view characters, item icons, props.
+  top-down units in three sizes, side-view characters, item icons, props, tiles (a Tile kind with the edge kept).
   More sets are JSON files in `~/lora/.templates/`.
 - **Import a model file**: a model exported from another installation
   (a model's Settings tab, *Export the model*), optionally kept as a template.
@@ -90,10 +90,10 @@ On a model's **Sprites** tab:
 
 ### 3.3 Groups and kinds
 
-**Groups** are the main axis: a faction, a family of items. Each has:
+**Groups** are the main axis: a team, a family of items. Each has:
 
-- *words*, put in every caption and prompt of the group ("red faction");
-- *keywords*, an extra description ("organic insect hull, bone plating");
+- *words*, put in every caption and prompt of the group ("red team");
+- *keywords*, an extra description ("organic insect body, bone plating");
 - a *file name pattern* (a regular expression, `_red_` for instance) that
   puts a sprite in the group unless you set it by hand;
 - *own words from*: a pattern whose first bracketed part becomes the
@@ -106,8 +106,8 @@ generated; *fill* how much of the canvas a new sprite takes; *remaster
 distance* the default denoise; *keywords* and *words to avoid* refine
 the prompt per kind; *Tile* and *Keep edge* are for tiles, see 5.7. A model without kinds uses each sprite's own size.
 
-A model for one faction can put each kind's look of that faction in the
-kinds' keywords, and the faction's shared look in the group's keywords.
+A model for one team can put each kind's look of that team in the
+kinds' keywords, and the team's shared look in the group's keywords.
 
 **Caption order**: trigger, group words, kind words, the sprite's own words,
 group keywords, kind keywords, the model's end words, the sprite's colours,

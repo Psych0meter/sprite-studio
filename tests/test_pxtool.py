@@ -121,8 +121,8 @@ def test_flatten_background_makes_the_green_uniform(tmp_path):
 
     src = render(tmp_path / "render.png")
     a = np.array(Image.open(src))
-    hull = a[..., 1] != 255
-    a[hull] = np.stack([a[hull][:, 0]] * 3, axis=-1)  # grey hull: no glow, so the outline shows
+    body = a[..., 1] != 255
+    a[body] = np.stack([a[body][:, 0]] * 3, axis=-1)  # grey body: no glow, so the outline shows
     Image.fromarray(a).save(src)
 
     def make(name, **kw):
@@ -135,7 +135,7 @@ def test_flatten_background_makes_the_green_uniform(tmp_path):
 
     assert ncolours(make("few.png", colours=3)) <= 3
     assert ncolours(make("many.png", colours=64)) >= ncolours(make("few2.png", colours=3))
-    # without the outline the edge keeps the hull's own colours: not all of it is the darkest colour
+    # without the outline the edge keeps the body's own colours: not all of it is the darkest colour
     plain, outlined = make("plain.png", outline=False), make("outlined.png", outline=True)
     assert not np.array_equal(plain, outlined)
     # a lower edge threshold draws a fuller silhouette than a higher one

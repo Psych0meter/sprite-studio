@@ -10,7 +10,7 @@ web app and a set of command-line tools.
 ## Features
 
 - **Models**: one LoRA per model, organised in projects (one per game). A
-  model has *groups* (factions, item families...) and *kinds* (size
+  model has *groups* (teams, item families...) and *kinds* (size
   classes), each with the words that describe it; sprites are sorted into
   them by file name pattern or by hand. Template sets give ready-made
   starting points; models export and import as files.

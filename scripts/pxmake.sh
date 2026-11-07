@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # pxmake.sh: generate sprites for any model (pxmodel.py) with ComfyUI and
-# the model's LoRA (pxcomfy.py), then clean them into game sprites
+# the model's LoRA (pxcomfy.py), then clean them into sprites
 # (pxtool.py post). The prompt comes from the model: its trigger word, the
 # group's words and keywords, the kind's words, your extra words, colours
 # read from the group's sprites, the model's tail words.
 #
-#   pxmake.sh --model units --group red --kind large --extra "wide crescent hull"
+#   pxmake.sh --model units --group red --kind large --extra "wide crescent body"
 #   pxmake.sh --model units --group blue --kind small --init small_blue_4.png
-#   pxmake.sh --model items --group weapons --extra "plasma shotgun"
+#   pxmake.sh --model items --group tools --extra "curved bronze blade"
 #
 # Options:
 #   --model M        a model id (pxmodel.py list)                    (required)
-#   --group G        one of its groups (a faction, an item family...)
+#   --group G        one of its groups (a team, an item family...)
 #   --kind K         one of its kinds (size class), if it has some
 #   --extra "TEXT"   what this sprite is or looks like ("plasma shotgun",
-#                    "wide hull, six cannon batteries")
+#                    "wide body, six side pods")
 #   --colours "TEXT" colour words instead of the ones read from the group
 #   --refs-kind K    read the colours from that kind of the group instead
 #   --init FILE      start from this sprite (a path, or a name in the
-#                    model's sprites, the input or the game folder)
+#                    model's sprites, the input or the second source folder)
 #   --sketch FILE    start from a rough silhouette you drew (denoise 0.85)
 #   --mask FILE      with --init: a touch-up, only the white pixels of this
 #                    mask (same size as the final sprite) are redrawn
@@ -89,7 +89,7 @@ done
 [ -n "$model" ] || { echo "--model is required (pxmodel.py list shows the models)" >&2; exit 2; }
 [ -n "$group" ] || { echo "--group is required (pxmodel.py sprites $model shows the groups)" >&2; exit 2; }
 
-resolve() { # a path, or a name in the model's sprites, the input or the game folder
+resolve() { # a path, or a name in the model's sprites, the input or the second source folder
 	local f
 	for f in "$1" "$PX_LORA_HOME/$model/sprites/$1" "$PX_INPUT/$1" "$PX_GAME/$1"; do
 		[ -f "$f" ] && { echo "$f"; return; }

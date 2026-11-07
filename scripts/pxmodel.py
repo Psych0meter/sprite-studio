@@ -13,8 +13,8 @@ A model lives in $PX_LORA_HOME/<id>/ (default ~/lora/<id>/):
 model.json:
 
   id, label, trigger        the LoRA's trigger word (pxunit...)
-  project                   the project (game) it belongs to
-  colour_words              "hard" (metal hull, armour plating) or
+  project                   the project it belongs to
+  colour_words              "hard" (metal, armour plating) or
                             "neutral" (body, highlights)
   colours_from              where a remaster's colour words come from:
                             "group" (the other sprites of its group: one
@@ -33,9 +33,9 @@ model.json:
                             ones ("lit from below, shadows on top")
   groups   [ {id, label, words, keywords, pattern, name_pattern,
               name_format, enabled, palette} ]
-            the main axis: a faction, a family of items... words go in
-            every caption of the group ("red faction"), keywords too
-            (extra description: "organic insect hull"). pattern: regex on
+            the main axis: a team, a family of items... words go in
+            every caption of the group ("red team"), keywords too
+            (extra description: "organic insect body"). pattern: regex on
             the file name that puts a sprite in the group (when not set by
             hand); name_pattern: its first capture is the sprite's own
             words ("acid spitter"), formatted by name_format ("{} state");
@@ -142,6 +142,28 @@ GENERIC_MODELS = {
         "repeats": 0,
         "groups": [{"id": "main", "label": "Items", "words": "", "pattern": ".", "name_pattern": r"^(.+?)(?:_\d+)?$"}],
     },
+    "tiles": {
+        "label": "Tiles (floors, walls)",
+        "trigger": "pxtile",
+        "colour_words": "neutral",
+        "colours_from": "self",
+        "tail": "seamless top-down tile",
+        "size": 64,
+        "repeats": 0,
+        "groups": [{"id": "main", "label": "Main", "words": "", "pattern": "."}],
+        "kinds": [
+            {
+                "id": "tile",
+                "label": "Tile",
+                "words": "",
+                "size": 64,
+                "pattern": ".",
+                "tile": True,
+                "edge": 4,
+                "denoise": 0.45,
+            }
+        ],
+    },
     "props": {
         "label": "Props and obstacles",
         "trigger": "pxprop",
@@ -157,8 +179,8 @@ GENERIC_MODELS = {
 TEMPLATE_SETS = {
     "generic": {
         "label": "Generic starting points",
-        "description": "Empty models to fill with any game's sprites: top-down units in three sizes, "
-        "side-view characters, item icons, props.",
+        "description": "Empty models to fill with any sprites: top-down units in three sizes, "
+        "side-view characters, item icons, props, tiles.",
         "models": GENERIC_MODELS,
     },
 }

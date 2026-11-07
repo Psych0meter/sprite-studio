@@ -155,7 +155,7 @@ function setTray(t) { S.tray = t; store.set("tray", t); $("#tray-count").textCon
 
 async function loadCatalog() { S.catalog = await api("/catalog"); drawProjectPicker(); return S.catalog; }
 
-/** The project (game) shown: every page lists only its models. */
+/** The project shown: every page lists only its models. */
 S.project = store.get("project", "");
 const projectsOf = () => [...new Set([...(S.catalog.projects || []), ...S.catalog.models.map((m) => m.project || "No project")])]
   .sort((a, b) => (a === "No project") - (b === "No project") || a.localeCompare(b));
@@ -166,7 +166,7 @@ function projectSelect(value, onchange, opts = {}) {
   if (value && !value.startsWith("__") && !names.includes(value)) names.push(value);
   const sel = h("select", { id: opts.id, onchange: async (e) => {
     if (e.target.value === "__new__") {
-      const name = await askText("New project", { input: "Name (a game)", placeholder: "My game", ok: "Create" });
+      const name = await askText("New project", { input: "Name", placeholder: "My project", ok: "Create" });
       if (!name) { e.target.value = value; return; }
       if (!(S.catalog.projects || []).includes(name)) await attempt(() => api("/projects", { body: { name } }));
       await loadCatalog();
@@ -605,9 +605,9 @@ async function cleanupDialog(v, set, done) {
       select("mirror", "Symmetry", [["auto", "Like the original"], ["none", "None"], ["left", "Left half mirrored"], ["right", "Right half mirrored"]],
         "Mirroring copies one half onto the other and drops what differs left and right."),
       slider("colours", "Colours at most", 2, 64, 1, "", "Fewer colours: flatter, more graphic. 64 is the standard's limit."),
-      slider("edge", "Edge", 20, 80, 5, " %", "How much of a pixel's block must be hull to draw it. Lower: a fuller silhouette; higher: a thinner one."),
-      slider("min_part", "Loose specks", 0, 5, 0.1, " %", "Separate bits smaller than this share of the hull are dropped."),
-      slider("key_tol", "Background tolerance", 20, 140, 5, "", "How close to the green a pixel must be to count as background. Higher removes more fringe, and may eat green-tinted hull."),
+      slider("edge", "Edge", 20, 80, 5, " %", "How much of a pixel's block must be part of the sprite to draw it. Lower: a fuller silhouette; higher: a thinner one."),
+      slider("min_part", "Loose specks", 0, 5, 0.1, " %", "Separate bits smaller than this share of the sprite are dropped."),
+      slider("key_tol", "Background tolerance", 20, 140, 5, "", "How close to the green a pixel must be to count as background. Higher removes more fringe, and may eat green-tinted parts of the sprite."),
       check("tidy", "Tidy lone pixels", "A pixel that matches none of its neighbours takes theirs."),
       check("outline", "Dark outline", "A dark line around the silhouette (glowing edges are kept)."),
       select("keep_green", "Greens of its own", [["auto", "Detect"], ["on", "Keep them"], ["off", "Treat as background"]]),
@@ -738,7 +738,7 @@ routes[""] = async (main) => {
     main.append(h("div", { class: "panel", style: { marginBottom: "16px" } }, h("h2", {}, "Getting started"),
       h("ol", { class: "small", style: { lineHeight: 1.8, margin: 0 } },
         h("li", {}, h("a", { href: "#/models" }, "Models"), ": create a model (empty, or from the Generic template set) and add its sprites: a folder, a zip or a few PNG files."),
-        h("li", {}, "Give it groups (families, factions...) and kinds (sizes), with the words that describe them."),
+        h("li", {}, "Give it groups (families, teams...) and kinds (sizes), with the words that describe them."),
         h("li", {}, h("a", { href: "#/train" }, "Train"), ": build the training set, train the LoRA, then pick the best epoch and click Use."),
         h("li", {}, h("a", { href: "#/generate" }, "Generate"), " or ", h("a", { href: "#/batch" }, "Batch"), ": remaster your sprites or invent new ones; tune the colours with ",
           h("a", { href: "#/palettes" }, "Palettes"), "."))));
@@ -1334,7 +1334,7 @@ routes.train = async (main, parts) => {
     if (!info.checkpoints.length) {
       s3.append(h("p", { class: "muted" }, "Checkpoints and their previews appear here during training, every 2 epochs. SDXL on a card under 12 GB saves the checkpoints without previews: try them on Compare LoRAs."));
     } else {
-      s3.append(h("p", { class: "small muted" }, "Each column is one checkpoint, each row one test prompt (things the game does not have, to see the style rather than copies). Pick the earliest column that looks right: later ones tend to copy the training set."));
+      s3.append(h("p", { class: "small muted" }, "Each column is one checkpoint, each row one test prompt (things your sprites do not show, to see the style rather than copies). Pick the earliest column that looks right: later ones tend to copy the training set."));
       s3.append(previewsBox(info, pvJob, running, smallCard));
       const grid = info.samples.grid;
       const epochs = [...new Set(Object.values(grid).flatMap((row) => Object.keys(row)))].map(Number).filter((e) => e > 0).sort((a, b) => a - b);
@@ -1505,7 +1505,7 @@ routes.batch = async (main) => {
         h("div", { class: "field" }, h("label", { for: "b-inv" }, "New sprites per group and kind"),
           h("input", { id: "b-inv", type: "number", min: 1, max: 50, value: b.invent, oninput: (e) => { b.invent = e.target.value; keep(); } }))) : null,
       b.mode === "invent" ? h("div", { class: "field", style: { marginTop: "14px" } }, h("label", { for: "b-ideas" }, "Ideas (optional, one per line)"),
-        h("textarea", { id: "b-ideas", rows: 4, placeholder: "wide crescent hull\nlong lance, twin engine pods\nround carapace, six legs", oninput: (e) => { b.ideas = e.target.value; keep(); } }, b.ideas),
+        h("textarea", { id: "b-ideas", rows: 4, placeholder: "wide crescent body\nlong handle, twin side pods\nround shell, six legs", oninput: (e) => { b.ideas = e.target.value; keep(); } }, b.ideas),
         h("div", { class: "hint" }, "What each new sprite is or looks like, used in turn (new sprite 1 takes line 1...). Empty: the group's and kind's words only, a random design in their style.")) : null,
       h("div", { class: "field", style: { marginTop: "14px" } }, h("span", { class: "label" }, "Groups"), chipSet(m.groups, "groups"),
         h("div", { class: "hint" }, "None selected: all of them.")),
@@ -1521,7 +1521,7 @@ routes.batch = async (main) => {
         h("input", { id: "b-fill", type: "number", min: 0, max: 100, step: 5, value: b.fill || "", placeholder: b.mode === "invent" ? "each kind's setting" : "like the originals",
           oninput: (e) => { b.fill = e.target.value; keep(); } }),
         h("div", { class: "hint" }, b.mode === "invent" ? "How much of the canvas each new sprite's longest side takes (50 to 100). Empty: each kind's Fill (Models)."
-          : "Empty: every remaster keeps its original's size. A value refits every remaster to it (their size in the game changes).")),
+          : "Empty: every remaster keeps its original's size. A value refits every remaster to it (their drawn size changes).")),
       h("div", { class: "field", style: { marginTop: "14px" } }, h("label", { for: "b-pal" }, "Palette"),
         h("select", { id: "b-pal", onchange: (e) => { b.palette = e.target.value; keep(); } },
           h("option", { value: "", selected: !b.palette }, "Each group's own" + (m.groups.some((x) => x.palette) ? ` (${m.groups.filter((x) => x.palette).map((x) => x.label + ": " + x.palette).join(", ")})` : " (none set)")),
@@ -1694,7 +1694,7 @@ routes.models = async (main, parts) => {
   await loadPalettes();
   await loadCatalog();
   if (parts[0]) return modelEditor(main, parts[0], parts[1] || "sprites");
-  main.append(head("Models", "A model is one LoRA: its trigger word, its groups (factions, families...), its kinds (size classes), the words of each, and the sprites it learns from. Models belong to a project, one per game; the menu's project list shows one project at a time."));
+  main.append(head("Models", "A model is one LoRA: its trigger word, its groups (teams, families...), its kinds (size classes), the words of each, and the sprites it learns from. Models belong to a project, one per game; the menu's project list shows one project at a time."));
   const templates = await api("/templates");
   const byProject = {};
   for (const m of visibleModels()) (byProject[m.project || "No project"] ||= []).push(m);
@@ -1725,16 +1725,16 @@ routes.models = async (main, parts) => {
       } }, g.label)));
   };
   const newPanel = h("div", { class: "panel" }, h("h2", {}, "New model"),
-    h("div", { class: "field" }, h("label", { for: "nm-label" }, "Name"), h("input", { id: "nm-label", type: "text", placeholder: "Player ships",
+    h("div", { class: "field" }, h("label", { for: "nm-label" }, "Name"), h("input", { id: "nm-label", type: "text", placeholder: "Player units",
       oninput: (e) => {
         form.label = e.target.value;
         const id = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
-        $("#nm-id").placeholder = id || "player_ships"; $("#nm-trigger").placeholder = "px" + id.replace(/_/g, "").slice(0, 12);
+        $("#nm-id").placeholder = id || "player_units"; $("#nm-trigger").placeholder = "px" + id.replace(/_/g, "").slice(0, 12);
       } })),
     h("div", { class: "inline-fields", style: { marginTop: "14px" } },
-      h("div", { class: "field" }, h("label", { for: "nm-id" }, "Id (folder)"), h("input", { id: "nm-id", type: "text", placeholder: "player_ships", oninput: (e) => { form.id = e.target.value; } })),
+      h("div", { class: "field" }, h("label", { for: "nm-id" }, "Id (folder)"), h("input", { id: "nm-id", type: "text", placeholder: "player_units", oninput: (e) => { form.id = e.target.value; } })),
       h("div", { class: "field" }, h("label", { for: "nm-trigger" }, "Trigger word"), h("input", { id: "nm-trigger", type: "text", placeholder: "pxplayer", oninput: (e) => { form.trigger = e.target.value; } }))),
-    h("div", { class: "field" }, h("label", { for: "nm-project" }, "Project (game)"),
+    h("div", { class: "field" }, h("label", { for: "nm-project" }, "Project"),
       projectSelect(form.project, (v) => { form.project = v; }, { id: "nm-project" })),
     h("div", { class: "field" }, h("label", { for: "nm-from" }, "Start from"),
       h("select", { id: "nm-from", onchange: (e) => { form.from = e.target.value; form.groups = []; drawGroupChips(); } },
@@ -1758,7 +1758,7 @@ routes.models = async (main, parts) => {
       const missing = t.models.filter((m) => !m.exists);
       return h("div", { class: "set" }, h("div", { class: "row between" }, h("strong", {}, t.label),
         missing.length ? h("button", { class: "btn sm", onclick: async () => {
-          const project = await askText(`Add ${t.label}`, { input: "Project (game) for these models", value: S.project && S.project !== "No project" ? S.project : "My game", ok: "Add the models" });
+          const project = await askText(`Add ${t.label}`, { input: "Project for these models", value: S.project && S.project !== "No project" ? S.project : "My game", ok: "Add the models" });
           if (project === null) return;
           const r = await attempt(() => api(`/templates/${t.id}/add`, { body: { project } }));
           if (r) { toast(`${r.created.length} models added`); await loadCatalog(); route(); }
@@ -1789,10 +1789,10 @@ routes.models = async (main, parts) => {
   const plist = await api("/projects");
   const projPanel = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Projects"),
     h("button", { class: "btn sm", onclick: async () => {
-      const name = await askText("New project", { input: "Name (a game)", placeholder: "My game", ok: "Create" });
+      const name = await askText("New project", { input: "Name", placeholder: "My project", ok: "Create" });
       if (name && await attempt(() => api("/projects", { body: { name } }), "Project created")) { await loadCatalog(); route(); }
     } }, "New project")),
-    h("p", { class: "small muted" }, "A project groups the models of one game; the list at the top of the menu shows one at a time. Renaming moves its models with it; deleting one moves its models to another project (they are never deleted)."),
+    h("p", { class: "small muted" }, "A project groups the models of one project; the list at the top of the menu shows one at a time. Renaming moves its models with it; deleting one moves its models to another project (they are never deleted)."),
     h("table", {}, h("thead", {}, h("tr", {}, ["Project", "Models", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, plist.map((p) => {
         let dest = "";
@@ -1875,7 +1875,7 @@ async function modelEditor(main, mid, tab) {
       m.imports.length ? h("button", { class: "btn", onclick: async () => {
         const r = await attempt(() => api(`/models/${mid}/import`, { body: {} }));
         if (r) { toast(r.imported.length ? `${r.imported.length} sprites imported` : "Nothing new to import"); await reload(); draw(); }
-      } }, "Import from the game folders") : null),
+      } }, "Import from the source folders") : null),
       fileIn, h("div", { class: "row", style: { marginBottom: "10px" } }, h("span", { class: "label" }, "New sprites go into the group"), intoSel,
         intoKind ? [h("span", { class: "label" }, "kind"), intoKind] : null), drop,
       h("label", { class: "check small", style: { marginTop: "8px" } }, h("input", { type: "checkbox", checked: uploadInto.folders, onchange: (e) => { uploadInto.folders = e.target.checked; } }),
@@ -1884,12 +1884,12 @@ async function modelEditor(main, mid, tab) {
         h("div", { class: "inline-fields", style: { marginTop: "10px" } },
           h("div", { class: "field" }, h("label", {}, "Source folder"), h("select", { onchange: (e) => { imp.root = e.target.value; } },
             Object.entries(S.catalog.sources || {}).map(([k, v]) => h("option", { value: k, selected: k === imp.root, title: v }, k)))),
-          h("div", { class: "field" }, h("label", {}, "Files"), h("input", { type: "text", placeholder: "ships/*_128.png", oninput: (e) => { imp.glob = e.target.value; } })),
+          h("div", { class: "field" }, h("label", {}, "Files"), h("input", { type: "text", placeholder: "units/*_128.png", oninput: (e) => { imp.glob = e.target.value; } })),
           h("div", { class: "field" }, h("label", {}, "Name prefix"), h("input", { type: "text", placeholder: "none", oninput: (e) => { imp.prefix = e.target.value; } })),
           h("div", { class: "field" }, h("label", {}, "Into group"), h("select", { onchange: (e) => { imp.group = e.target.value; } },
             h("option", { value: "" }, "By name"), m.groups.map((g) => h("option", { value: g.id }, g.label))))),
         h("button", { class: "btn sm", style: { marginTop: "10px" }, onclick: async () => {
-          if (!imp.glob) return toast("Give the files to import, e.g. ships/*_128.png", true);
+          if (!imp.glob) return toast("Give the files to import, e.g. units/*_128.png", true);
           const r = await attempt(() => api(`/models/${mid}/import`, { body: imp }));
           if (r) { toast(`${r.imported.length} sprites imported`); await reload(); draw(); }
         } }, "Import")));
@@ -1948,7 +1948,7 @@ async function modelEditor(main, mid, tab) {
           } }, "Find sprites lit from below"))),
       bar,
       one ? h("p", { class: "small mono muted", style: { margin: "8px 0" } }, one.caption || "Not learned (no group, its group is off, or left out).") : null,
-      ss.length ? gridEl : h("div", { class: "empty" }, "No sprites yet: drop some above", m.imports.length ? ", or import them from the game folders." : ".")));
+      ss.length ? gridEl : h("div", { class: "empty" }, "No sprites yet: drop some above", m.imports.length ? ", or import them from the source folders." : ".")));
   };
   const upload = async (files) => {
     if (!files.length) return;
@@ -1979,7 +1979,7 @@ async function modelEditor(main, mid, tab) {
       h("tbody", {}, m.groups.map((g, i) => h("tr", {},
         h("td", {}, h("input", { type: "checkbox", checked: g.enabled, title: "Learned, and offered by Generate", onchange: (e) => { g.enabled = e.target.checked; dirty = true; } })),
         h("td", {}, cell(g, "id", { mono: true, w: "110px" })), h("td", {}, cell(g, "label", { w: "120px" })),
-        h("td", {}, cell(g, "words", { w: "170px", ph: "red faction" })), h("td", {}, cell(g, "keywords", { w: "170px", ph: "optional" })),
+        h("td", {}, cell(g, "words", { w: "170px", ph: "red team" })), h("td", {}, cell(g, "keywords", { w: "170px", ph: "optional" })),
         h("td", {}, cell(g, "pattern", { mono: true, w: "150px", ph: "_red_" })), h("td", {}, cell(g, "name_pattern", { mono: true, w: "150px", ph: "^(.+)$" })),
         h("td", {}, cell(g, "name_format", { w: "80px", ph: "{}" })),
         h("td", {}, h("select", { title: "Put on everything generated for this group (Palettes page)", onchange: (e) => { g.palette = e.target.value; dirty = true; } },
@@ -2000,7 +2000,7 @@ async function modelEditor(main, mid, tab) {
     body.append(
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Groups"),
         h("button", { class: "btn sm", onclick: () => { m.groups.push({ id: "group" + (m.groups.length + 1), label: "New group", words: "", keywords: "", pattern: "", name_pattern: "", name_format: "{}", enabled: true }); dirty = true; drawGroups(); } }, "Add a group")),
-        h("p", { class: "small muted" }, "The main axis: a faction, a family of items. Its words and keywords go into every caption of its sprites, and into the prompt when you generate for it. A sprite joins the first group whose pattern (a regular expression on the file name) matches, unless you set it by hand in Sprites. \"Own words from\": a pattern whose first (bracket) part becomes the sprite's own words, e.g. the item's name."),
+        h("p", { class: "small muted" }, "The main axis: a team, a family of items. Its words and keywords go into every caption of its sprites, and into the prompt when you generate for it. A sprite joins the first group whose pattern (a regular expression on the file name) matches, unless you set it by hand in Sprites. \"Own words from\": a pattern whose first (bracket) part becomes the sprite's own words, e.g. the item's name."),
         h("div", { class: "table-wrap" }, gt)),
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Kinds"),
         h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: "", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
@@ -2081,14 +2081,14 @@ async function modelEditor(main, mid, tab) {
     body.append(h("div", { class: "grid-2" },
       h("div", { class: "panel" }, h("h2", {}, "Model"),
         field("Name", "label"),
-        h("div", { class: "field" }, h("label", {}, "Project (game)"),
+        h("div", { class: "field" }, h("label", {}, "Project"),
           projectSelect(m.project || "", (v) => { m.project = v; dirty = true; }),
           h("div", { class: "hint" }, "Projects are managed at the bottom of the Models page (new, rename, delete).")),
         field("Trigger word", "trigger", "The LoRA's word, first in every caption and prompt; also its file name (" + m.trigger + ".safetensors). Changing it means training again.", { mono: true }),
         field("Words at the end of every caption", "tail", "e.g. top-down view, facing up"),
         h("div", { class: "inline-fields", style: { marginTop: "14px" } },
           h("div", { class: "field" }, h("label", {}, "Colour words"), h("select", { onchange: (e) => { m.colour_words = e.target.value; dirty = true; } },
-            h("option", { value: "hard", selected: m.colour_words !== "neutral" }, "Hard surface (metal hull, plating)"), h("option", { value: "neutral", selected: m.colour_words === "neutral" }, "Neutral (body, highlights)"))),
+            h("option", { value: "hard", selected: m.colour_words !== "neutral" }, "Hard surface (metal, plating)"), h("option", { value: "neutral", selected: m.colour_words === "neutral" }, "Neutral (body, highlights)"))),
           h("div", { class: "field" }, h("label", {}, "Remaster colours from"), h("select", { onchange: (e) => { m.colours_from = e.target.value; dirty = true; } },
             h("option", { value: "group", selected: m.colours_from === "group" }, "The group (one look per group)"), h("option", { value: "self", selected: m.colours_from === "self" }, "The sprite itself")))),
         h("div", { class: "inline-fields", style: { marginTop: "14px" } },
@@ -2100,7 +2100,7 @@ async function modelEditor(main, mid, tab) {
         saveBar()),
       h("div", { class: "stack" },
         h("div", { class: "panel" }, h("h2", {}, "Import rules"),
-          h("p", { class: "small muted" }, "What \"Import from the game folders\" copies: root (game or input), glob, optional prefix, group and skip (a pattern)."), impTa),
+          h("p", { class: "small muted" }, "What \"Import from the source folders\" copies: root (game or input), glob, optional prefix, group and skip (a pattern)."), impTa),
         d.template ? h("div", { class: "panel" }, h("h2", {}, "Template settings"),
           h("p", { class: "small muted" }, "Puts the groups, kinds, words, previews and other settings back to the ones of the template this model comes from. The sprites and what you set on them by hand stay."),
           h("button", { class: "btn", onclick: async () => {
@@ -2135,7 +2135,7 @@ async function modelEditor(main, mid, tab) {
 routes.palettes = async (main, parts) => {
   await loadCatalog();
   await loadPalettes();
-  main.append(head("Palettes", "Colours, and a tuning, put on what is generated: lighten a faction that comes out too dark, keep a game's colours, reuse another game's. Set a group's palette in Models (Groups) or below, or pick one for a single run on Generate and Batch.",
+  main.append(head("Palettes", "Colours, and a tuning, put on what is generated: lighten a group that comes out too dark, keep a project's colours, reuse another game's. Set a group's palette in Models (Groups) or below, or pick one for a single run on Generate and Batch.",
     h("button", { class: "btn", onclick: () => importInput.click() }, "Import a file"),
     h("button", { class: "btn primary", onclick: () => newFromGroup() }, "New palette")));
   const importInput = h("input", { type: "file", accept: ".hex,.gpl,.json,.txt,.png,.gif,.bmp", hidden: true });
@@ -2222,7 +2222,7 @@ routes.palettes = async (main, parts) => {
         form.append(h("div", { class: "field", style: { marginTop: "12px" } }, h("label", {}, "Make it look like"),
           h("select", { onchange: (e) => { refMid = e.target.value; } }, ms.map((x) => h("option", { value: x.id, selected: x.id === refMid },
             x.groups.length > 1 ? `${x.label}: every group but this one` : `${x.label}: every sprite`))),
-          h("div", { class: "hint" }, "A one-group model (a single faction) has no other group: compare it with the model holding every faction.")));
+          h("div", { class: "hint" }, "A one-group model (a single group) has no other group: compare it with the model holding every group.")));
       }
       if (how === "auto") form.append(h("label", { class: "check small", style: { marginTop: "12px" } },
         h("input", { type: "checkbox", checked: useIt, onchange: (e) => { useIt = e.target.checked; } }), "Make it the group's palette (everything generated for the group gets it)"));
@@ -2536,7 +2536,7 @@ routes.settings = async (main) => {
   main.append(head("Settings", "Where the sprites, results and models are. Empty a field to go back to its default."));
   const labels = {
     px_input: ["Source folder \"input\"", "a folder of sprites that models import from (import rules, Import from a folder)"],
-    px_game: ["Source folder \"game\"", "a second source, e.g. a copy of a game's whole sprite folder"],
+    px_game: ["Source folder \"game\"", "a second source, e.g. a copy of a whole sprite folder"],
     sources: ["More source folders", "one per line, name=path, e.g. tiles=/srv/sprites/other_game/tiles"],
     px_output: ["Results", "where every run writes its sprites"],
     comfy_url: ["ComfyUI address", "the API the generator talks to"],
@@ -2565,7 +2565,7 @@ routes.settings = async (main) => {
         h("tr", {}, h("td", {}, "ComfyUI control"), h("td", { class: d.can_control_comfy ? "ok-text" : "err-text" }, d.can_control_comfy ? "the app can stop and start it" : "not allowed: add the sudo rule from run.sh")),
         Object.entries(d.checks).map(([k, v]) => h("tr", {}, h("td", {}, labels[k][0]), h("td", { class: v === "ok" ? "ok-text" : "err-text" }, v === "ok" ? "found" : v)))))),
     h("div", { class: "panel" }, h("h2", {}, "Picked sprites"),
-      h("p", { class: "muted small" }, "Export picks (Results) copies every starred variant to the results folder's picked/, named after the sprite it replaces, ready to copy into the game."),
+      h("p", { class: "muted small" }, "Export picks (Results) copies every starred variant to the results folder's picked/, named after the sprite it replaces, ready to copy back into your project."),
       h("button", { class: "btn", onclick: exportPicks }, "Export picks")))));
 };
 

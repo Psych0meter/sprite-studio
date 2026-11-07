@@ -34,7 +34,7 @@ PALETTE = ["#1b1020", "#4a1f2e", "#7c2d3b", "#b84a4a", "#e0795a", "#f2b27a", "#f
 
 
 def draw_unit(size: int, hue: float, seed: int, detail: int = 1) -> Image.Image:
-    """A symmetric top-down ship, nose up, lit from the top, on transparency."""
+    """A symmetric top-down unit, nose up, lit from the top, on transparency."""
     rng = random.Random(seed)
     n = size * detail
     half = n // 2
@@ -85,7 +85,7 @@ def build(tmp: Path) -> dict:
     m = pxmodel.from_template("generic", "topdown_units", "units", "Demo project")
     m["label"] = "Units"
     m["groups"] = [
-        {"id": g, "label": g.title(), "words": f"{g} faction", "pattern": f"^{g}_", "enabled": True} for g, _ in GROUPS
+        {"id": g, "label": g.title(), "words": f"{g} team", "pattern": f"^{g}_", "enabled": True} for g, _ in GROUPS
     ]
     for k in m["kinds"]:
         k["pattern"] = rf"_{k['id']}_"
@@ -127,7 +127,7 @@ def build(tmp: Path) -> dict:
             draw_unit(size, hue + 0.04 * s, 7 * s + len(name)).save(f / f"{name}_s{s}.png")
         (f / "job.txt").write_text(
             f"name={name} model=units group={g} kind={k} lora=units.safetensors res=512 size={size} init=x palette=warm\n"
-            f"prompt: pxunit, {g} faction, {k} unit, top-down view, facing up, pixel art, flat green background\n"
+            f"prompt: pxunit, {g} team, {k} unit, top-down view, facing up, pixel art, flat green background\n"
         )
         (f / ".done").touch()
     return d

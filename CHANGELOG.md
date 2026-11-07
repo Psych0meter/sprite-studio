@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Templates**: a built-in "Tiles (floors, walls)" model, a Tile kind that keeps the original's edge.
 - **Tiles**: a kind can be a **Tile** (floors, walls: opaque, full colour, no
   background removal, colour limit or outline) and have **Keep edge (px)**:
   a remaster keeps the original's outer pixels, so tiles that were made to
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Menu**: the version of the app is shown at the bottom of the left menu.
 
 ### Changed
+- **Wording**: the app, guide and examples no longer speak of ships, factions or hulls: groups are "teams or families", examples use neutral units, projects are not "games". Stored names (`game` source folder, `PX_GAME`) and the hard-surface colour words are unchanged, so saved models and trained LoRAs keep working.
 
 - **Results**: the render time of each image is on its own line under the name; a
   long name hid it.

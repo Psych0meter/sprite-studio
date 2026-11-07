@@ -14,7 +14,7 @@ def new_model(pxmodel, mid="units", **extra):
             "trigger": "pxunit",
             "colour_words": "hard",
             "tail": "top-down view",
-            "groups": [{"id": "red", "words": "red faction", "pattern": "_red_"}, {"id": "blue", "pattern": "_blue_"}],
+            "groups": [{"id": "red", "words": "red team", "pattern": "_red_"}, {"id": "blue", "pattern": "_blue_"}],
             "kinds": [
                 {"id": "small", "size": 32, "pattern": "^small_"},
                 {"id": "large", "size": 64, "pattern": "^large_"},
@@ -58,7 +58,7 @@ def test_caption_order(pxmodel):
     m = new_model(pxmodel)
     g, k = m["groups"][0], m["kinds"][0]
     text = pxmodel.caption(m, g, k, "", "dark red body")
-    assert text.startswith("pxunit, red faction, small")
+    assert text.startswith("pxunit, red team, small")
     assert text.endswith("pixel art, flat green background")
     assert "top-down view" in text and "dark red body" in text
 
@@ -113,7 +113,7 @@ def _run_dir(tmp_path, *epochs, final=False, samples=()):
 
 
 def test_preview_plan_lists_only_the_missing_renders(pxmodel, tmp_path):
-    m = new_model(pxmodel, previews=["pxunit, red ship", "pxunit, blue ship --n organic"])
+    m = new_model(pxmodel, previews=["pxunit, red unit", "pxunit, blue unit --n organic"])
     out = _run_dir(tmp_path, 2, 4, final=True, samples=[(2, 0)])
     plan = pxmodel.preview_plan(m, out, "pxunit", 512, prompts=2, final_epoch=6)
     assert [(r["epoch"], r["index"]) for r in plan] == [(2, 1), (4, 0), (4, 1), (6, 0), (6, 1)]
@@ -125,7 +125,7 @@ def test_preview_plan_lists_only_the_missing_renders(pxmodel, tmp_path):
 
 
 def test_preview_plan_does_not_duplicate_a_numbered_final(pxmodel, tmp_path):
-    m = new_model(pxmodel, previews=["pxunit, red ship"])
+    m = new_model(pxmodel, previews=["pxunit, red unit"])
     out = _run_dir(tmp_path, 2, 4, final=True)
     plan = pxmodel.preview_plan(m, out, "pxunit", 512, prompts=1, final_epoch=4)
     assert [r["epoch"] for r in plan] == [2, 4]  # epoch 4 has its numbered twin: the final file is not rendered too
@@ -158,3 +158,10 @@ def test_a_tile_caption_has_no_pixel_art_or_green_background_words(pxmodel):
     assert plain.endswith("pixel art, flat green background")
     tile = pxmodel.caption(m, g, dict(m["kinds"][0], tile=True), "", "")
     assert tile.endswith("game tile, full colour") and "green" not in tile
+
+
+def test_the_tiles_template_makes_a_tile_kind(pxmodel):
+    m = pxmodel.from_template("generic", "tiles", "floors")
+    k = m["kinds"][0]
+    assert k["tile"] is True and k["edge"] == 4
+    assert "game tile" in pxmodel.caption(m, m["groups"][0], k, "", "")

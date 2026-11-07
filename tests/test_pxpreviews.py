@@ -66,7 +66,7 @@ def run(tmp_path, env, url, **extra):
 
 @pytest.mark.skipif(not shutil.which("curl"), reason="needs curl")
 def test_renders_the_missing_previews_then_has_nothing_left(pxmodel, env, tmp_path, comfy_url):
-    new_model(pxmodel, previews=["pxunit, red ship", "pxunit, blue ship"])
+    new_model(pxmodel, previews=["pxunit, red unit", "pxunit, blue unit"])
     out = env["lora"] / "units" / "output_xl"
     (out / "sample").mkdir(parents=True)
     for n in ("pxunit_xl-000002", "pxunit_xl-000004"):
@@ -85,7 +85,7 @@ def test_renders_the_missing_previews_then_has_nothing_left(pxmodel, env, tmp_pa
 
 @pytest.mark.skipif(not shutil.which("curl"), reason="needs curl")
 def test_some_failures_exit_4_and_all_failures_exit_1(pxmodel, env, tmp_path, comfy_url):
-    new_model(pxmodel, previews=["pxunit, red ship", "pxunit, fail please"])
+    new_model(pxmodel, previews=["pxunit, red unit", "pxunit, fail please"])
     out = env["lora"] / "units" / "output_xl"
     out.mkdir(parents=True)
     (out / "pxunit_xl-000002.safetensors").write_bytes(b"x")
@@ -96,7 +96,7 @@ def test_some_failures_exit_4_and_all_failures_exit_1(pxmodel, env, tmp_path, co
 
 
 def test_stops_with_a_hint_when_comfyui_does_not_answer(pxmodel, env, tmp_path):
-    new_model(pxmodel, previews=["pxunit, red ship"])
+    new_model(pxmodel, previews=["pxunit, red unit"])
     out = env["lora"] / "units" / "output_xl"
     out.mkdir(parents=True)
     (out / "pxunit_xl-000002.safetensors").write_bytes(b"x")

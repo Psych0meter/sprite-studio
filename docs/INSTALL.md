@@ -187,7 +187,7 @@ variables give the defaults (the service sets the data folders):
 | Variable | Default | Meaning |
 |---|---|---|
 | `SG_DATA` | `~/sprites` | base of the three folders below |
-| `PX_INPUT`, `PX_GAME` | `$SG_DATA/input`, `$SG_DATA/game` | named source folders sprites are imported from |
+| `PX_INPUT`, `PX_GAME` | `$SG_DATA/input`, `$SG_DATA/game` | named source folders sprites are imported from (`game` is just the second one's name) |
 | `PX_OUTPUT` | `$SG_DATA/output` | results |
 | `PX_LORA_HOME` | `~/lora` | models, training, palettes |
 | `COMFY` | `~/ComfyUI` | ComfyUI's folder |
