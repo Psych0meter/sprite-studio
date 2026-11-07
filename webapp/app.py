@@ -180,7 +180,9 @@ def safe_path(p: str) -> Path:
 MAX_BODY = int(os.environ.get("SG_MAX_UPLOAD_MB", "300")) * 1024 * 1024  # one request
 MAX_FILE = 25 * 1024 * 1024  # one uploaded file, decoded
 MAX_ZIP_ENTRIES = 5000
-MAX_ZIP_TOTAL = 1024 * 1024 * 1024  # a zip's files, uncompressed
+MAX_ZIP_TOTAL = int(os.environ.get("SG_MAX_ZIP_MB", "250")) * 1024 * 1024  # a zip's files, uncompressed
+INFO_PIXELS = 16_000_000  # the most an image analysis (colours, parts) reads
+MAX_TEXT_SERVED = 10 * 1024 * 1024  # the biggest text file /api/file serves
 MAX_PIXELS = 64_000_000  # one image
 MAX_QUEUED = int(os.environ.get("SG_MAX_QUEUED", "100"))  # jobs waiting for the GPU
 MAX_CPU_JOBS = 8  # CPU jobs running at once
@@ -193,6 +195,8 @@ def decode_data_url(data: Any, kinds: tuple[str, ...] = ("image/png",), limit: i
     m = re.match(r"data:([^;,]*);base64,(.*)$", data if isinstance(data, str) else "", re.S)
     if not m or (kinds and m.group(1) not in kinds and not (m.group(1) == "" and "" in kinds)):
         raise HTTPException(400, "send the file as a base64 data URL" + (f" ({', '.join(kinds)})" if kinds else ""))
+    if len(m.group(2)) * 3 // 4 > limit + 3:  # the size it will have, before any buffer is allocated
+        raise HTTPException(413, f"file too big (at most {limit // 1_000_000} MB)")
     try:
         raw = base64.b64decode(m.group(2), validate=True)
     except (binascii.Error, ValueError):
@@ -1031,6 +1035,50 @@ JOBS = Jobs()
 PASSWORD = os.environ.get("SG_WEB_PASSWORD", "")
 
 
+class BodyTooLarge(Exception):
+    pass
+
+
+class BodyLimit:
+    """Counts the bytes of every request body as they arrive: a Content-Length can be missing (HTTP/2, streaming)
+    or false, so the limit is enforced on what is really read, whatever the headers say."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope["method"] not in ("POST", "PUT", "PATCH", "DELETE"):
+            await self.app(scope, receive, send)
+            return
+        seen, started = 0, False
+
+        async def limited() -> Any:
+            nonlocal seen
+            msg = await receive()
+            if msg["type"] == "http.request":
+                seen += len(msg.get("body", b""))
+                if seen > MAX_BODY:
+                    raise BodyTooLarge
+            return msg
+
+        async def tracked(msg: Any) -> None:
+            nonlocal started
+            if msg["type"] == "http.response.start":
+                started = True
+            await send(msg)
+
+        try:
+            await self.app(scope, limited, tracked)
+        except BodyTooLarge:
+            if started:
+                raise
+            r = JSONResponse({"error": f"request too big (at most {MAX_BODY // 1_000_000} MB)"}, status_code=413)
+            await r(scope, receive, send)
+
+
+app.add_middleware(BodyLimit)
+
+
 @app.middleware("http")
 async def no_stale_pages(request: Request, call_next):
     """The page and its script are always checked again, so a new version of
@@ -1131,14 +1179,23 @@ def _git(repo: Path, *args: str, timeout: int = 60) -> str:
     return r.stdout.strip()
 
 
+_updates_cache: dict[str, Any] = {"at": 0.0, "data": None}
+_updates_lock = threading.Lock()
+UPDATES_TTL = 15 * 60  # a check is reused for 15 minutes; ?force=1 looks again
+
+
 def check_repo_update(name: str, repo: Path) -> dict:
-    """Compares a git checkout with its upstream branch (fetch only: nothing is changed or installed)."""
+    """Compares a git checkout with its upstream branch. `git fetch` refreshes git's own records of the remote
+    (remote branches, tags); the files of the checkout are never touched and nothing is installed."""
     info: dict[str, Any] = {"name": name, "path": str(repo)}
     if not (repo / ".git").exists():
         return {**info, "ok": False, "error": "not a git checkout"}
     try:
         _git(repo, "fetch", "--quiet", "--tags", "origin", timeout=90)
-        upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        try:
+            upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        except OSError:
+            raise OSError("this checkout has no upstream branch to compare with") from None
         behind = int(_git(repo, "rev-list", "--count", "HEAD..@{u}"))
         info.update(
             ok=True,
@@ -1147,7 +1204,7 @@ def check_repo_update(name: str, repo: Path) -> dict:
             current=_git(repo, "describe", "--tags", "--always"),
             latest=_git(repo, "describe", "--tags", "--always", "@{u}"),
             behind=behind,
-            dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),
+            dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),  # tracked files edited here
             commits=_git(repo, "log", "--format=%h %s", "-n", "8", "HEAD..@{u}").splitlines() if behind else [],
         )
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
@@ -1156,15 +1213,18 @@ def check_repo_update(name: str, repo: Path) -> dict:
 
 
 @app.get("/api/updates")
-def api_updates():
-    """Are there newer ComfyUI and kohya sd-scripts versions? Only looks (git fetch); the update is a manual step."""
-    return {
-        "checked": time.time(),
-        "items": [
-            check_repo_update("ComfyUI", setting_path("comfy_dir")),
-            check_repo_update("kohya sd-scripts", setting_path("lora_home") / "sd-scripts"),
-        ],
-    }
+def api_updates(force: int = 0):
+    """Are there newer ComfyUI and kohya sd-scripts versions? The answer is kept for 15 minutes and one check runs at
+    a time (a second request waits for it and gets its answer); the update itself is a manual step."""
+    with _updates_lock:
+        c = _updates_cache
+        if force or not c["data"] or time.time() - c["at"] > UPDATES_TTL:
+            c["data"] = [
+                check_repo_update("ComfyUI", setting_path("comfy_dir")),
+                check_repo_update("kohya sd-scripts", setting_path("lora_home") / "sd-scripts"),
+            ]
+            c["at"] = time.time()
+        return {"checked": c["at"], "items": c["data"]}
 
 
 @app.post("/api/comfy/{action}")
@@ -1304,6 +1364,8 @@ def api_file(path: str = ""):
         raise HTTPException(404, "no such file")
     if p.suffix.lower() not in SERVED_SUFFIXES:  # images and the small text files the pages read, not models or code
         raise HTTPException(403, "this kind of file is not served")
+    if p.suffix.lower() in (".json", ".txt", ".csv", ".log") and p.stat().st_size > MAX_TEXT_SERVED:
+        raise HTTPException(413, "this text file is too big to show")
     return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
@@ -1311,12 +1373,23 @@ def api_file(path: str = ""):
 def api_info(path: str):
     p = safe_path(path)
     import numpy as np
-    from PIL import Image
     from scipy import ndimage
 
-    a = np.array(Image.open(p).convert("RGBA"))
+    try:
+        with Image.open(p) as im:
+            w, h = im.size
+            if w * h > INFO_PIXELS:  # read the size first: nothing is decoded for a huge image
+                raise HTTPException(
+                    400, f"image too large to analyse ({w}x{h} px, at most {INFO_PIXELS // 1_000_000} million)"
+                )
+            a = np.array(im.convert("RGBA"))
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+        raise HTTPException(400, "not a readable image") from None
     alpha = a[..., 3] > 0
-    cols = len(np.unique(a[alpha][:, :3], axis=0)) if alpha.any() else 0
+    rgb = a[alpha][:, :3].astype(np.uint32)
+    cols = (
+        len(np.unique((rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2])) if alpha.any() else 0
+    )  # one number per colour
     _, parts = ndimage.label(alpha)
     return {
         "w": a.shape[1],
@@ -2468,7 +2541,7 @@ def bin_info(listing: bool = False) -> dict:
     info: dict[str, Any] = {"count": len(items), "bytes": sum(_du(d) for d in items), "path": str(b)}
     if listing:  # what is in it, newest deletion first
         rows = []
-        for d in sorted(items, key=lambda x: x.name, reverse=True):
+        for d in sorted(items, key=lambda x: x.name, reverse=True)[:200]:  # the newest 200: sizes cost a disk walk each
             origin = d / ".origin"
             rel = origin.read_text().strip() if origin.exists() else d.name.split("_", 1)[-1]
             cover = next((p for p in sorted(d.rglob("*.png")) if "raw" not in p.parts and "_x4" not in p.name), None)
@@ -3021,41 +3094,68 @@ async def api_pick(request: Request):
 @app.post("/api/picks/to-model")
 async def api_picks_to_model(request: Request):
     """Copies the picked sprites into a model's sprites: an existing one ({"model": id}) or a new one ({"new":
-    {"id", "label", "trigger", "project"}}), all in one group / kind if given. {"paths": [...]} limits it to some picks."""
+    {"id", "label", "trigger", "project"}}), all in one group / kind if given. {"paths": [...]} limits it to some picks.
+    Everything is checked before anything is created or copied, so a refused request leaves no trace."""
     b = await request.json()
+    if not isinstance(b, dict):
+        raise HTTPException(400, "send a JSON object")
     picks = _load("picks.json", {})
     if isinstance(b.get("paths"), list):
         wanted = {str(safe_path(x)) for x in b["paths"]}
         picks = {k: v for k, v in picks.items() if k in wanted}
-    sources = [(Path(k), v) for k, v in picks.items() if Path(k).is_file()]
-    if not sources:
-        raise HTTPException(400, "Nothing picked yet: star the variants you want first.")
-    if b.get("new"):
-        mid = (b["new"].get("id") or "").strip()
-        create_model(dict(b["new"], id=mid))
-    else:
-        mid = b.get("model") or ""
-    m = model_cfg(mid)
-    group, kind = b.get("group") or None, b.get("kind") or None
-    if group and group not in [g["id"] for g in m["groups"]]:
-        raise HTTPException(400, f"the model has no group {group}")
-    if kind and kind not in [k["id"] for k in m["kinds"]]:
-        raise HTTPException(400, f"the model has no kind {kind}")
-    folder = Path(pm().sprites_dir(mid))
-    folder.mkdir(parents=True, exist_ok=True)
-    saved, skipped = [], []
-    for src, info in sources:
-        base = re.sub(r"\.png$", "", name_ok(info.get("as") or src.stem), flags=re.I)
+    ready, skipped = [], []  # (source, base name) of the sprites that are real PNG images
+    for k, v in picks.items():
+        src = Path(k)
+        if not src.is_file():
+            continue
+        base = re.sub(r"\.png$", "", name_ok(v.get("as") or src.stem), flags=re.I)
         try:
+            if src.stat().st_size > MAX_FILE:
+                raise HTTPException(413, "file too big")
             check_image(src.read_bytes(), "PNG")
         except HTTPException as e:
             skipped.append(f"{base} ({e.detail})")
             continue
+        ready.append((src, base))
+    if not ready:
+        raise HTTPException(
+            400,
+            "Nothing picked yet: star the variants you want first."
+            if not skipped
+            else "None of the picks is a usable PNG: " + "; ".join(skipped),
+        )
+    group, kind = b.get("group") or None, b.get("kind") or None
+    new = b.get("new")
+    if new is not None and not isinstance(new, dict):
+        raise HTTPException(400, "new: send the model's id, label and trigger")
+    if new:
+        mid = (new.get("id") or "").strip()
+        if not re.fullmatch(r"[a-z0-9_]{1,40}", mid):
+            raise HTTPException(400, "the id is lowercase letters, digits and _ (it names the model's folder)")
+        if (Path(pm().model_dir(mid)) / "model.json").exists():
+            raise HTTPException(400, f"a model {mid} already exists")
+        groups, kinds = ["main"], []  # what a new model starts with
+    else:
+        mid = b.get("model") or ""
+        m = model_cfg(mid)
+        groups, kinds = [g["id"] for g in m["groups"]], [k["id"] for k in m["kinds"]]
+    if group and group not in groups:
+        raise HTTPException(400, f"the model has no group {group}")
+    if kind and kind not in kinds:
+        raise HTTPException(400, f"the model has no kind {kind}")
+    if new:
+        create_model(dict(new, id=mid))
+    m = model_cfg(mid)
+    folder = Path(pm().sprites_dir(mid))
+    folder.mkdir(parents=True, exist_ok=True)
+    saved, copied = [], []
+    for src, base in ready:
         name, n = base + ".png", 2
         while (folder / name).exists():  # never overwrite a sprite the model already has
             name, n = f"{base}_{n}.png", n + 1
         shutil.copy2(src, folder / name)
         saved.append(name)
+        copied.append(str(src))
         ov = m["sprites"].setdefault(name, {})
         if group:
             ov["group"] = group
@@ -3064,11 +3164,11 @@ async def api_picks_to_model(request: Request):
         if not ov:
             m["sprites"].pop(name, None)
     pm().save(m)
-    if b.get("unpick"):
+    if b.get("unpick"):  # only the picks that really became sprites lose their star
         with _lock:
             now = _load("picks.json", {})
-            for src, _ in sources:
-                now.pop(str(src), None)
+            for k in copied:
+                now.pop(k, None)
             _save("picks.json", now)
     return {"model": mid, "saved": saved, "skipped": skipped}
 
@@ -3144,9 +3244,14 @@ if __name__ == "__main__":
 
     host = os.environ.get("SG_WEB_HOST", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost", "::1") and not PASSWORD:
+        if os.environ.get("SG_WEB_ALLOW_OPEN") != "1":
+            sys.exit(
+                f"Refusing to listen on {host} with no password: anyone who can reach the port could start jobs, change\n"
+                "settings and delete files. Set SG_WEB_PASSWORD, keep SG_WEB_HOST=127.0.0.1, or, on a network you trust,\n"
+                "set SG_WEB_ALLOW_OPEN=1."
+            )
         print(
-            f"WARNING: listening on {host} with no SG_WEB_PASSWORD: anyone who can reach this port can start jobs,\n"
-            "change settings and delete files. Set a password, or keep the app on a trusted network.",
+            f"WARNING: listening on {host} with no SG_WEB_PASSWORD (SG_WEB_ALLOW_OPEN=1): the app is open to its network.",
             file=sys.stderr,
         )
     uvicorn.run(

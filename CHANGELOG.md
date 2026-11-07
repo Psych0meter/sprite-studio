@@ -57,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Status line**: reads *memory 6.5 of 8 GB, GPU busy 100 %*. The percentage
   was always the share of time the card computes, not its memory.
 
+### Fixed
+
+- **Train on picks**: a refused request (an unknown group or kind, an invalid model) no longer leaves a new model behind, and only the picks that really became sprites lose their star.
+- **Updates**: the check is kept for 15 minutes, only one runs at a time, and a checkout with no upstream branch says so. *Check again* looks again at once.
+
+### Security
+
+- **Installation**: the service made by `install.sh` listens on the network only with a password (`sudo SG_WEB_PASSWORD=... scripts/install.sh`); without one it stays on `127.0.0.1`. The app itself refuses to start on another address with no password, unless `SG_WEB_ALLOW_OPEN=1` says the network is trusted. **Breaking for open installations**: one made before this rule, reachable with no password, is kept reachable (it gets `SG_WEB_ALLOW_OPEN=1` and a warning); set a password to close it.
+- **Request size**: the limit on a request body is enforced on the bytes really read, so a missing or false `Content-Length` no longer gets round it; an uploaded file's size is also checked before its base64 is decoded.
+- **Zip import**: at most 250 MB unpacked by default (was 1 GB), `SG_MAX_ZIP_MB` changes it.
+- **Image analysis**: `/api/info` reads an image's size first and refuses more than 16 million pixels, and counts colours with far less memory; `/api/file` refuses text files over 10 MB.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added

@@ -326,7 +326,7 @@ def test_updates_compares_with_upstream(client, env, tmp_path):
     subprocess.run(["git", "clone", "-q", str(up), str(env["comfy"])], check=True, capture_output=True)
     (up / "f").write_text("2")
     git(up, "commit", "-qam", "second")
-    items = {i["name"]: i for i in client.get("/api/updates").json()["items"]}
+    items = {i["name"]: i for i in client.get("/api/updates?force=1").json()["items"]}
     assert items["ComfyUI"]["ok"] and items["ComfyUI"]["behind"] == 1
     assert items["ComfyUI"]["commits"][0].endswith("second")
     assert not items["kohya sd-scripts"]["ok"]

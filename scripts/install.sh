@@ -174,11 +174,34 @@ visudo -cf /etc/sudoers.d/spritegen-comfyui
 # Settings added by hand to the unit (a password, a port, a host) survive a reinstall.
 UNIT=/etc/systemd/system/spritegen-web.service
 KEPT=""
-[ -f "$UNIT" ] && KEPT="$(grep -E '^Environment="?SG_WEB_(PASSWORD|PORT|HOST|ALLOWED_ORIGINS)=' "$UNIT" || true)"
-if ! printf '%s' "$KEPT" | grep -q SG_WEB_PASSWORD; then
-	echo "  note: no password is set (add Environment=SG_WEB_PASSWORD=... to $UNIT):"
-	echo "  the app is open to everyone who can reach its port."
+[ -f "$UNIT" ] && KEPT="$(grep -E '^Environment="?SG_WEB_(PASSWORD|PORT|HOST|ALLOWED_ORIGINS|ALLOW_OPEN)=' "$UNIT" || true)"
+# The service listens on the network only with a password (SG_WEB_PASSWORD=... in the environment of this script, or
+# added to the unit), or when you say the network is trusted (SG_WEB_ALLOW_OPEN=1). Without either it stays on this
+# machine: the app refuses to start on another address with no password.
+HOST_LINE="Environment=SG_WEB_HOST=127.0.0.1"
+EXTRA=""
+if [ -n "${SG_WEB_PASSWORD:-}" ]; then
+	HOST_LINE="Environment=SG_WEB_HOST=0.0.0.0"
+	KEPT="$(printf '%s\n' "$KEPT" | grep -v SG_WEB_PASSWORD || true)"
+	EXTRA="Environment=\"SG_WEB_PASSWORD=${SG_WEB_PASSWORD}\""
+elif printf '%s' "$KEPT" | grep -q SG_WEB_PASSWORD; then
+	HOST_LINE="Environment=SG_WEB_HOST=0.0.0.0"
+elif [ "${SG_WEB_ALLOW_OPEN:-}" = 1 ] || printf '%s' "$KEPT" | grep -q 'SG_WEB_ALLOW_OPEN=1'; then
+	HOST_LINE="Environment=SG_WEB_HOST=0.0.0.0"
+	printf '%s' "$KEPT" | grep -q SG_WEB_ALLOW_OPEN || EXTRA="Environment=SG_WEB_ALLOW_OPEN=1"
+	echo "  warning: no password: the app is open to everyone who can reach its port (SG_WEB_ALLOW_OPEN=1)."
+elif [ -f "$UNIT" ] && grep -q 'SG_WEB_HOST=0.0.0.0' "$UNIT"; then
+	# an installation from before this rule: keep it reachable, but say so, and stop being silent about it
+	HOST_LINE="Environment=SG_WEB_HOST=0.0.0.0"
+	EXTRA="Environment=SG_WEB_ALLOW_OPEN=1"
+	echo "  warning: this installation was open to its network with no password and stays so (SG_WEB_ALLOW_OPEN=1)."
+	echo "  Set SG_WEB_PASSWORD (run: sudo SG_WEB_PASSWORD=... scripts/install.sh) and remove that line."
+else
+	echo "  note: the web app listens on this machine only. For other machines run:"
+	echo "        sudo SG_WEB_PASSWORD=... scripts/install.sh"
 fi
+KEPT="$(printf '%s\n' "$KEPT" | grep -vE 'SG_WEB_HOST=' || true)"
+[ -z "${SG_WEB_HOST:-}" ] || HOST_LINE="Environment=SG_WEB_HOST=$SG_WEB_HOST"  # an address given to this script wins
 cat >/etc/systemd/system/spritegen-web.service <<EOF
 [Unit]
 Description=Sprite Studio (web app)
@@ -188,7 +211,8 @@ After=network-online.target comfyui.service
 User=$SG_USER
 WorkingDirectory=$SG_APP/webapp
 Environment=SG_DATA=$SG_DATA PX_INPUT=$SG_DATA/input PX_GAME=$SG_DATA/game PX_OUTPUT=$SG_DATA/output
-Environment=SG_WEB_HOST=0.0.0.0
+$HOST_LINE
+$EXTRA
 $KEPT
 ExecStart=$SG_APP/webapp/run.sh
 Restart=on-failure
