@@ -228,18 +228,18 @@ async function loadPicks() { S.picks = await api("/picks"); return S.picks; }
 
 // ---------------------------------------------------------------- status bar
 
-let statusTimer = null;
-async function pollStatus() {
-  try {
-    S.status = await api("/status");
-    renderStatus();
-  } catch (e) {
+// The status bar and what depends on it (job lists, the Train page...) hear "status" events from this one loop.
+const statusLoop = autoRefresh({
+  fetch: () => api("/status"),
+  rebuild: (st) => { S.status = st; renderStatus(); },
+  every: (st) => (st.running.length ? 2500 : 5000),
+  onError: () => {
     $("#gpu-line").innerHTML = "";
     $("#gpu-line").append(h("span", {}, h("i", { class: "dot down" }), "The app is not answering"));
-  }
-  clearTimeout(statusTimer);
-  statusTimer = setTimeout(pollStatus, S.status && S.status.running.length ? 2500 : 5000);
-}
+  },
+  first: false,
+  global: true,
+});
 
 function renderStatus() {
   const st = S.status;
@@ -690,12 +690,11 @@ function progressBar(j) {
  *  opts.detail: on the job's own page (no Details link, the page shows the log). */
 function jobPanel(jobId, onDone, opts = {}) {
   const el = h("div", { class: "panel" });
-  let timer = null, finished = false, showLog = false;
+  let finished = false, showLog = false;
   const logBox = h("pre", { class: "log" });
-  const draw = async () => {
-    let j;
-    try { j = await api("/jobs/" + jobId); } catch (e) { el.textContent = e.message; return; }
-    const ended = ["done", "failed", "cancelled", "interrupted"].includes(j.status);
+  const isEnded = (j) => ["done", "failed", "cancelled", "interrupted"].includes(j.status);
+  const draw = async ({ j, log }) => {
+    const ended = isEnded(j);
     el.innerHTML = "";
     el.append(
       h("div", { class: "panel-head" },
@@ -703,22 +702,33 @@ function jobPanel(jobId, onDone, opts = {}) {
           h("span", { class: "muted" }, "  ", j.started ? (ended ? fmtDur(j.ended - j.started) : fmtDur(Date.now() / 1000 - j.started)) : ""))),
         h("div", { class: "row" },
           !ended ? h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled") }, "Cancel") : null,
-          opts.detail ? null : h("button", { class: "btn sm ghost", onclick: () => { showLog = !showLog; draw(); } }, showLog ? "Hide log" : "Show log"),
+          opts.detail ? null : h("button", { class: "btn sm ghost", onclick: () => { showLog = !showLog; loop.poll({ force: true }); } }, showLog ? "Hide log" : "Show log"),
           opts.detail ? null : h("a", { class: "btn sm ghost", href: "#/jobs/" + j.id }, "Full log and details"))),
       progressBar(j),
       h("p", { class: "small muted", style: { marginTop: "6px" } }, (j.progress && j.progress.text) || ""),
       j.error ? h("div", { class: "note bad" }, j.error) : null,
     );
-    if (!opts.detail && showLog) {
-      logBox.textContent = await api(`/jobs/${j.id}/log?tail=20000`).catch(() => "");
+    if (log !== null) {
+      logBox.textContent = log;
       el.append(logBox);
       logBox.scrollTop = logBox.scrollHeight;
     }
     if (ended && !finished) { finished = true; onDone && onDone(j); }
-    if (!ended && el.isConnected !== false) timer = setTimeout(draw, 2000);
   };
-  draw();
-  el.stop = () => clearTimeout(timer);
+  const loop = autoRefresh({
+    host: el,
+    fetch: async () => {
+      const j = await api("/jobs/" + jobId);
+      const log = !opts.detail && showLog ? await api(`/jobs/${j.id}/log?tail=20000`).catch(() => "") : null;
+      return { j, log };
+    },
+    // the running time is part of what is shown: it moves every 10 s
+    signature: ({ j, log }) => [j.status, j.error, j.position, j.progress && j.progress.text, j.progress && j.progress.fraction, log && log.length, !isEnded(j) && Math.floor(Date.now() / 10000)].join("|"),
+    rebuild: draw,
+    every: ({ j }) => (isEnded(j) ? null : 2000),
+    onError: (e) => { el.textContent = e.message; },
+  });
+  el.stop = loop.stop;
   return el;
 }
 
@@ -727,6 +737,64 @@ function jobPanel(jobId, onDone, opts = {}) {
 const routes = {};
 let cleanup = [];
 function onLeave(fn) { cleanup.push(fn); }
+
+/** The one way a view keeps itself up to date (the status bar, job panels, Jobs, Results, Train...).
+ *  - fetch(): asks the server and returns the data;
+ *  - every(data): milliseconds until the next look, or null to stop (nothing is running, nothing can change);
+ *  - signature(data): what the view shows, as a string; rebuild(data) runs only when it changed (or when
+ *    there is no signature), patch(data), if given, is the cheap in-place update when it did not;
+ *  - host: the element the view lives in, the loop ends when it leaves the page (else it ends with the route);
+ *  - global: true for a loop that lives as long as the app (the status bar);
+ *  - onError(err): the server did not answer; the loop tries again after 10 s.
+ *  Nothing is asked while the tab is hidden (it looks at once when the tab is shown again), two requests never
+ *  overlap, and the first look is made now unless `first: false`.
+ *  The controller: poll({ force }) looks now (force: rebuild even if nothing changed), soon(ms, force) does it
+ *  later (after an action), adopt(data) records data drawn by other means, stop(). */
+function autoRefresh({ fetch, every, signature, rebuild, patch, host, onError, first = true, global = false }) {
+  let timer = null, last = null, busy = false, dead = false, again = null;
+  const ctl = {};
+  const arm = (data) => {
+    clearTimeout(timer);
+    timer = null;
+    let ms = null;
+    try { ms = every(data); } catch (_) { /* a view that is gone */ }
+    if (ms != null && !dead) timer = setTimeout(() => ctl.poll(), ms);
+  };
+  ctl.poll = async ({ force = false } = {}) => {
+    if (dead) return;
+    if (busy) { again = { force: force || !!(again && again.force) }; return; }
+    clearTimeout(timer);
+    timer = null;
+    if (document.hidden && !force) return;  // looks again when the tab is shown
+    busy = true;
+    let data;
+    try {
+      data = await fetch();
+      if (dead) return;
+      if (!signature) await rebuild(data);
+      else {
+        const sig = signature(data);
+        if (force || sig !== last) { last = sig; await rebuild(data); }
+        else if (patch) await patch(data);
+      }
+    } catch (e) {
+      if (onError) onError(e);
+      if (!dead) timer = setTimeout(() => ctl.poll(), 10000);
+      return;
+    } finally { busy = false; }
+    if (host && !host.isConnected) { ctl.stop(); return; }
+    arm(data);
+    if (again) { const a = again; again = null; ctl.poll(a); }
+  };
+  ctl.soon = (ms, force = false) => { clearTimeout(timer); timer = setTimeout(() => ctl.poll({ force }), ms); };
+  ctl.adopt = (data) => { if (signature) last = signature(data); arm(data); };
+  ctl.stop = () => { dead = true; clearTimeout(timer); document.removeEventListener("visibilitychange", onVis); };
+  const onVis = () => { if (!document.hidden && !dead && !busy) ctl.poll(); };
+  document.addEventListener("visibilitychange", onVis);
+  if (!host && !global) onLeave(ctl.stop);
+  if (first) ctl.poll({ force: true });
+  return ctl;
+}
 
 async function route() {
   cleanup.forEach((f) => { try { f(); } catch (_) { /* ignore */ } });
@@ -1300,24 +1368,24 @@ routes.results = async (main, _parts, params) => {
   let shownBusy = false, shownMtime = 0, rowShown = null, liveRows = new Map(), makeRowFn = null;
   const rowKey = (x) => x.path || x.target || x.name;
   const rowSig = (x) => (x.done ? "d" : "r") + "|" + (x.orig || "") + "|" + x.variants.map((v) => v.path).join(",");
-  const tick = async () => {
-    if (!document.body.contains(view)) return;
-    if (!document.hidden) {
-      try {
-        const fresh = await api("/results");
-        const listChanged = itemsSig(fresh) !== itemsSig(items);
-        items = fresh;
-        if (listChanged) redrawItems();
-        const it = current && items.find((i) => i.path === current);
-        if (it && it.busy && shownBusy) await patchView();
-        else if (it && (shownBusy !== !!it.busy || (!it.busy && it.mtime !== shownMtime))) await drawView();  // finished (or changed): settle the tags and buttons
-        else if (!it && current && rowShown === current) { /* the result was removed elsewhere: leave the view as it is */ }
-      } catch { /* the app is restarting: try again next time */ }
-    }
-    liveTimer = setTimeout(tick, 30000);
-  };
-  let liveTimer = setTimeout(tick, 30000);
-  onLeave(() => clearTimeout(liveTimer));
+  // The list changes rarely: one look every 30 s, and a running result is patched row by row (no signature: the
+  // list and the view each compare themselves with what they show).
+  const liveLoop = autoRefresh({
+    host: view,
+    first: false,
+    fetch: () => api("/results"),
+    every: () => 30000,
+    rebuild: async (fresh) => {
+      const listChanged = itemsSig(fresh) !== itemsSig(items);
+      items = fresh;
+      if (listChanged) redrawItems();
+      const it = current && items.find((i) => i.path === current);
+      if (it && it.busy && shownBusy) await patchView();
+      else if (it && (shownBusy !== !!it.busy || (!it.busy && it.mtime !== shownMtime))) await drawView();  // finished (or changed): settle the tags and buttons
+    },
+  });
+  liveLoop.adopt(items);
+  onLeave(liveLoop.stop);
 
   drawList();
   drawView();
@@ -1425,8 +1493,6 @@ routes.train = async (main, parts) => {
     onclick: () => { location.hash = "#/train/" + m.id; } }, m.label))));
   const box = h("div", { class: "stack" });
   main.append(box);
-  let timer = null;
-  onLeave(() => clearTimeout(timer));
   const opts = Object.assign({ model: "sd15", epochs: "", dim: "", lr: "0.0001", precision: "auto", repeats: "", src: "" }, store.get("train." + cat, {}));
   if (opts.precision === "no" && !store.get("precisionChosen", false)) opts.precision = "auto"; // the old default, not a choice
   if (opts.epochs === 12) opts.epochs = "";
@@ -1435,10 +1501,11 @@ routes.train = async (main, parts) => {
   let captionFilter = "";
   let showCaptions = false;
 
-  // What the page shows, apart from the progress of a running job: when it is the same after a poll, nothing is
-  // rebuilt (no flicker, no images loaded again); the progress bars are repainted in place.
-  let lastSig = "";
+  // The page shows the same thing until the server's answer changes (see autoRefresh): the progress of a running
+  // job is painted in place, from the status bar's own loop, and only a new checkpoint or preview image, a job
+  // starting or ending... rebuilds it.
   const live = { train: null, pv: null };
+  let lastKinds = [];
   const sigOf = (info) => JSON.stringify([info.jobs.map((j) => [j.id, j.status]), info.checkpoints.map((k) => k.name), info.samples, info.installed.map((i) => i.name),
     info.dataset.mtime, info.dataset.count, info.sdxl_ready, info.final_epoch]);
   const paintLive = (jobs) => {
@@ -1448,28 +1515,26 @@ routes.train = async (main, parts) => {
     const v = find(live.pv);
     if (v) live.pv.paint(v);
   };
-  const onStatus = () => { if (S.status && box.isConnected) paintLive(S.status.running); };
+  const loop = autoRefresh({
+    first: false,
+    fetch: () => api(`/train/${cat}?model=${opts.model}`),
+    signature: sigOf,
+    rebuild: (info) => draw(info),
+    patch: (info) => paintLive(info.jobs),
+    // slow while training (checkpoints and previews appear every 2 epochs), faster while previews render one by one,
+    // none when idle: the status bar's loop wakes this one up when a job of this model starts
+    every: () => (!lastKinds.length ? null : lastKinds.includes("train") ? 20000 : lastKinds.includes("setup") ? 8000 : 4000),
+  });
+  const redraw = () => loop.poll({ force: true });
+  const schedule = (ms) => loop.soon(ms, true);
+  const onStatus = () => {
+    if (!S.status || !box.isConnected) return;
+    paintLive(S.status.running);
+    if (!lastKinds.length && S.status.running.some((j) => ["train", "previews", "dataset", "setup"].includes(j.kind))) loop.poll();
+  };
   document.addEventListener("status", onStatus);
   onLeave(() => document.removeEventListener("status", onStatus));
-  const poll = async () => {
-    if (!box.isConnected) return;
-    if (document.hidden) { next(); return; }
-    let info;
-    try { info = await api(`/train/${cat}?model=${opts.model}`); } catch (_) { next(); return; }
-    if (sigOf(info) !== lastSig) await draw(info);
-    else { paintLive(info.jobs); next(); }
-  };
-  // The next look at the server: a running job needs it, an idle page does not. Slow while training (checkpoints
-  // and previews appear every 2 epochs), faster while previews render one by one.
-  const next = () => {
-    clearTimeout(timer);
-    const k = lastKinds;
-    timer = k.length ? setTimeout(poll, k.includes("train") ? 20000 : k.includes("setup") ? 8000 : 4000) : null;
-  };
-  let lastKinds = [];
-  const draw = async (pre) => {
-    const info = pre || await api(`/train/${cat}?model=${opts.model}`);
-    lastSig = sigOf(info);
+  const draw = async (info) => {
     live.train = null;
     live.pv = null;
     const c = models.find((m) => m.id === cat);
@@ -1488,7 +1553,7 @@ routes.train = async (main, parts) => {
           h("p", { class: "small muted", style: { margin: 0, maxWidth: "80ch" } }, xl
             ? "SDXL renders at 1024 px: twice as many render pixels per sprite pixel as SD 1.5, so finer detail and cleaner pixels, but several times slower to train and to render. Its LoRA is " + info.name + "."
             : "SD 1.5 renders at 512 px: quick to train and to render. Its LoRA is " + info.name + ".")),
-        seg([{ id: "sd15", label: "SD 1.5" }, { id: "sdxl", label: "SDXL" }], opts.model, (v) => { opts.model = v; keep(); draw(); })),
+        seg([{ id: "sd15", label: "SD 1.5" }, { id: "sdxl", label: "SDXL" }], opts.model, (v) => { opts.model = v; keep(); redraw(); })),
       xl && S.catalog.gpu_mb && S.catalog.gpu_mb < 12000 ? h("div", { class: "note warn", style: { marginTop: "12px" } },
         `This card has ${(S.catalog.gpu_mb / 1024).toFixed(0)} GB: SDXL only fits with its weights kept in half precision (done automatically), with almost nothing to spare, `
         + "so close anything else using the GPU first. On GTX 10 cards (no fast half precision) expect many hours; SD 1.5 is the practical choice on such a card.") : null,
@@ -1521,7 +1586,7 @@ routes.train = async (main, parts) => {
     if (ds.exists) {
       s1.append(h("div", { style: { marginTop: "14px" } }, h("img", { src: fileUrl(ds.sheet), class: "px", alt: "every training image", title: "Open full size",
         style: { maxWidth: "100%", maxHeight: "220px", borderRadius: "6px", cursor: "zoom-in" }, onclick: () => openSprite(ds.sheet, "Training set") })));
-      s1.append(h("button", { class: "btn sm ghost", style: { marginTop: "8px" }, onclick: () => { showCaptions = !showCaptions; draw(); } }, showCaptions ? "Hide the captions" : `Review the ${ds.count} captions`));
+      s1.append(h("button", { class: "btn sm ghost", style: { marginTop: "8px" }, onclick: () => { showCaptions = !showCaptions; redraw(); } }, showCaptions ? "Hide the captions" : `Review the ${ds.count} captions`));
       if (showCaptions) {
         const tbody = h("tbody");
         const drawRows = () => {
@@ -1624,7 +1689,6 @@ routes.train = async (main, parts) => {
     }
     box.append(s3);
     lastKinds = [running, downloading].filter(Boolean).map((j) => j.kind);
-    next();
   };
   // Previews the training did not render (SDXL on a small card, or a stopped run): rendered afterwards through ComfyUI.
   const pvOff = new Set();
@@ -1679,10 +1743,9 @@ routes.train = async (main, parts) => {
     h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); } }), h("div", { class: "hint" }, hint));
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
-    if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); draw(); }
+    if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); redraw(); }
   };
-  const schedule = (ms) => { clearTimeout(timer); timer = setTimeout(draw, ms); };
-  await draw();
+  await redraw();
 };
 
 /** How long a training run takes here: the last run's time when there is one. */
@@ -2788,11 +2851,8 @@ routes.jobs = async (main, parts) => {
       } }, "Clear all finished"))));
   const box = h("div", { class: "panel" });
   main.append(box);
-  let timer;
-  onLeave(() => clearTimeout(timer));
   const paging = Object.assign({ page: 0, size: 25 }, store.get("jobs_paging", {}));
-  const draw = async () => {
-    const jobs = await api("/jobs");
+  const draw = (jobs) => {
     box.innerHTML = "";
     if (!jobs.length) { box.append(h("div", { class: "empty" }, "No jobs yet.")); return; }
     const pg = pageOf(jobs, paging);
@@ -2804,14 +2864,20 @@ routes.jobs = async (main, parts) => {
         h("td", { class: "small muted nowrap" }, fmtTime(j.started || j.created)),
         h("td", { class: "small muted nowrap" }, j.started ? fmtDur((j.ended || Date.now() / 1000) - j.started) : ""),
         h("td", { class: "nowrap" }, ["running", "queued"].includes(j.status)
-          ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(draw); } }, "Cancel")
+          ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(() => loop.poll({ force: true })); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
-            ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(draw); } }, "Run again") : null))))));
-    const pgr = pager(jobs.length, paging, () => { store.set("jobs_paging", { size: paging.size }); draw(); });
+            ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(() => loop.poll({ force: true })); } }, "Run again") : null))))));
+    const pgr = pager(jobs.length, paging, () => { store.set("jobs_paging", { size: paging.size }); loop.poll({ force: true }); });
     if (pgr) box.append(pgr);
-    if (jobs.some((j) => ["running", "queued"].includes(j.status))) timer = setTimeout(draw, 3000);
   };
-  draw();
+  const busy = (jobs) => jobs.some((j) => ["running", "queued"].includes(j.status));
+  const loop = autoRefresh({
+    fetch: () => api("/jobs"),
+    // the page shown: its rows' status and progress (the elapsed time of a running job moves with it)
+    signature: (jobs) => JSON.stringify([jobs.length, paging.page, paging.size, pageOf(jobs, paging).rows.map((j) => [j.id, j.status, j.position, j.progress && j.progress.text, j.progress && j.progress.fraction, j.ended])]),
+    rebuild: draw,
+    every: (jobs) => (busy(jobs) ? 3000 : 15000),  // idle: a slow look, for jobs started from elsewhere
+  });
 };
 
 async function jobDetail(main, id) {
@@ -2840,16 +2906,16 @@ async function jobDetail(main, id) {
   main.append(h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Log"), h("span", { class: "faint small mono" }, j.log)),
     h("p", { class: "small muted mono" }, j.cmd.join(" ")),
     j.out ? h("p", { class: "small" }, "Output: ", h("a", { href: "#/results?path=" + encodeURIComponent(j.out) }, j.out)) : null, logBox));
-  let timer;
-  onLeave(() => clearTimeout(timer));
-  const pull = async () => {
-    const atEnd = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
-    logBox.textContent = await api(`/jobs/${id}/log`).catch(() => "");
-    if (atEnd) logBox.scrollTop = logBox.scrollHeight;
-    const cur = await api("/jobs/" + id).catch(() => null);
-    if (cur && ["running", "queued"].includes(cur.status)) timer = setTimeout(pull, 2500);
-  };
-  pull();
+  autoRefresh({
+    fetch: async () => ({ status: (await api("/jobs/" + id)).status, log: await api(`/jobs/${id}/log`).catch(() => "") }),
+    signature: ({ status, log }) => status + "|" + log.length,
+    rebuild: ({ log }) => {
+      const atEnd = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
+      logBox.textContent = log;
+      if (atEnd) logBox.scrollTop = logBox.scrollHeight;
+    },
+    every: ({ status }) => (["running", "queued"].includes(status) ? 2500 : null),
+  });
 }
 
 // ---------------------------------------------------------------- Settings
@@ -2896,5 +2962,5 @@ routes.settings = async (main) => {
 // ---------------------------------------------------------------- start
 
 setTray(S.tray);
-pollStatus();
+statusLoop.poll();
 route();

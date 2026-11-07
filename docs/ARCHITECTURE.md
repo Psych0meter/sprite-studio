@@ -188,6 +188,17 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
 - **Front end**: `app.js` and `palette.js`, a small `h()` element helper, one route
   function per page, in-app dialogs (`askText`, `askConfirm`); no global
   build or framework.
+- **Live views**: every view that keeps itself up to date (the status bar,
+  job panels, Jobs, a job's log, Results, Train) uses the one `autoRefresh()`
+  helper in `app.js`, and no other timer polls the server. A view gives it
+  `fetch`, `every` (the delay until the next look, or null to stop), a
+  `signature` of what it shows, `rebuild` (run only when the signature
+  changed) and optionally `patch` (an in-place update when it did not). The
+  helper looks at nothing while the tab is hidden, never overlaps two
+  requests, retries after 10 s when the server does not answer, and stops
+  with its route or when its host element leaves the page. Progress bars
+  are painted in place from the status bar's loop (the `status` event), so a
+  running job costs one request per 2.5 s in total, not one per view.
 
 ## 8. Tests
 
