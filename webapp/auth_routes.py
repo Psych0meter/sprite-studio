@@ -16,9 +16,11 @@ def make_router(
     accounts: acc.Accounts,
     adopt: Callable[[str], None],
     resource_kinds: Callable[[str, str], bool],
+    removed: Callable[[str, str], None] = lambda username, target: None,
 ) -> APIRouter:
     """`adopt(admin)` gives what exists before the first account to that administrator; `resource_kinds(kind, key)`
-    says whether a resource exists (so that only real ones are shared)."""
+    says whether a resource exists (so that only real ones are shared); `removed(username, target)` hands the rest
+    of a deleted user's state (jobs, picks, projects, folders) to `target`, so a new user of that name starts empty."""
     r = APIRouter()
 
     def ip_of(request: Request) -> str:
@@ -155,6 +157,7 @@ def make_router(
             raise HTTPException(400, "choose the user who takes over their resources")
         accounts.delete(username, by=w.name)  # (refuses to remove the last administrator)
         moved = accounts.transfer(username, target)
+        removed(username, target)
         return {"users": accounts.listing(), "transferred": moved, "to": target}
 
     # ---- sharing

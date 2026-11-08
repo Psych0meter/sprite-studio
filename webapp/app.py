@@ -59,7 +59,10 @@ SCRIPTS = Path(os.environ.get("SG_SCRIPTS", HERE.parent / "scripts")).resolve()
 VERSION = next((f.read_text().strip() for f in (HERE.parent / "VERSION",) if f.exists()), "dev")
 STATE_DIR = Path(os.environ.get("SG_WEB_STATE", Path.home() / ".spritegen-web"))
 LOG_DIR = STATE_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+for _d in (STATE_DIR, LOG_DIR):  # what the app keeps (accounts, prompts, paths, logs) is for its own user only
+    _d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        _d.chmod(0o700)
 sys.path.insert(0, str(SCRIPTS))
 
 import accounts as acc  # noqa: E402  (users, sessions, ownership: webapp/accounts.py)
@@ -212,9 +215,19 @@ def _load(name: str, default: Any) -> Any:
         return default
 
 
+def _private_open(path: str | Path, mode: str = "a"):
+    """Opens a file of the app's own state for text writing, created readable by its user only (0600)."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    fd = os.open(path, flags, 0o600)
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, 0o600)
+    return os.fdopen(fd, mode)
+
+
 def _save(name: str, data: Any) -> None:
     tmp = STATE_DIR / (name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
+    with _private_open(tmp, "w") as fh:
+        fh.write(json.dumps(data, indent=1))
     tmp.replace(STATE_DIR / name)
 
 
@@ -456,7 +469,7 @@ class Jobs:
             self._run(jid)
 
     def _log(self, job: dict, text: str) -> None:
-        with open(job["log"], "a") as fh:
+        with _private_open(job["log"]) as fh:
             fh.write(text if text.endswith("\n") else text + "\n")
 
     def _run(self, jid: str) -> None:
@@ -485,7 +498,7 @@ class Jobs:
             env = job_env()
             env.update(job["env"])
             self._log(job, "$ " + " ".join(_quote(c) for c in job["cmd"]))
-            with open(job["log"], "a") as fh:
+            with _private_open(job["log"]) as fh:
                 p = subprocess.Popen(
                     job["cmd"],
                     stdout=fh,
@@ -542,6 +555,11 @@ class Jobs:
             if not comfy_status()["up"]:
                 break
             time.sleep(1)
+        if comfy_status()["up"]:
+            raise RuntimeError(
+                "ComfyUI is still running 30 s after it was asked to stop, so the GPU may not be free. "
+                "Stop it yourself (systemctl stop comfyui) and start the training again."
+            )
         time.sleep(3)
         return True
 
@@ -755,12 +773,25 @@ def train_seconds_per_step(log: str) -> float | None:
         return None
 
 
+_speed_cache: dict[str, Any] = {"sig": None, "value": None}
+
+
 def speed() -> dict:
     """How fast this machine is, from the logs of finished jobs: seconds per rendered image, and per
-    training step (per base model; the median of the last runs), plus minutes of the last run."""
-    per_image, train, steps = [], {}, {}
+    training step (per base model; the median of the last runs), plus minutes of the last run.
+    Reading those logs is slow, so the answer is kept until a job starts, ends or changes."""
     with _lock:
         jobs = sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
+        sig = tuple((j["id"], j["status"], j.get("ended"), j.get("returncode")) for j in jobs)
+        if _speed_cache["sig"] == sig:
+            return _speed_cache["value"]
+    value = _measure_speed(jobs)
+    _speed_cache.update(sig=sig, value=value)
+    return value
+
+
+def _measure_speed(jobs: list[dict]) -> dict:
+    per_image, train, steps = [], {}, {}
     for j in jobs:
         if j["status"] != "done" or j.get("returncode") != 0 or j.get("error"):
             continue  # only runs that really finished: not failed, cancelled, interrupted or partly failed ones
@@ -1220,7 +1251,7 @@ def require_lora(m: dict, chosen: str = "") -> None:
 # --------------------------------------------------------------------------
 # the web app
 
-app = FastAPI(title="Sprite Studio", version=VERSION, docs_url=None, redoc_url=None)
+app = FastAPI(title="Sprite Studio", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 JOBS = Jobs()
 LOGIN_PAGE = HERE / "static" / "login.html"
 
@@ -1276,6 +1307,10 @@ async def no_stale_pages(request: Request, call_next):
     response = await call_next(request)
     if not request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-cache"
+    elif "json" in response.headers.get("content-type", ""):
+        response.headers["Cache-Control"] = "private, no-store"  # what the API answers is for the signed-in user only
+    else:
+        response.headers.setdefault("Cache-Control", "private")  # images and files: kept by the browser, never shared
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -1629,9 +1664,21 @@ def api_file(path: str = ""):
     return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
+_info_slots = threading.BoundedSemaphore(2)  # image analysis builds large arrays: at most two at a time
+
+
 @app.get("/api/info")
 def api_info(path: str):
     p = safe_path(path)
+    if not _info_slots.acquire(timeout=20):
+        raise HTTPException(503, "busy analysing other images: try again in a moment")
+    try:
+        return _analyse_image(p)
+    finally:
+        _info_slots.release()
+
+
+def _analyse_image(p: Path) -> dict:
     import numpy as np
     from scipy import ndimage
 
@@ -3635,7 +3682,39 @@ def adopt_existing(admin: str) -> None:
         JOBS.persist()
 
 
-app.include_router(auth_routes.make_router(ACCOUNTS, adopt_existing, resource_exists))
+def user_removed(username: str, target: str) -> None:
+    """Everything a deleted user left that is keyed by their name goes to `target`, so that a new account created
+    with the same name starts empty and inherits nothing (shares and ownership are handled by Accounts)."""
+    with _lock:
+        for j in JOBS.jobs.values():
+            if j.get("owner") == username:
+                j["owner"] = target
+        JOBS.persist()
+        d = picks_load()
+        gone = d["users"].pop(username, {})
+        if gone:
+            d["users"].setdefault(target, {}).update({k: v for k, v in gone.items() if k not in d["users"][target]})
+        _save("picks.json", d)
+        reg = project_registry()
+        _save("projects.json", {"entries": [[target if o == username else o, n] for o, n in reg["entries"]]})
+    out = setting_path("px_output")
+    for top in ("uploads", "picked", "recoloured"):
+        src = out / top / username
+        if not src.is_dir():
+            continue
+        dest = out / top / target / f"from_{username}"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            n = 1
+            while dest.exists():
+                n += 1
+                dest = dest.with_name(f"from_{username}_{n}")
+            shutil.move(str(src), str(dest))
+        except OSError as e:
+            print(f"user removed: could not move {src}: {e!r}", file=sys.stderr, flush=True)
+
+
+app.include_router(auth_routes.make_router(ACCOUNTS, adopt_existing, resource_exists, user_removed))
 app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
 
 

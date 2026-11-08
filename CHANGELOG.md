@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-08
+
+### Changed
+
+- **ComfyUI**: `install.sh` now makes ComfyUI listen on `127.0.0.1` only (it has no login, so it was open to the whole network). Running it again on an existing installation changes that. To reach ComfyUI from another machine use an SSH tunnel, or install with `COMFY_LISTEN=0.0.0.0` behind a firewall.
+- **Security**: the app's own state (accounts, prompts, paths, picks, job logs, `auth.log`) is kept in a folder only its user can enter (0700, files 0600); API answers are never cached (`Cache-Control: private, no-store`); the API schema (`/openapi.json`) is no longer published; image analysis runs two at a time.
+
+### Fixed
+
+- **Users**: deleting a user also hands their jobs, picks, projects and upload, pick and recolour folders to the user who takes over (the folders become `from_<name>` in theirs). A new user created later with the same name starts with nothing and inherits no sharing.
+- **Train**: training stops with a clear message when ComfyUI is still running 30 seconds after it was asked to stop, instead of starting on a busy GPU.
+- **Speed**: pages no longer wait on the logs of every past job; the measured speeds are kept until a job starts or ends (the Overview, Generate and Train pages were slow with many jobs).
+- **Spinners**: the corner spinner hides while a control or the page already shows its own.
+
 ## [0.3.1] - 2026-11-08
 
 ### Fixed
@@ -214,7 +228,8 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.1.0...v0.2.0

@@ -429,3 +429,59 @@ def test_administrator_only_routes_refuse_users_and_anonymous(team, web, method,
     for c, want in ((ann, 403), (TestClient(web.module.app), 401)):
         r = getattr(c, method)(url, **({} if method == "get" else {"json": {}}))
         assert r.status_code == want, (method, url, r.status_code)
+
+
+def test_a_new_user_with_a_deleted_users_name_starts_with_nothing(team, env):
+    admin, ann, bob = team
+    mod = admin.module
+    make_model(ann, "shared", "pxshared")
+    assert ann.put("/api/acl/model/shared", json={"users": ["bob"]}).status_code == 200
+    make_model(bob, "bobs", "pxbobs")
+    with mod._lock:
+        mod.JOBS.jobs["jb"] = {
+            "id": "jb", "kind": "generate", "status": "done", "returncode": 0, "error": None, "log": str(env["output"] / "jb.log"),
+            "created": 1.0, "started": 1.0, "ended": 2.0, "meta": {}, "title": "bobs job", "owner": "bob", "lane": "gpu",
+        }  # fmt: skip
+        mod._save("picks.json", {"users": {"bob": {"/some/path.png": {"as": "x", "time": 1}}}})
+        mod._save("projects.json", {"entries": [["bob", "Bobs project"]]})
+    (env["output"] / "uploads" / "bob").mkdir(parents=True)
+    (env["output"] / "uploads" / "bob" / "sketch.png").write_bytes(b"x")
+
+    assert admin.delete("/api/users/bob").status_code == 200
+
+    again = signed_in(admin, "bob", "another long password")
+    assert [m["id"] for m in again.get("/api/models").json()] == []  # not ann's share, not the old model
+    assert again.get("/api/jobs").json() == [] or all(j["id"] != "jb" for j in again.get("/api/jobs").json())
+    assert again.get("/api/picks").json() == {}
+    assert all(p["name"] != "Bobs project" for p in again.get("/api/projects").json())
+    assert not (env["output"] / "uploads" / "bob").exists()
+    # what was theirs went to the administrator, not away
+    assert (env["output"] / "uploads" / "admin" / "from_bob" / "sketch.png").exists()
+    assert mod.JOBS.jobs["jb"]["owner"] == "admin"
+    assert "bob" not in mod.ACCOUNTS.entry("model", "shared").get("users", [])
+    assert mod.ACCOUNTS.entry("model", "bobs")["owner"] == "admin"
+
+
+def test_the_state_the_app_keeps_is_private_to_its_user(client):
+    import stat
+
+    mod = client.module
+    mod._save("x.json", {"a": 1})
+    for p in (mod.STATE_DIR / "x.json", mod.STATE_DIR / "auth.log"):
+        assert p.exists() and stat.S_IMODE(p.stat().st_mode) == 0o600, p
+    assert stat.S_IMODE(mod.STATE_DIR.stat().st_mode) == 0o700
+
+
+def test_the_api_is_not_cached_and_the_schema_is_not_published(client):
+    r = client.get("/api/status")
+    assert r.headers["cache-control"] == "private, no-store"
+    assert client.get("/openapi.json").status_code in (401, 404) or "paths" not in client.get("/openapi.json").text
+
+
+def test_training_does_not_start_while_comfyui_is_still_running(client, monkeypatch):
+    mod = client.module
+    monkeypatch.setattr(mod, "comfy_status", lambda: {"up": True})
+    monkeypatch.setattr(mod, "comfy_service", lambda action: (True, ""))
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="still running"):
+        mod.JOBS._free_gpu({"id": "t", "log": "/dev/null"})

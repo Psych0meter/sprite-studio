@@ -389,3 +389,6 @@ th.sortable:hover { color: var(--text, inherit); }
 .btn.is-loading { padding-right: 38px; }
 .btn.is-loading::after { top: 50%; right: 12px; margin-top: -10px; }
 @media (prefers-reduced-motion: reduce) { .spinner, .is-loading::after { animation-duration: 3s; } }
+
+/* the corner spinner is for what has none of its own: it hides while a control or the page shows one */
+body:has(.is-loading, .page-loading) .busy { display: none; }

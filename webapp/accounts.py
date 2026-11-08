@@ -150,7 +150,9 @@ class Accounts:
         self._fails: dict[str, list[float]] = {}  # key -> [count, locked_until]
         self._cache: dict[str, tuple[tuple[int, int], Any]] = {}
         self._seen: dict[str, float] = {}  # session hash -> last write of its last_seen
-        self.state.mkdir(parents=True, exist_ok=True)
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            self.state.chmod(0o700)
 
     # ---- files (0600: hashes and tokens)
     def _read(self, name: str, default: Any, fresh: bool = False) -> Any:
@@ -187,8 +189,13 @@ class Accounts:
         with self.lock:
             try:
                 if p.exists() and p.stat().st_size > 1_000_000:  # keeps the last part
-                    p.write_text("".join(p.read_text().splitlines(True)[-2000:]))
-                with open(p, "a") as fh:
+                    keep = "".join(p.read_text().splitlines(True)[-2000:])
+                    with os.fdopen(os.open(p, os.O_WRONLY | os.O_TRUNC, 0o600), "w") as fh:
+                        fh.write(keep)
+                fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with contextlib.suppress(OSError):
+                    os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "a") as fh:
                     fh.write(line + "\n")
             except OSError:
                 pass
