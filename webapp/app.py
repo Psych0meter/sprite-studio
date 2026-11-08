@@ -288,12 +288,12 @@ def gate_path(root: Path, rp: Path, write: bool | None) -> None:
                 raise HTTPException(403, "only an administrator can do this")
             return
         top = parts[0]
-        if top == "picked":  # exported picks: each user has a folder of their own
-            if len(parts) > 1 and parts[1] == w.name:
+        if top == "picked":  # exported picks: each user has a folder of their own (named by their id)
+            if len(parts) > 1 and w.id and parts[1] == w.id:
                 return
             raise HTTPException(404, "not found")
         if top in ("uploads", "recoloured"):  # sketches and masks sent for a generation: a folder per user
-            if len(parts) > 1 and parts[1] == w.name:
+            if len(parts) > 1 and w.id and parts[1] == w.id:
                 return
             raise HTTPException(404, "not found")
         if top == ".bin":  # a deleted result belongs to whoever owned the result
@@ -424,7 +424,7 @@ class Jobs:
         jid = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         job = {
             "id": jid,
-            "owner": (who_now().name if who_now() else ""),
+            "owner": (who_now().id if who_now() else ""),
             "kind": kind,
             "title": title,
             "lane": lane,
@@ -595,12 +595,14 @@ class Jobs:
 
     def view(self, job: dict, with_progress: bool = True) -> dict:
         if not job_mine(job):  # somebody else's job: the queue shows that the GPU is busy, nothing more
-            keys = ("id", "owner", "kind", "lane", "status", "created", "started", "ended")
+            keys = ("id", "kind", "lane", "status", "created", "started", "ended")
             v = {k: job.get(k) for k in keys}
+            v["owner"] = ACCOUNTS.name_of(job.get("owner", ""))
             v.update(title="another user's job", foreign=True, position=None)
             v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
             return v
         v = {k: job[k] for k in job if k not in ("env",)}
+        v["owner"] = ACCOUNTS.name_of(job.get("owner", ""))
         v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
         if with_progress:
             v["progress"] = progress(job)
@@ -610,7 +612,7 @@ class Jobs:
 def job_mine(job: dict) -> bool:
     """Whether the signed-in user may see this job's details (their own; an administrator sees all)."""
     w = who_now()
-    return w is None or w.admin or job.get("owner") == w.name
+    return w is None or w.admin or bool(w.id and job.get("owner") == w.id)
 
 
 def job_get(jid: str) -> dict:
@@ -1552,7 +1554,7 @@ def project_registry() -> dict:
 
 def project_list() -> list[dict]:
     w = who_now()
-    names = {n for o, n in project_registry()["entries"] if w is None or w.admin or o == w.name}
+    names = {n for o, n in project_registry()["entries"] if w is None or w.admin or (w.id and o == w.id)}
     models: dict[str, list[str]] = {}
     for m in models_summary():
         models.setdefault(m.get("project") or "", []).append(m["id"])
@@ -1573,7 +1575,7 @@ def project_name(v: Any) -> str:
 
 def _set_project_names(add: str = "", drop: str = "") -> None:
     w = who_now()
-    me = w.name if w else ""
+    me = w.id if w else ""
     with _lock:
         d = project_registry()
         # a user's project names are theirs; an administrator's changes reach everyone's
@@ -1713,7 +1715,7 @@ async def api_upload(request: Request):
     raw = decode_data_url(b.get("data"))
     check_image(raw, "PNG")
     w = who_now()
-    folder = setting_path("px_output") / "uploads" / (w.name if w else "_app")
+    folder = setting_path("px_output") / "uploads" / ((w.id or w.name) if w else "_app")
     folder.mkdir(parents=True, exist_ok=True)
     f = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name_ok(b.get('name', 'sketch.png'))}"
     if f.suffix != ".png":
@@ -3296,7 +3298,7 @@ async def api_palette_apply(request: Request):
             except HTTPException:
                 mine = False  # shared with you to use: the copy goes to your own folder
         w = who_now()
-        own = out_root / "recoloured" / (w.name if w else "_app")
+        own = out_root / "recoloured" / ((w.id or w.name) if w else "_app")
         folder = src.parent if out_root in src.parents and mine and not is_recoloured(src, out_root) else own
         folder.mkdir(parents=True, exist_ok=True)
         stem = re.sub(r"_pal-[a-z0-9_]+$", "", src.stem)
@@ -3470,7 +3472,7 @@ def picks_load() -> dict:
 
 def picks_name() -> str:
     w = who_now()
-    return w.name if w else ""
+    return (w.id or w.name) if w else ""
 
 
 def picks_mine(d: dict) -> dict:
@@ -3666,52 +3668,98 @@ def resource_exists(kind: str, key: str) -> bool:
 
 
 def adopt_existing(admin: str) -> None:
+    aid = ACCOUNTS.id_of(admin)
     for mid in pm().list_models():
-        ACCOUNTS.claim("model", mid, admin)
+        ACCOUNTS.claim("model", mid, aid)
     out = setting_path("px_output")
     for d in out.iterdir() if out.is_dir() else []:
         if d.is_dir() and d.name not in ("uploads", "picked", "recoloured") and not d.name.startswith("."):
-            ACCOUNTS.claim("result", d.name, admin)
+            ACCOUNTS.claim("result", d.name, aid)
     for f in pal_dir().glob("*.json") if pal_dir().is_dir() else []:
-        ACCOUNTS.claim("palette", f.stem, admin)
+        ACCOUNTS.claim("palette", f.stem, aid)
     with _lock:
         reg = project_registry()
-        _save("projects.json", {"entries": [[o or admin, n] for o, n in reg["entries"]]})
+        _save("projects.json", {"entries": [[o or aid, n] for o, n in reg["entries"]]})
         for j in JOBS.jobs.values():
-            j.setdefault("owner", admin)
+            j.setdefault("owner", aid)
         JOBS.persist()
 
 
-def user_removed(username: str, target: str) -> None:
-    """Everything a deleted user left that is keyed by their name goes to `target`, so that a new account created
-    with the same name starts empty and inherits nothing (shares and ownership are handled by Accounts)."""
+def _id_or_blank(owner: str, ids: dict[str, str]) -> str:
+    return owner if owner.startswith(acc.ID_PREFIX) or not owner else ids.get(owner, "")
+
+
+def migrate_identities() -> None:
+    """Before 0.3.2 jobs, picks, projects and the per-user folders were keyed by user name. A name can be given
+    again after a deletion, so they are keyed by the account's id now (accounts and shares: Accounts.migrate_ids).
+    A name that no longer matches an account is dropped (its jobs and projects then belong to nobody but the
+    administrators)."""
+    users = ACCOUNTS.users()
+    if not users:
+        return
+    ids = {n: u["id"] for n, u in users.items() if u.get("id")}
     with _lock:
+        changed = False
         for j in JOBS.jobs.values():
-            if j.get("owner") == username:
-                j["owner"] = target
-        JOBS.persist()
+            o = j.get("owner", "")
+            if o and not o.startswith(acc.ID_PREFIX):
+                j["owner"], changed = _id_or_blank(o, ids), True
+        if changed:
+            JOBS.persist()
         d = picks_load()
-        gone = d["users"].pop(username, {})
-        if gone:
-            d["users"].setdefault(target, {}).update({k: v for k, v in gone.items() if k not in d["users"][target]})
-        _save("picks.json", d)
+        if any(k and not k.startswith(acc.ID_PREFIX) for k in d["users"]):
+            d["users"] = {
+                (_id_or_blank(k, ids) or k): v
+                for k, v in d["users"].items()
+                if k == "" or k in ids or k.startswith(acc.ID_PREFIX)
+            }
+            _save("picks.json", d)
         reg = project_registry()
-        _save("projects.json", {"entries": [[target if o == username else o, n] for o, n in reg["entries"]]})
+        if any(o and not o.startswith(acc.ID_PREFIX) for o, _ in reg["entries"]):
+            _save("projects.json", {"entries": [[_id_or_blank(o, ids), n] for o, n in reg["entries"]]})
     out = setting_path("px_output")
     for top in ("uploads", "picked", "recoloured"):
-        src = out / top / username
+        for name, uid in ids.items():
+            src, dst = out / top / name, out / top / uid
+            if src.is_dir() and not dst.exists():
+                with contextlib.suppress(OSError):
+                    src.rename(dst)
+
+
+def user_removed(uid: str, target_id: str, label: str) -> None:
+    """Everything a deleted user left that is keyed by their id goes to `target_id`, so that nothing of it can
+    reach a new account (shares and ownership of resources are handled by Accounts)."""
+    with _lock:
+        for j in JOBS.jobs.values():
+            if j.get("owner") == uid:
+                j["owner"] = target_id
+        JOBS.persist()
+        d = picks_load()
+        gone = d["users"].pop(uid, {})
+        if gone:
+            mine = d["users"].setdefault(target_id, {})
+            mine.update({k: v for k, v in gone.items() if k not in mine})
+        _save("picks.json", d)
+        reg = project_registry()
+        _save("projects.json", {"entries": [[target_id if o == uid else o, n] for o, n in reg["entries"]]})
+    out = setting_path("px_output")
+    for top in ("uploads", "picked", "recoloured"):
+        src = out / top / uid
         if not src.is_dir():
             continue
-        dest = out / top / target / f"from_{username}"
+        dest = out / top / target_id / f"from_{label}"
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             n = 1
             while dest.exists():
                 n += 1
-                dest = dest.with_name(f"from_{username}_{n}")
+                dest = dest.with_name(f"from_{label}_{n}")
             shutil.move(str(src), str(dest))
         except OSError as e:
             print(f"user removed: could not move {src}: {e!r}", file=sys.stderr, flush=True)
+
+
+migrate_identities()
 
 
 app.include_router(auth_routes.make_router(ACCOUNTS, adopt_existing, resource_exists, user_removed))

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+ID_PREFIX = "U-"  # an id starts with a capital: no user name can (names are lowercase)
 USERNAME = re.compile(r"[a-z0-9][a-z0-9_.-]{1,31}")
 ROLES = ("admin", "user")
 KINDS = ("model", "result", "palette")
@@ -67,6 +68,10 @@ COMMON_PASSWORDS = {
 }
 
 
+def new_id() -> str:
+    return ID_PREFIX + secrets.token_hex(16)
+
+
 class AccountError(Exception):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
@@ -79,6 +84,7 @@ class Who:
     name: str
     role: str
     must_change: bool = False
+    id: str = ""  # the account's permanent identity (names can be reused after a deletion, ids never are)
 
     @property
     def admin(self) -> bool:
@@ -153,6 +159,48 @@ class Accounts:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             self.state.chmod(0o700)
+        self.migrate_ids()
+
+    # ---- identity: resources, jobs and folders point at an id, never at a name that could be given again
+    def migrate_ids(self) -> None:
+        """Gives every account an id and rewrites the names in the ownership and sharing lists to ids (once)."""
+        with self.lock:
+            users = self.users()
+            if not users:
+                return
+            fresh = False
+            for u in users.values():
+                if not str(u.get("id", "")).startswith(ID_PREFIX):
+                    u["id"] = new_id()
+                    fresh = True
+            if fresh:
+                self._write("users.json", users)
+            ids = {n: u["id"] for n, u in users.items()}
+            acl = self._acl(True)
+            changed = False
+            for items in acl.values():
+                for e in items.values():
+                    owner = e.get("owner", "")
+                    if owner and not owner.startswith(ID_PREFIX):
+                        e["owner"], changed = ids.get(owner, ""), True
+                    shared = e.get("users", [])
+                    if any(not str(u).startswith(ID_PREFIX) for u in shared):
+                        e["users"], changed = [ids[u] for u in shared if u in ids], True
+            if changed:
+                self._write("acl.json", acl)
+
+    def id_of(self, who: str) -> str:
+        """The id of a user given by name (or an id, returned as it is); "" when there is no such user."""
+        if str(who).startswith(ID_PREFIX):
+            return str(who)
+        return str(self.users().get(str(who), {}).get("id", ""))
+
+    def name_of(self, uid: str) -> str:
+        """The name of the user with this id ("" for a user that was removed)."""
+        for n, u in self.users().items():
+            if u.get("id") == uid:
+                return n
+        return ""
 
     # ---- files (0600: hashes and tokens)
     def _read(self, name: str, default: Any, fresh: bool = False) -> Any:
@@ -211,7 +259,7 @@ class Accounts:
         u = self.users().get(name)
         if not u or u.get("disabled"):
             return None
-        return Who(name, u.get("role", "user"), bool(u.get("must_change")))
+        return Who(name, u.get("role", "user"), bool(u.get("must_change")), u.get("id", ""))
 
     def listing(self) -> list[dict]:
         users = self.users()
@@ -242,6 +290,7 @@ class Accounts:
             if name in users:
                 raise AccountError(f"{name} exists already", 409)
             users[name] = {
+                "id": new_id(),
                 "hash": hash_password(password),
                 "role": role,
                 "must_change": bool(must_change),
@@ -386,7 +435,7 @@ class Accounts:
             users[name]["last_login"] = time.time()
             self._write("users.json", users)
         self.audit("login", user=name, ip=ip)
-        return token, Who(name, u.get("role", "user"), bool(u.get("must_change")))
+        return token, Who(name, u.get("role", "user"), bool(u.get("must_change")), u.get("id", ""))
 
     def new_session(self, name: str, ip: str = "", agent: str = "") -> str:
         token = secrets.token_urlsafe(32)
@@ -394,7 +443,14 @@ class Accounts:
         with self.lock:
             sessions = self._read("sessions.json", {}, True)
             sessions = {h: s for h, s in sessions.items() if self._alive(s, now)}
-            sessions[self._hash(token)] = {"user": name, "created": now, "seen": now, "ip": ip, "agent": agent[:120]}
+            sessions[self._hash(token)] = {
+                "user": name,
+                "uid": self.id_of(name),
+                "created": now,
+                "seen": now,
+                "ip": ip,
+                "agent": agent[:120],
+            }
             self._write("sessions.json", sessions)
         return token
 
@@ -416,7 +472,7 @@ class Accounts:
         if not s or not self._alive(s, now):
             return None
         who = self.who(s["user"])
-        if not who:
+        if not who or (s.get("uid") and s["uid"] != who.id):  # an account of the same name, but not the same one
             return None
         if now - self._seen.get(h, 0) > 300:  # the last-seen time is written at most every 5 minutes
             with self.lock:
@@ -452,7 +508,7 @@ class Accounts:
 
     def owner(self, kind: str, key: str) -> str:
         e = self.entry(kind, key)
-        return e.get("owner", "") if e else ""
+        return self.name_of(e.get("owner", "")) if e else ""
 
     def claim(self, kind: str, key: str, owner: str, replace: bool = False) -> None:
         """Records the owner of a new resource (an existing owner is kept unless `replace`)."""
@@ -461,6 +517,9 @@ class Accounts:
             e = acl.setdefault(kind, {}).get(key)
             if e and e.get("owner") and not replace:
                 return
+            owner = self.id_of(owner)  # (given by name or id)
+            if not owner:
+                raise AccountError("no such user", 404)
             acl[kind][key] = {"owner": owner, "users": (e or {}).get("users", []), "all": (e or {}).get("all", False)}
             self._write("acl.json", acl)
 
@@ -487,12 +546,14 @@ class Accounts:
             e = acl.get(kind, {}).get(key)
             if not e:
                 raise AccountError("this resource has no owner yet: an administrator can give it one", 409)
-            names = []
+            names, ids = [], []
             for n in users:
                 n = str(n).strip().lower()
-                if n and n != e["owner"] and n in known and n not in names:
+                uid = known.get(n, {}).get("id", "")
+                if n and uid and uid != e["owner"] and uid not in ids:
                     names.append(n)
-            e["users"], e["all"] = names, bool(everyone)
+                    ids.append(uid)
+            e["users"], e["all"] = ids, bool(everyone)
             self._write("acl.json", acl)
         self.audit("shared", kind=kind, key=key, users=",".join(names), everyone=everyone, by=by)
         return e
@@ -506,9 +567,9 @@ class Accounts:
         e = self.entry(kind, key)
         if not e:
             return None
-        if e.get("owner") == who.name:
+        if who.id and e.get("owner") == who.id:
             return "write"
-        if e.get("all") or who.name in e.get("users", []):
+        if e.get("all") or (who.id and who.id in e.get("users", [])):
             return "read"
         return None
 
@@ -516,13 +577,15 @@ class Accounts:
         out: dict[str, int] = {}
         for items in self._acl().values():
             for e in items.values():
-                if e.get("owner"):
-                    out[e["owner"]] = out.get(e["owner"], 0) + 1
+                name = self.name_of(e.get("owner", ""))
+                if name:
+                    out[name] = out.get(name, 0) + 1
         return out
 
     def transfer(self, source: str, target: str) -> int:
-        """Gives everything `source` owns to `target`; the shares of those resources are kept."""
+        """Gives everything `source` owns to `target` (names or ids); the shares of those resources are kept."""
         n = 0
+        source, target = self.id_of(source) or str(source), self.id_of(target) or str(target)
         with self.lock:
             acl = self._acl(True)
             for items in acl.values():
@@ -539,4 +602,9 @@ class Accounts:
     def tag(self, kind: str, key: str) -> dict:
         """What a list shows next to a resource: its owner and who it is shared with."""
         e = self.entry(kind, key) or {}
-        return {"owner": e.get("owner", ""), "shared_with": e.get("users", []), "shared_all": bool(e.get("all"))}
+        names = {u["id"]: n for n, u in self.users().items() if u.get("id")}
+        return {
+            "owner": names.get(e.get("owner", ""), ""),
+            "shared_with": [names[u] for u in e.get("users", []) if u in names],
+            "shared_all": bool(e.get("all")),
+        }

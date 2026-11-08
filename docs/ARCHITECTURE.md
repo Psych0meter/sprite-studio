@@ -59,8 +59,8 @@ scripts/
 | `$PX_OUTPUT/batch-<tag>/<kind>/<sprite>/` | one sprite of a batch (same layout); `sheet_<kind>.png`, `batch.log` |
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
-| `$PX_OUTPUT/uploads/<user>/`, `picked/<user>/`, `recoloured/<user>/` | what a user sends for a generation, exports as picks, or recolours from a source they only read |
-| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
+| `$PX_OUTPUT/uploads/<id>/`, `picked/<id>/`, `recoloured/<id>/` (`<id>` is the user's id, `U-...`) | what a user sends for a generation, exports as picks, or recolours from a source they only read |
+| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -174,7 +174,16 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
 - **Ownership and sharing** (`acl.json`): three kinds of resource, `model`
   (its id; its LoRA files follow it), `result` (the top folder of
   `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id),
-  each with an `owner`, `users` and `all`. Access is `write` (owner,
+  each with an `owner`, `users` and `all`. **Accounts are identified by an id**
+  (`U-` and 32 hex digits, made when the account is created, in `users.json`;
+  a name starts with a lowercase letter or digit, so it can never be mistaken for
+  one): `owner` and `users` here, the owner of a job, a project or a pick list
+  and the per-user folders all use the id, never the name, so a name given
+  again after a deletion inherits nothing. Names appear only at the edges
+  (the API answers and the pages show names; a session also remembers the id
+  it belongs to). Older state keyed by names is migrated when the app starts
+  (`Accounts.migrate_ids`, `migrate_identities`; a name with no account is
+  dropped). Access is `write` (owner,
   administrators) or `read` (shared); `need()` and `can()` apply it, a
   resource nobody shares answers 404 (it does not exist for that user), a
   read-only one 403. The rule for a request comes from its method (a change
