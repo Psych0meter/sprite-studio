@@ -2345,7 +2345,7 @@ async function modelEditor(main, mid, tab) {
   };
 
   // ---- groups and kinds
-  const cell = (obj, key, opts = {}) => h("input", { type: opts.type || "text", value: obj[key] ?? "", placeholder: opts.ph || "", class: opts.mono ? "mono" : "",
+  const cell = (obj, key, opts = {}) => h("input", { type: opts.type || "text", value: obj[key] ?? "", placeholder: opts.ph || "", class: opts.mono ? "mono" : "", step: opts.step, min: opts.min, max: opts.max,
     style: { minWidth: opts.w || "80px" }, oninput: (e) => { obj[key] = opts.type === "number" ? (e.target.value === "" ? "" : Number(e.target.value)) : e.target.value; dirty = true; } });
   const drawGroups = () => {
     const counts = {};
@@ -2371,7 +2371,7 @@ async function modelEditor(main, mid, tab) {
         h("td", { title: "New sprites: how much of the canvas the longest side takes, 50 to 100 (0: the model's setting)" }, cell(k, "fill", { type: "number", w: "70px", ph: "0" })),
         h("td", {}, h("input", { type: "checkbox", checked: !!k.tile, title: "Opaque tiles (floors, walls) in full colour: no background removal, no colour limit, no outline", onchange: (e) => { k.tile = e.target.checked; dirty = true; } })),
         h("td", { title: "Tiles: a remaster keeps the original's outer pixels, so tiles that join still join (0: none, up to 64)" }, cell(k, "edge", { type: "number", w: "70px", ph: "0" })),
-        h("td", {}, cell(k, "pattern", { mono: true, w: "150px", ph: "^small_" })), h("td", {}, cell(k, "denoise", { type: "number", w: "80px" })),
+        h("td", {}, cell(k, "pattern", { mono: true, w: "150px", ph: "^small_" })), h("td", {}, cell(k, "denoise", { type: "number", w: "80px", step: 0.01, min: 0.3, max: 0.95 })),
         h("td", {}, iconBtn("x", "Remove this kind", () => { m.kinds.splice(i, 1); dirty = true; drawGroups(); }))))));
     body.append(
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Groups"),

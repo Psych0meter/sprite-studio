@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Spinners**: the corner spinner shows above dialogs (it was hidden behind them, so *Train on picks* looked frozen), and any button or select that waits for the server (more than a quarter of a second) is dimmed with its own spinner until it answers, in dialogs and pages alike.
+- **Models**: the *Remaster distance* of a kind moves in steps of 0.01 with the arrows (it jumped by 0.15 or more), and stays between 0.30 and 0.95.
 
 ## [0.3.0] - 2026-11-08
 
