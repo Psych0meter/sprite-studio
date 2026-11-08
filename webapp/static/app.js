@@ -1531,7 +1531,7 @@ routes.train = async (main, parts) => {
     onclick: () => { location.hash = "#/train/" + m.id; } }, m.label))));
   const box = h("div", { class: "stack" });
   main.append(box);
-  const opts = Object.assign({ model: "sd15", epochs: "", dim: "", lr: "1e-4", precision: "auto", repeats: "", src: "" }, store.get("train." + cat, {}));
+  const opts = Object.assign({ model: "sd15", epochs: "", dim: "", lr: "0.0001", precision: "auto", repeats: "", src: "" }, store.get("train." + cat, {}));
   if (opts.precision === "no" && !store.get("precisionChosen", false)) opts.precision = "auto"; // the old default, not a choice
   if (opts.epochs === 12) opts.epochs = "";
   if (opts.dim === 32) opts.dim = "";
@@ -1783,19 +1783,15 @@ routes.train = async (main, parts) => {
   let refreshEstimate = () => {};
   const numField = (label, key, min, max, step, hint, placeholder) => h("div", { class: "field" }, h("label", {}, label),
     h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); if (key === "epochs") refreshEstimate(); } }), h("div", { class: "hint" }, hint));
-  // The learning rate is written the way trainers do (1e-4), whatever the browser's number format: a number input
-  // would show 0,0001 on some locales. Both 1e-4 and 0.0001 (or 0,0001) are accepted and shown as 1e-4.
-  const lrText = (v) => {
-    const n = Number(String(v).trim().replace(",", "."));
-    if (!(n > 0)) return String(v);
-    const [m, e] = n.toExponential(3).replace(/\.?0+e/, "e").split("e");
-    return `${m}e${Number(e)}`;
-  };
+  // The learning rate is shown as a plain decimal in the browser's own format (0,0001 or 0.0001), never as an
+  // exponent. A text input, so what is typed stays as typed; 1e-4, 0.0001 and 0,0001 are all read.
+  const lrNumber = (v) => Number(String(v).trim().replace(",", "."));
+  const lrText = (v) => { const n = lrNumber(v); return n > 0 ? n.toLocaleString(undefined, { maximumFractionDigits: 8, useGrouping: false }) : String(v); };
   const lrField = () => {
-    const input = h("input", { type: "text", inputmode: "decimal", value: lrText(opts.lr), placeholder: "1e-4",
-      oninput: (e) => { opts.lr = String(e.target.value).trim().replace(",", "."); keep(); },
-      onchange: (e) => { const n = Number(opts.lr); if (n > 0 && n <= 0.01) { e.target.value = lrText(n); opts.lr = String(n); keep(); } else { toast("Learning rate: a number such as 1e-4 (between 1e-5 and 1e-3 is usual)", true); } } });
-    return h("div", { class: "field" }, h("label", {}, "Learning rate"), input, h("div", { class: "hint" }, "1e-4 is 0.0001: smaller is slower and safer"));
+    const input = h("input", { type: "text", inputmode: "decimal", value: lrText(opts.lr), placeholder: lrText(0.0001),
+      oninput: (e) => { opts.lr = String(lrNumber(e.target.value) || ""); keep(); },
+      onchange: (e) => { const n = lrNumber(e.target.value); if (n > 0 && n <= 0.01) { e.target.value = lrText(n); opts.lr = String(n); keep(); } else { toast("Learning rate: a small number such as " + lrText(0.0001) + " (between " + lrText(0.00001) + " and " + lrText(0.001) + " is usual)", true); } } });
+    return h("div", { class: "field" }, h("label", {}, "Learning rate"), input, h("div", { class: "hint" }, `${lrText(0.0001)} is a good start: smaller is slower and safer`));
   };
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
