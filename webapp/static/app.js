@@ -29,7 +29,31 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+// A request still running after a moment turns the corner spinner on (quick ones, like the status polls, never show it).
+let pendingCalls = 0, pendingTimer = 0;
+function pendingChange(n) {
+  pendingCalls += n;
+  clearTimeout(pendingTimer);
+  const busy = $("#busy");
+  if (!busy) return;
+  if (pendingCalls > 0) pendingTimer = setTimeout(() => { busy.hidden = false; }, 400);
+  else busy.hidden = true;
+}
+
+/** Marks elements as loading (dimmed, with a spinner over them) while `work` runs, and returns its result. */
+async function busyWhile(els, work) {
+  const list = [].concat(els).filter(Boolean);
+  list.forEach((el) => el.classList.add("is-loading"));
+  try { return await work(); } finally { list.forEach((el) => el.classList.remove("is-loading")); }
+}
+
 async function api(path, opts = {}) {
+  if (opts.quiet) return apiCall(path, opts); // (background looks never turn the spinner on)
+  pendingChange(1);
+  try { return await apiCall(path, opts); } finally { pendingChange(-1); }
+}
+
+async function apiCall(path, opts) {
   const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
   if (opts.body !== undefined) {
     init.body = JSON.stringify(opts.body);
@@ -39,6 +63,7 @@ async function api(path, opts = {}) {
   const text = await r.text();
   let data = text;
   try { data = JSON.parse(text); } catch (_) { /* plain text */ }
+  if (data && typeof data === "object" && (data.login || data.must_change)) { location.reload(); return new Promise(() => {}); } // signed out, or must change the password: the sign-in page
   if (!r.ok) {
     const msg = (data && data.error) || (data && data.detail) || r.statusText;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
@@ -806,7 +831,10 @@ async function route() {
   document.querySelectorAll(".rail a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
   const main = $("#main");
   main.innerHTML = "";
+  main.classList.remove("is-loading");
   const params = new URLSearchParams(query || "");
+  const loading = h("div", { class: "page-loading", role: "status" }, h("span", { class: "spinner" }), " Loading…");
+  const slow = setTimeout(() => main.append(loading), 300);
   try {
     if (!S.catalog) await loadCatalog();
     if (NEEDS_MODEL.includes(name) && !S.catalog.models.length) {
@@ -819,6 +847,9 @@ async function route() {
   } catch (e) {
     main.append(h("div", { class: "note bad" }, e.message));
   }
+  clearTimeout(slow);
+  loading.remove();
+  main.classList.remove("is-loading");
   main.focus({ preventScroll: true });
 }
 window.addEventListener("hashchange", route);
@@ -854,30 +885,15 @@ routes[""] = async (main) => {
   const recent = h("div", { class: "panel" });
   main.append(cards, h("div", { style: { height: "16px" } }), recent);
 
-  // Are ComfyUI and kohya sd-scripts behind their upstream? Only looks (git fetch); updating stays a manual step.
-  let updates = null;
-  let updating = false;
-  const updatesBox = () => {
-    const howTo = { "ComfyUI": "git pull, then pip install -r requirements.txt in its .venv, then restart ComfyUI",
-      "kohya sd-scripts": "git pull, then pip install -r requirements.txt in the training env (lora/venv); no training should be running" };
-    return h("div", { style: { margin: "8px 0 10px" } },
-      h("div", { class: "row", style: { gap: "8px" } },
-        h("button", { class: "btn sm ghost", disabled: updating, title: "Looks at the upstream repositories of ComfyUI and kohya sd-scripts (a git fetch: git's own records are refreshed, nothing is updated or installed). An answer is kept for 15 minutes.",
-          onclick: async () => {
-            updating = true; drawCards();
-            try { updates = await api("/updates" + (updates ? "?force=1" : "")); } catch (err) { toast(String(err.message || err), true); }
-            updating = false; drawCards();
-          } }, updating ? "Checking…" : updates ? "Check again" : "Check for updates"),
-        updates ? h("span", { class: "muted small" }, "checked " + fmtTime(updates.checked)) : null),
-      updates ? updates.items.map((it) => h("div", { class: "small", style: { marginTop: "6px" } },
-        it.ok ? [
-          h("strong", {}, it.name + ": "),
-          it.behind ? h("span", { class: "tag amber" }, `${it.behind} newer commit${it.behind === 1 ? "" : "s"}, latest ${it.latest}`) : h("span", { class: "tag ok" }, "up to date (" + it.current + ")"),
-          it.behind ? h("details", {}, h("summary", { style: { cursor: "pointer" } }, "What is new, and how to update"),
-            h("ul", { class: "small mono", style: { margin: "6px 0 6px 18px", padding: 0 } }, it.commits.map((c) => h("li", {}, c))),
-            h("p", { class: "muted small" }, `Installed ${it.current} on ${it.branch}${it.dirty ? " (with local changes)" : ""}, in ${it.path}. To update: ${howTo[it.name] || "git pull"}.`)) : null,
-        ] : [h("strong", {}, it.name + ": "), h("span", { class: "muted" }, "could not check (" + (it.error || "unknown") + ")")])) : null);
-  };
+  // Are ComfyUI and kohya sd-scripts behind their upstream? The Updates page has the details and the buttons.
+  let behind = null;
+  const updatesBox = () => h("div", { class: "row", style: { gap: "8px", margin: "8px 0 10px" } },
+    h("a", { class: "btn sm ghost", href: "#/updates" }, "Updates"),
+    behind ? h("span", { class: "tag amber" }, `update available: ${behind.join(", ")}`) : null);
+  api("/updates", { quiet: true }).then((u) => {
+    const names = u.items.filter((it) => it.ok && it.behind).map((it) => it.name);
+    if (names.length) { behind = names; drawCards(); }
+  }).catch(() => {});
 
   const drawCards = () => {
     const st = S.status;
@@ -887,11 +903,11 @@ routes[""] = async (main) => {
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "ComfyUI"), h("span", { class: "status " + (c.up ? "done" : "failed") }, c.up ? "running" : "stopped")),
       h("p", { class: "muted small" }, c.up ? `${c.device || "GPU"}, ComfyUI ${c.version || ""}` : "Generation needs it running. Training stops it on its own and starts it again afterwards."),
-      updatesBox(),
-      h("div", { class: "row" },
+      isAdmin() ? updatesBox() : null,
+      isAdmin() ? h("div", { class: "row" },
         c.up ? h("button", { class: "btn sm", onclick: () => attempt(() => api("/comfy/restart", { body: {} }), "Restarting ComfyUI") }, "Restart")
           : h("button", { class: "btn sm primary", onclick: () => attempt(() => api("/comfy/start", { body: {} }), "Starting ComfyUI") }, "Start"),
-        c.up ? h("button", { class: "btn sm ghost", onclick: () => attempt(() => api("/comfy/stop", { body: {} }), "Stopping ComfyUI") }, "Stop") : null)));
+        c.up ? h("button", { class: "btn sm ghost", onclick: () => attempt(() => api("/comfy/stop", { body: {} }), "Stopping ComfyUI") }, "Stop") : null) : null));
     const run = st.running;
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "Working on"), h("a", { href: "#/jobs", class: "small" }, "All jobs")),
@@ -970,7 +986,7 @@ routes.generate = async (main, _parts, params) => {
 
     form.append(h("div", { class: "field" }, h("span", { class: "label" }, "Model"),
       h("div", { class: "chips" }, visibleModels().map((x) => h("button", { type: "button", class: "chip" + (x.id === f.model ? " on" : ""),
-        onclick: async () => { f.model = x.id; f.init = ""; f.lora = ""; fixChoices(); remember(); await loadSprites(); draw(); drawSide(); } }, x.label)))),
+        onclick: async () => { f.model = x.id; f.init = ""; f.lora = ""; fixChoices(); remember(); await busyWhile([form, side], loadSprites); draw(); drawSide(); } }, x.label)))),
       loraNote(m, f.lora));
     form.append(h("div", { class: "inline-fields", style: { marginTop: "14px" } },
       h("div", { class: "field" }, h("label", { for: "f-group" }, "Group"),
@@ -1240,7 +1256,10 @@ routes.results = async (main, _parts, params) => {
             h("div", { class: "s" }, i.type === "batch" ? h("span", { class: "tag amber" }, "batch") : i.type === "matrix" ? h("span", { class: "tag" }, "LoRA test") : null,
               i.empty ? [" ", h("span", { class: "tag bad", title: "Nothing was rendered: see the job's log on the Jobs page" }, "empty")] : null,
               i.busy ? [" ", h("span", { class: "tag" }, "running")] : null,
-              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)))));
+              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
+            ownerBadge(i) || i.access === "write" ? h("div", { class: "row", style: { gap: "6px", marginTop: "3px" } }, ownerBadge(i),
+              i.access === "write" ? h("button", { class: "btn sm ghost", type: "button", style: { padding: "0 6px", minHeight: "20px" },
+                onclick: (e) => { e.stopPropagation(); shareDialog("result", i.path.split("/").pop(), i.title, async () => { items = await api("/results"); drawItems(); }); } }, "Share") : null) : null)));
       }
     };
     drawItems();
@@ -1420,7 +1439,7 @@ async function picksToModel() {
       h("div", { class: "field", style: { marginTop: "14px" } }, seg([{ id: "existing", label: "Existing model" }, { id: "new", label: "New model" }].filter((o) => o.id === "new" || models.length), f.mode,
         async (v) => { f.mode = v; await loadDetail(); draw(); })),
       f.mode === "existing"
-        ? h("div", { class: "field" }, h("label", {}, "Model"), h("select", { onchange: async (e) => { f.model = e.target.value; await loadDetail(); draw(); } }, models.map((x) => opt(x.id, x.label || x.id, f.model))))
+        ? h("div", { class: "field" }, h("label", {}, "Model"), h("select", { onchange: async (e) => { f.model = e.target.value; await busyWhile(box, loadDetail); draw(); } }, models.map((x) => opt(x.id, x.label || x.id, f.model))))
         : [h("div", { class: "field" }, h("label", {}, "Name"), h("input", { type: "text", value: f.label, placeholder: "e.g. Boss ships", oninput: (e) => { f.label = e.target.value; } })),
           h("div", { class: "field" }, h("label", {}, "Trigger word (optional)"), h("input", { type: "text", value: f.trigger, class: "mono", placeholder: "made from the name", oninput: (e) => { f.trigger = e.target.value; } }),
             h("div", { class: "hint" }, "One group, \"Main\", holds the sprites; describe it in the model afterwards."))],
@@ -1896,7 +1915,7 @@ routes.loras = async (main) => {
   form.append(
     h("div", { class: "field" }, h("span", { class: "label" }, "Model"),
       h("div", { class: "chips" }, visibleModels().map((x) => h("button", { type: "button", class: "chip" + (x.id === m.model ? " on" : ""),
-        onclick: () => { m.model = x.id; m.loras = []; keep(); route(); } }, x.label)))),
+        onclick: () => { m.model = x.id; m.loras = []; keep(); $("#main").classList.add("is-loading"); route(); } }, x.label)))),
     h("div", { class: "field" }, h("span", { class: "label" }, `Its LoRA files (${model.trigger}…)`),
       loras.length ? loras.map((l) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: m.loras.includes(l.name),
         onchange: (e) => { m.loras = e.target.checked ? [...m.loras, l.name] : m.loras.filter((x) => x !== l.name); keep(); } }), h("span", { class: "mono" }, l.name)))
@@ -1965,7 +1984,7 @@ routes.lorafiles = async (main) => {
     const total = files.reduce((n, f) => n + f.size, 0);
     const act = async (fn, msg) => { if (await attempt(fn, msg)) { await loadCatalog(); load(); } };
     body.append(h("div", { class: "row", style: { marginBottom: "12px", gap: "10px", flexWrap: "wrap" } },
-      h("select", { "aria-label": "Model", style: { width: "auto" }, onchange: (e) => { state.model = e.target.value; keep(); load(); } },
+      h("select", { "aria-label": "Model", style: { width: "auto" }, onchange: (e) => { state.model = e.target.value; keep(); busyWhile($("#main"), load); } },
         h("option", { value: "" }, "All models"),
         models.map(([id, label]) => h("option", { value: id, selected: id === state.model }, label)),
         files.some((f) => !f.model) ? h("option", { value: "-", selected: state.model === "-" }, "No model") : null),
@@ -2045,7 +2064,8 @@ routes.models = async (main, parts) => {
       h("div", { class: "row between" }, h("h2", { style: { margin: 0 } }, m.label), h("span", { class: "tag mono" }, m.trigger)),
       h("p", { class: "small muted", style: { margin: "8px 0 0" } }, `${m.sprites} sprites, ${m.groups.length} group${m.groups.length === 1 ? "" : "s"}`,
         m.kinds.length ? `, ${m.kinds.length} kinds` : ""),
-      h("p", { class: "small", style: { margin: "6px 0 0", color: "var(--muted)" } }, m.groups.map((g) => g.label).join(", "))))));
+      h("p", { class: "small", style: { margin: "6px 0 0", color: "var(--muted)" } }, m.groups.map((g) => g.label).join(", ")),
+      ownerBadge(m) ? h("p", { style: { margin: "8px 0 0" } }, ownerBadge(m)) : null))));
   }
 
   // new model
@@ -2171,8 +2191,10 @@ async function modelEditor(main, mid, tab) {
   main.append(headEl, body);
   const drawHead = () => {
     headEl.innerHTML = "";
-    headEl.append(head(m.label, null, h("a", { class: "btn ghost", href: "#/models" }, "All models"),
-      h("a", { class: "btn", href: "#/train/" + mid }, "Train it"), h("a", { class: "btn", href: "#/generate?model=" + mid }, "Generate")));
+    headEl.append(head(m.label, null, ownerBadge(d), shareButton("model", mid, d, m.label, async () => { await reload(); draw(); }),
+      h("a", { class: "btn ghost", href: "#/models" }, "All models"),
+      d.access === "read" ? null : h("a", { class: "btn", href: "#/train/" + mid }, "Train it"), h("a", { class: "btn", href: "#/generate?model=" + mid }, "Generate")));
+    if (d.access === "read") headEl.append(h("div", { class: "note warn", style: { marginBottom: "12px" } }, `${d.owner} shares this model with you to use: generate with it and look at its sprites. To change it, ask ${d.owner}, or make your own copy from Models → New model → A copy of a model.`));
     headEl.append(h("div", { class: "row", style: { marginBottom: "16px" } },
       seg(tabs.map(([id, label]) => ({ id, label })), tab, (t) => { history.replaceState(null, "", `#/models/${mid}/${t}`); tab = t; draw(); }),
       d.saved ? null : h("span", { class: "tag amber" }, "built-in defaults: saved on the first change")));
@@ -2183,7 +2205,7 @@ async function modelEditor(main, mid, tab) {
     if (r) { await reload(); draw(); }
     return r;
   };
-  const saveBar = () => h("div", { class: "row", style: { marginTop: "16px" } },
+  const saveBar = () => d.access === "read" ? null : h("div", { class: "row", style: { marginTop: "16px" } },
     h("button", { class: "btn primary", onclick: () => save() }, "Save"),
     h("button", { class: "btn ghost", onclick: async () => { await reload(); draw(); } }, "Discard changes"),
     h("span", { class: "hint" }, "Saved changes apply to the next training set you build, and to generation at once."));
@@ -2209,7 +2231,7 @@ async function modelEditor(main, mid, tab) {
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
     drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files].filter((f) => /\.(png|zip)$/i.test(f.name))); });
     const imp = { root: "game", glob: "", prefix: "", group: "" };
-    const add = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Add sprites"),
+    const add = h("div", { class: "panel", hidden: d.access === "read" }, h("div", { class: "panel-head" }, h("h2", {}, "Add sprites"),
       m.imports.length ? h("button", { class: "btn", onclick: async () => {
         const r = await attempt(() => api(`/models/${mid}/import`, { body: {} }));
         if (r) { toast(r.imported.length ? `${r.imported.length} sprites imported` : "Nothing new to import"); await reload(); draw(); }
@@ -2472,10 +2494,10 @@ async function modelEditor(main, mid, tab) {
             if (!(await askConfirm("Replace this model's groups, kinds, words and settings with the template's ones? Its sprites stay.", { title: "Use the template's settings", ok: "Replace" }))) return;
             if (await attempt(() => api(`/models/${mid}/reset`, { body: {} }), "Built-in settings restored")) { await reload(); draw(); }
           } }, "Use the template's settings")) : null,
-        h("div", { class: "panel" }, h("h2", {}, "Share"),
+        h("div", { class: "panel" }, h("h2", {}, "Export"),
           h("p", { class: "small muted" }, "A file with this model's groups, kinds, words and settings (no sprites), to import on another machine or as a template for another game (Models → Import a model file)."),
           h("a", { class: "btn", href: `/api/models/${mid}/export`, download: `${mid}.json` }, "Export the model")),
-        h("div", { class: "panel" }, h("h2", {}, "Folder"), h("p", { class: "small mono muted" }, d.dir),
+        h("div", { class: "panel", hidden: d.access === "read" }, h("h2", {}, "Folder"), d.dir ? h("p", { class: "small mono muted" }, d.dir) : null,
           h("button", { class: "btn danger", onclick: async () => {
             if (!(await askConfirm(`Delete the model ${m.label}? Its folder (sprites, training sets, checkpoints) is moved to .deleted, not erased.`, { danger: true, ok: "Delete", title: "Delete the model" }))) return;
             const r = await attempt(() => api("/models/" + mid, { method: "DELETE" }), "Model deleted");
@@ -2535,7 +2557,8 @@ routes.palettes = async (main, parts) => {
     h("div", { style: { minWidth: 0, flex: 1 } }, h("div", { class: "t" }, p.label),
       swatchStrip(p.colours, p.tune),
       h("div", { class: "s" }, `${p.colours.length} colours, ${({ tune: "tuning only", snap: "snap", match: "match light, snap" })[p.mode]}`,
-        p.used_by.length ? `, used by ${p.used_by.length} group${p.used_by.length === 1 ? "" : "s"}` : ""))))),
+        p.used_by.length ? `, used by ${p.used_by.length} group${p.used_by.length === 1 ? "" : "s"}` : ""),
+      ownerBadge(p))))),
     h("button", { class: "btn sm ghost", style: { marginTop: "10px" }, onclick: () => newEmpty() }, "Start an empty one"));
   };
 
@@ -2808,8 +2831,14 @@ routes.palettes = async (main, parts) => {
         h("div", { class: "panel-head" }, h("div", {},
           h("input", { type: "text", value: edit.label, style: { fontSize: "18px", fontWeight: 600, minWidth: "260px" }, oninput: (e) => { edit.label = e.target.value; dirty = true; saveBtn.disabled = false; } }),
           h("div", { class: "small muted", style: { marginTop: "4px" } }, h("span", { class: "mono" }, edit.id), edit.source ? " · " + edit.source : "")),
-        h("div", { class: "row" }, saveBtn,
-          h("button", { class: "btn ghost danger", onclick: async () => {
+        h("div", { class: "row" }, ownerBadge(p), shareButton("palette", p.id, p, p.label, async () => { await loadPalettes(); drawList(); drawEditor(); }),
+          p.access === "read" ? h("button", { class: "btn", title: "It is shared with you to use. Make a copy of your own to change it.", onclick: async () => {
+            let id = (p.id + "_" + ME.username).replace(/[^a-z0-9_]/g, "_").slice(0, 60), k = 2;
+            while (S.palettes.some((x) => x.id === id)) id = `${p.id}_${ME.username}_${k++}`.replace(/[^a-z0-9_]/g, "_").slice(0, 60);
+            const r = await attempt(() => api("/palettes/" + id, { method: "PUT", body: Object.assign({}, edit, { id }) }), "Copy made");
+            if (r) { current = id; dirty = false; await loadPalettes(); drawList(); drawEditor(); }
+          } }, "Make my own copy") : saveBtn,
+          p.access === "read" ? null : h("button", { class: "btn ghost danger", onclick: async () => {
             if (!(await askConfirm(`Delete the palette ${p.label}?` + (p.used_by.length ? ` The groups using it (${p.used_by.join(", ")}) go back to no palette.` : ""), { danger: true, ok: "Delete", title: "Delete the palette" }))) return;
             if (await attempt(() => api("/palettes/" + p.id, { method: "DELETE" }), "Palette deleted")) { current = ""; dirty = false; await loadPalettes(); await loadCatalog(); current = (S.palettes[0] || {}).id || ""; drawList(); drawEditor(); }
           } }, "Delete"))),
@@ -2857,13 +2886,13 @@ routes.jobs = async (main, parts) => {
     if (!jobs.length) { box.append(h("div", { class: "empty" }, "No jobs yet.")); return; }
     const pg = pageOf(jobs, paging);
     box.append(h("table", {}, h("thead", {}, h("tr", {}, ["Job", "Status", "Progress", "Started", "Took", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, pg.rows.map((j) => h("tr", { class: "clickable", onclick: () => { location.hash = "#/jobs/" + j.id; } },
-        h("td", {}, j.title, h("div", { class: "faint small" }, j.kind)),
+      h("tbody", {}, pg.rows.map((j) => h("tr", { class: j.foreign ? "" : "clickable", onclick: () => { if (!j.foreign) location.hash = "#/jobs/" + j.id; } },
+        h("td", {}, j.foreign ? h("span", { class: "muted" }, j.title) : j.title, h("div", { class: "faint small" }, j.kind, j.owner && (isAdmin() || j.foreign) ? " · " + j.owner : "")),
         h("td", {}, statusLabel(j)),
         h("td", { style: { width: "220px" } }, j.status === "running" ? [progressBar(j), h("div", { class: "small muted" }, (j.progress && j.progress.text) || "")] : null),
         h("td", { class: "small muted nowrap" }, fmtTime(j.started || j.created)),
         h("td", { class: "small muted nowrap" }, j.started ? fmtDur((j.ended || Date.now() / 1000) - j.started) : ""),
-        h("td", { class: "nowrap" }, ["running", "queued"].includes(j.status)
+        h("td", { class: "nowrap" }, j.foreign ? null : ["running", "queued"].includes(j.status)
           ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(() => loop.poll({ force: true })); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
             ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(() => loop.poll({ force: true })); } }, "Run again") : null))))));
@@ -2961,6 +2990,41 @@ routes.settings = async (main) => {
 
 // ---------------------------------------------------------------- start
 
+routes.users = (main) => usersPage(main);
+
+routes.updates = async (main) => {
+  if (!isAdmin()) { main.append(h("div", { class: "note bad" }, "Only an administrator updates ComfyUI and kohya sd-scripts.")); return; }
+  const box = h("div", { class: "stack" });
+  const note = h("p", { class: "muted small" });
+  main.append(head("Updates", "ComfyUI and kohya sd-scripts, compared with their upstream repositories. Checking only reads (a git fetch); updating pulls the new code and its Python packages, never touches your models, LoRAs or results."),
+    h("div", { class: "row", style: { marginBottom: "12px" } }, h("button", { class: "btn", type: "button", id: "recheck" }, "Check again"), note), box);
+  const targets = { "ComfyUI": "comfyui", "kohya sd-scripts": "sd-scripts" };
+  let data = null, checking = false;
+  const draw = () => {
+    note.textContent = checking ? "Checking…" : data ? "Checked " + fmtTime(data.checked) : "";
+    box.replaceChildren(...(data ? data.items.map((it) => h("div", { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, it.name),
+        it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.behind} newer commit${it.behind === 1 ? "" : "s"}`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
+      it.ok ? [
+        h("p", { class: "small" }, `Installed ${it.current} on ${it.branch}`, it.behind ? `, latest ${it.latest}` : "", h("span", { class: "muted mono" }, "  " + it.path)),
+        it.behind ? h("ul", { class: "small mono", style: { margin: "6px 0 10px 18px", padding: 0 } }, it.commits.map((c) => h("li", {}, c))) : null,
+        it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, git pull, git stash pop), or the update refuses.") : null,
+        it.behind ? h("button", { class: "btn primary", type: "button", disabled: it.dirty, onclick: async () => {
+          const extra = it.name === "ComfyUI" ? " ComfyUI restarts at the end." : " No training should be running.";
+          if (!(await askConfirm(`Update ${it.name} from ${it.current} to ${it.latest}?${extra} It runs as a job: you can follow it in Jobs.`, { ok: "Update", title: "Update " + it.name }))) return;
+          const job = await attempt(() => api("/updates/apply", { body: { target: targets[it.name] } }), "Update started");
+          if (job) location.hash = "#/jobs/" + job.id;
+        } }, "Update now") : null,
+      ] : h("p", { class: "muted small" }, it.error || "unknown error"))) : []));
+  };
+  const check = async (force) => {
+    checking = true; draw();
+    try { data = await api("/updates" + (force ? "?force=1" : "")); } catch (e) { toast(String(e.message || e), true); }
+    checking = false; draw();
+  };
+  $("#recheck").addEventListener("click", () => check(true));
+  await check(true);
+};
+
 setTray(S.tray);
-statusLoop.poll();
-route();
+loadMe().catch(() => {}).finally(() => { statusLoop.poll(); route(); });

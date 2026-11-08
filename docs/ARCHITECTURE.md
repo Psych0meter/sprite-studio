@@ -59,7 +59,8 @@ scripts/
 | `$PX_OUTPUT/batch-<tag>/<kind>/<sprite>/` | one sprite of a batch (same layout); `sheet_<kind>.png`, `batch.log` |
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
-| `$SG_WEB_STATE/` | `settings.json`, `jobs.json`, `logs/`, `picks.json`, `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
+| `$PX_OUTPUT/uploads/<user>/`, `picked/<user>/`, `recoloured/<user>/` | what a user sends for a generation, exports as picks, or recolours from a source they only read |
+| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -153,6 +154,42 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
 
 ## 7. Web app
 
+- **Accounts** (`accounts.py`, `auth_routes.py`; `users_cli.py` on the machine).
+  Passwords are hashed with scrypt (a random salt each, parameters kept
+  with the hash so they can change; 10 to 128 characters; a name or the
+  current password is refused). A sign-in makes a random 256-bit token kept
+  in the browser as the `sg_session` cookie (`HttpOnly`, `SameSite=Lax`,
+  `Secure` over HTTPS or behind `X-Forwarded-Proto: https`) and, in
+  `sessions.json`, only as its SHA-256; a session lasts a week and also ends
+  with a password change, a reset, a disabled account or a removal. Wrong
+  passwords are counted per user and per address: after 8 a lock of
+  5 minutes, growing, whatever the password; an unknown user costs the same
+  time as a known one. The sign-in page and the first-administrator setup
+  (the one-time code of `setup_code`) are the only open routes. A user who
+  must change the password may only use `/api/auth/*` until they have; the
+  administrator-only routes (`ADMIN_ONLY` in `app.py`: settings, ComfyUI
+  control, updates, SDXL download, users) answer 403 to anyone else; the
+  last administrator cannot be removed, demoted or disabled. `auth.log` has
+  one line for each sign-in, refusal, password change and account change.
+- **Ownership and sharing** (`acl.json`): three kinds of resource, `model`
+  (its id; its LoRA files follow it), `result` (the top folder of
+  `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id),
+  each with an `owner`, `users` and `all`. Access is `write` (owner,
+  administrators) or `read` (shared); `need()` and `can()` apply it, a
+  resource nobody shares answers 404 (it does not exist for that user), a
+  read-only one 403. The rule for a request comes from its method (a change
+  needs `write`) unless the route says otherwise: the routes that only *use*
+  a model, palette or result (generate, batch, comparison, palette apply,
+  extract, autotune, clean-up preview) pass `write=False`. Paths from the
+  browser go through `safe_path`, which also applies the rules to the folder
+  they point into. Projects are labels each user keeps for their own models
+  (`projects.json` entries carry the owner); jobs carry an `owner`, and
+  `Jobs.view()` shows another user's job as a bare "another user's job" so
+  the queue still tells the GPU is busy. Work done by the app itself (a job
+  finishing, the start-up migration) has no signed-in user and is trusted.
+  The first account takes everything that exists then (`adopt_existing`).
+  A model's id and trigger word stay unique across users (their files would
+  collide), so a new id that is taken is refused, with no word on whose it is.
 - **Jobs**: a queue with two lanes. The GPU lane runs one job at a time
   (generation, batches, comparisons, training); the CPU lane runs at once
   (training sets, setup). Jobs are processes in their own group (cancel
@@ -164,7 +201,12 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
   never pulls or installs (the fetch refreshes git's own remote records only).
   The answer is cached for 15 minutes (`?force=1` looks again) and one check
-  runs at a time.
+  runs at a time. `POST /api/updates/apply` (`{"target": "comfyui"|"sd-scripts"}`,
+  administrators only) submits a CPU-lane `update` job running
+  `scripts/pxupdate.sh`: it refuses modified tracked files, does
+  `git pull --ff-only`, installs the requirements in the checkout's venv and
+  restarts the ComfyUI service (the sudoers rule of `install.sh` allows it).
+  409 while a GPU job or another update runs.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.
@@ -190,7 +232,7 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   16 million pixels; `/api/file` serves text files up to 10 MB. At most
   `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429). The
   logs of jobs that fell off the 300 kept are deleted after a day.
-- **Front end**: `app.js` and `palette.js`, a small `h()` element helper, one route
+- **Front end**: `app.js`, `accounts.js` (the account menu, Users page, Share dialog) and `palette.js`, a small `h()` element helper, one route
   function per page, in-app dialogs (`askText`, `askConfirm`); no global
   build or framework.
 - **Live views**: every view that keeps itself up to date (the status bar,

@@ -7,9 +7,12 @@
 # scipy come from the system packages, python3-numpy python3-pil
 # python3-scipy).
 #
-# Settings: SG_WEB_PORT (8189), SG_WEB_HOST (127.0.0.1: this machine only;
-# the service installed by install.sh listens on 0.0.0.0 only with a password), SG_WEB_PASSWORD
-# (empty: no password; set one if the app is reachable by anyone else), and
+# Everyone signs in with an account. With none yet, the first start prints a one-time setup code that
+# creates the administrator on the sign-in page (more users: the Users page; lost password:
+# python3 users_cli.py reset <name>).
+#
+# Settings: SG_WEB_PORT (8189), SG_WEB_HOST (127.0.0.1: this machine only; the service installed by
+# install.sh listens on 0.0.0.0), SG_WEB_STATE (accounts and app state), and
 # SG_DATA, PX_INPUT, PX_GAME, PX_OUTPUT, PX_COMFY_URL, COMFY,
 # PX_LORA_HOME (the Settings page overrides them).
 #

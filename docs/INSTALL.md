@@ -171,22 +171,29 @@ results and settings are not touched.
 - Scripts: `~spritegen/spritegen/scripts`, in that user's `PATH`
   (`su - spritegen`)
 
-Anyone who can reach the app's port can start jobs, change settings and
-delete files, so the service **listens on the network only with a password**.
-`install.sh` writes `SG_WEB_HOST=0.0.0.0` when it is given one:
+Everyone signs in with an account. The first time the app starts with no
+account, it prints a one-time **setup code** in its log
+(`journalctl -u spritegen-web`; also the file `setup_code` in the state
+folder). Open the page, enter the code and choose the administrator's name and
+password. What existed before (models, results, palettes, projects, jobs)
+becomes the administrator's. The administrator adds the other users on the
+**Users** page: each user has a space of their own, and can share what they
+own with chosen users or with everyone (see [GUIDE.md](GUIDE.md)).
 
-```bash
-sudo SG_WEB_PASSWORD='a long phrase' scripts/install.sh
-```
-
-Without a password the service stays on the machine itself (`127.0.0.1`), and
-the app refuses to start on another address with no password. On a network
-you fully trust, `sudo SG_WEB_ALLOW_OPEN=1 scripts/install.sh` opens it
-anyway. An installation made before this rule, open and without a password,
-stays reachable (it gets `SG_WEB_ALLOW_OPEN=1` and a warning): set a password
-to close it. A password added by hand to the unit
-(`Environment=SG_WEB_PASSWORD=...` in `/etc/systemd/system/spritegen-web.service`,
-then `systemctl daemon-reload && systemctl restart spritegen-web`) is kept.
+- The service listens on every address (`SG_WEB_HOST=0.0.0.0`); give it
+  `SG_WEB_HOST=127.0.0.1` in its unit to keep it behind a reverse proxy.
+- Passwords travel as typed: on anything but a network you fully trust, put a
+  reverse proxy with HTTPS in front (the session cookie is then marked
+  `Secure` from the proxy's `X-Forwarded-Proto: https`; if the proxy changes
+  the `Host`, list the public name in `SG_ALLOWED_ORIGINS`).
+- Lost the administrator's password: on the machine, as the service's user,
+  `python3 ~/spritegen/webapp/users_cli.py reset <name>` (it also lists, adds,
+  disables users, and prints the setup code).
+- `SG_WEB_PASSWORD` and `SG_WEB_ALLOW_OPEN` are gone: the app ignores the
+  first (it says so at start) and `install.sh` removes both from the unit.
+- The accounts are `users.json`, `sessions.json` and `acl.json` in the state
+  folder, readable by the service's user only; `auth.log` records sign-ins,
+  refusals and changes to accounts.
 
 **SDXL** is optional: the Train page downloads it (about 7 GB) when you
 choose it, or `MODEL=sdxl train_lora.sh setup` as the user.
@@ -204,12 +211,10 @@ variables give the defaults (the service sets the data folders):
 | `PX_LORA_HOME` | `~/lora` | models, training, palettes |
 | `COMFY` | `~/ComfyUI` | ComfyUI's folder |
 | `PX_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI's API |
-| `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `127.0.0.1` | the app's address (a plain run listens on this machine only; the service made by `install.sh` listens on `0.0.0.0` only with a password, see above; a host, port or password added to its unit is kept) |
-| `SG_WEB_ALLOW_OPEN` | none | `1`: allow listening on another address than this machine with no password (the app refuses otherwise) |
-| `SG_WEB_PASSWORD` | none | ask for a password |
+| `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `127.0.0.1` | the app's address (a plain run listens on this machine only; the service made by `install.sh` listens on `0.0.0.0`; a port or host added to its unit is kept) |
 | `SG_ALLOWED_ORIGINS` | none | extra host names allowed to send changes (behind a reverse proxy that changes the `Host`) |
 | `SG_MAX_UPLOAD_MB`, `SG_MAX_ZIP_MB`, `SG_MAX_QUEUED` | `300`, `250`, `100` | the largest request (counted as it is read, whatever its headers say), the most a zip of sprites may hold once unpacked, and how many jobs may wait for the GPU |
-| `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: jobs, logs, settings, picks |
+| `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: accounts, jobs, logs, settings, picks |
 | `PX_SOURCES` | none | more source folders, as JSON: `{"tiles": "/mnt/x/tiles"}` (the Settings page has a field for the same purpose) |
 | `SG_SCRIPTS` | `scripts/` next to the app | where the app finds `pxmodel.py` and the other scripts |
 

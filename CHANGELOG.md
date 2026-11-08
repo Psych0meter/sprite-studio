@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Accounts**: the app asks everyone to sign in. The first start prints a one-time setup code that creates the administrator on the sign-in page; what existed before (models, results, palettes, projects, jobs, picks) becomes theirs. Passwords are hashed (scrypt, 10 characters or more), sessions are a `HttpOnly` cookie, wrong passwords lock the account for a few minutes, and `auth.log` records sign-ins and changes.
+- **Users**: administrators add, disable, remove and make administrators of users on a new Users page, reset a password or require a change at the next sign-in, and give the resources of a removed user to someone else. Users change their own password from the menu on the left. `webapp/users_cli.py` does the same from the machine (and recovers a lost administrator password).
+- **Own space**: each user's models (with their LoRAs), results (with bin and picks), palettes, projects, jobs and logs are private; administrators see everything, with who owns it.
+- **Sharing**: a *Share* button on models, results and palettes gives chosen users, or everyone, read-only use: generate with a shared model, apply a shared palette, look at a shared result, copy a shared model or palette. Only the owner (or an administrator) changes or deletes it.
+
 - **Results**: *Train on picks…* copies the starred sprites into a new model, or an existing one, as training sprites (all in one group and kind if you choose, named after their pick name, never overwriting a sprite the model has), and opens the model.
 - **Updates**: *Check for updates* on the Overview's ComfyUI card looks at the upstream repositories of ComfyUI and kohya sd-scripts (a git fetch, nothing is changed) and lists the newer commits and how to update.
 - **Preview prompts**: *Auto-fix* proposes to put the trigger word first in every prompt that does not start with it (a stale or mistyped first word is replaced), showing each old and new start before changing anything.
@@ -31,9 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Rename** and **Delete** manage them (several at once), **Compare** opens
   Compare LoRAs with the ticked files.
 - **Menu**: the version of the app is shown at the bottom of the left menu.
+- **Updates**: an administrator page (*Updates* in the menu, also linked from the Overview) shows what is new upstream for ComfyUI and kohya sd-scripts and has an *Update now* button: a fast-forward `git pull`, the Python requirements, and a ComfyUI restart, as a job with a log. It waits for an idle GPU and refuses a checkout with local changes (`scripts/pxupdate.sh`).
+- **Spinners**: a small spinner appears while the app waits for the server (after 0.4 s), pages show a loading note, and the thing you changed (a model chip in Generate, a select in Train or Compare) is dimmed until its data arrives.
 
 ### Changed
 
+- **Settings, ComfyUI controls, updates**: reserved for administrators; the source folders stay shared and read-only. The Results folder's `picked/`, `uploads/` and recoloured sprites are kept in a folder per user.
+- **Install** (**breaking**: nobody can use the app until the administrator is created with the setup code; the old password is not carried over): the service listens on the network (an account is needed for everything); `SG_WEB_PASSWORD` and `SG_WEB_ALLOW_OPEN` are no longer used (the app says so at start, `install.sh` drops them). Passwords travel in clear text over plain HTTP: put an HTTPS reverse proxy in front outside a trusted network.
 - **Live updates**: the status bar, job panels, Jobs, a job's log, Results and Train now share one refresh mechanism. Each one asks the server only while something can change, rebuilds only what changed, pauses while the tab is hidden, never sends overlapping requests and retries after an error. The Jobs list also notices jobs started from elsewhere (every 15 s when idle).
 - **Train page**: it no longer rebuilds itself every few seconds while a job runs. Progress bars update in place, from the status the app already polls; the server is asked again every 20 s while training (4 s while previews render) and the page is rebuilt only when something it shows changed: a new checkpoint or preview image, a job starting or ending. Nothing is polled while the tab is hidden.
 - **LoRA files**: click a column header to sort by it (click again to reverse).
@@ -59,12 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Users**: you can no longer remove or disable your own account (the buttons are hidden on your row and the server refuses).
+- **Results**: the list of results is faster with many shared items (the access list is read once per change, not once per request).
 - **Train on picks**: a refused request (an unknown group or kind, an invalid model) no longer leaves a new model behind, and only the picks that really became sprites lose their star.
 - **Updates**: the check is kept for 15 minutes, only one runs at a time, and a checkout with no upstream branch says so. *Check again* looks again at once.
 
 ### Security
 
-- **Installation**: the service made by `install.sh` listens on the network only with a password (`sudo SG_WEB_PASSWORD=... scripts/install.sh`); without one it stays on `127.0.0.1`. The app itself refuses to start on another address with no password, unless `SG_WEB_ALLOW_OPEN=1` says the network is trusted. **Breaking for open installations**: one made before this rule, reachable with no password, is kept reachable (it gets `SG_WEB_ALLOW_OPEN=1` and a warning); set a password to close it.
+- **Sign-in**: the single shared password (HTTP Basic) is replaced by accounts with per-user sessions, hashed passwords, lockout after wrong attempts, an administrator role, and ownership checks on every model, result, palette, LoRA file, pick and job (404 for what is not yours, 403 for what is only shared with you).
 - **Request size**: the limit on a request body is enforced on the bytes really read, so a missing or false `Content-Length` no longer gets round it; an uploaded file's size is also checked before its base64 is decoded.
 - **Zip import**: at most 250 MB unpacked by default (was 1 GB), `SG_MAX_ZIP_MB` changes it.
 - **Image analysis**: `/api/info` reads an image's size first and refuses more than 16 million pixels, and counts colours with far less memory; `/api/file` refuses text files over 10 MB.

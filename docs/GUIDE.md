@@ -435,9 +435,39 @@ a batch. The preview is computed exactly as generation will do it.
 | Training precision | Automatic: bf16 on RTX 30 and newer, fp16 on RTX 20, full precision on older cards; SDXL always in half precision |
 | ComfyUI during training | stopped on cards under 15 GB (Settings: auto, always, never) |
 | Time estimates | measured from your own jobs that finished without error (failed, cancelled and partly failed ones are ignored) |
-| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only); updating stays a manual `git pull` |
+| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only). Administrators update from the **Updates** page (*Update now*: `git pull --ff-only`, requirements, ComfyUI restart; it waits for an idle GPU and refuses local changes) |
 
-## 9. Troubleshooting
+## 9. Accounts and sharing
+
+Everyone signs in (the sign-in page; the administrator creates the first
+account with the one-time setup code, see INSTALL.md section 5).
+
+- **Your own space.** Your models, their LoRAs, your results (with the bin and
+  your picks), palettes, projects, jobs and logs are yours: other users do not
+  see them. Shared things (below) and the source folders are the exceptions.
+  The GPU queue shows that it is busy, and whose job waits, but not what
+  somebody else is making.
+- **Your password.** *Password* in the menu on the left changes it (at least
+  10 characters; it signs you out everywhere else). After several wrong
+  attempts the account waits a few minutes before it accepts another.
+- **Sharing.** *Share* (a model's page, a result's row in Results, a palette)
+  lets you choose users, or everyone with an account. Whoever it is shared with
+  can **use** it: generate or run a batch with a shared model (its LoRA comes
+  with it), apply a shared palette, look at a shared result, copy a shared
+  model into one of their own (*New model → A copy of a model*), or make their
+  own copy of a shared palette. They cannot change, train, rename or delete it,
+  and a tag says who owns it. Anything a shared model makes belongs to the one
+  who ran it.
+- **Administrators** see everything, with its owner, can give a resource to
+  another user (the *owner* in the sharing request), and alone use Settings,
+  the ComfyUI controls and the update check on Overview, and the **Users**
+  page: add a user (with a first password and *must change it at the first
+  sign-in*), reset a password (the user is signed out and chooses a new one),
+  require a change, make or unmake an administrator, disable, and remove (their
+  resources go to the user you choose, nothing is deleted). The last
+  administrator cannot be removed, demoted or disabled.
+
+## 10. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -452,8 +482,10 @@ a batch. The preview is computed exactly as generation will do it.
 | highlights at the bottom | sprites painted lit from below | *Light from the top*, *Relight for training* |
 | chunky pixels on big sprites | SD 1.5's 8 px limit | SDXL, or hand finishing |
 | page shows an old layout after an update | browser cache | Ctrl+Shift+R |
+| "sign in" appears again | the session ended (a password change, a disabled account, a week without use) | sign in again |
+| a model, result or palette a colleague talked about is not listed | it is not shared with you | ask them to *Share* it |
 
-## 10. Glossary
+## 11. Glossary
 
 | Term | Meaning |
 |---|---|

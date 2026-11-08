@@ -110,15 +110,13 @@ def test_too_many_waiting_jobs_are_refused(client, monkeypatch):
     assert e.value.status_code == 429
 
 
-def test_a_password_with_non_ascii_characters_does_not_crash(client, monkeypatch):
-    import app
-
-    monkeypatch.setattr(app, "PASSWORD", "sécret")
-    good = base64.b64encode("u:sécret".encode()).decode()
-    assert client.get("/api/status", headers={"Authorization": "Basic " + good}).status_code == 200
-    bad = base64.b64encode(b"u:wrong").decode()
-    assert client.get("/api/status", headers={"Authorization": "Basic " + bad}).status_code == 401
-    assert client.get("/api/status").status_code == 401
+def test_a_password_with_non_ascii_characters_does_not_crash(web):
+    web.module.ACCOUNTS.create("zoe", "sécret-très-long", role="admin", must_change=False)
+    bad = web.post("/api/auth/login", json={"username": "zoe", "password": "wrong"})
+    assert bad.status_code == 401
+    good = web.post("/api/auth/login", json={"username": "zoe", "password": "sécret-très-long"})
+    assert good.status_code == 200
+    assert web.get("/api/status").status_code == 200
 
 
 def test_body_limit_counts_what_is_really_read(monkeypatch):

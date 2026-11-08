@@ -150,11 +150,15 @@ def main() -> None:
             SG_WEB_HOST="127.0.0.1",
             SG_WEB_PORT=str(PORT),
         )
+        sys.path.insert(0, str(ROOT / "webapp"))
+        import accounts
+
+        accounts.Accounts(Path(d["state"])).create("demo", "sample screenshots pass", role="admin", must_change=False)
         srv = subprocess.Popen([sys.executable, str(ROOT / "webapp" / "app.py")], env=env, cwd=ROOT / "webapp")
         try:
             for _ in range(60):
                 try:
-                    urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/status", timeout=1)
+                    urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/auth/state", timeout=1)
                     break
                 except OSError:
                     time.sleep(0.5)
@@ -167,6 +171,12 @@ def main() -> None:
             with sync_playwright() as p:
                 b = p.chromium.launch()
                 pg = b.new_page(viewport=VIEW, device_scale_factor=1)
+                pg.goto(f"http://127.0.0.1:{PORT}/")
+                pg.fill("#username", "demo")
+                pg.fill("#password", "sample screenshots pass")
+                pg.click("#go")
+                pg.wait_for_url(f"http://127.0.0.1:{PORT}/")
+                pg.wait_for_selector("#account strong")
                 for name, route in pages.items():
                     pg.goto(f"http://127.0.0.1:{PORT}/{route}")
                     pg.wait_for_timeout(1200)
