@@ -166,8 +166,8 @@ async function usersPage(main) {
             u.must_change ? h("button", { class: "btn sm ghost", type: "button", onclick: () => patch(u, { must_change: false }, "No longer required") }, "Don't require change")
               : h("button", { class: "btn sm ghost", type: "button", onclick: () => patch(u, { must_change: true }, `${u.username} must change their password at the next sign-in`) }, "Require change"),
             h("button", { class: "btn sm ghost", type: "button", onclick: () => patch(u, { role: u.role === "admin" ? "user" : "admin" }, "Role changed") }, u.role === "admin" ? "Make user" : "Make admin"),
-            h("button", { class: "btn sm ghost", type: "button", onclick: () => patch(u, { disabled: !u.disabled }, u.disabled ? "Enabled" : "Disabled") }, u.disabled ? "Enable" : "Disable"),
-            h("button", { class: "btn sm danger", type: "button", onclick: () => remove(u) }, "Remove"))))))),
+            u.username === ME.username ? null : h("button", { class: "btn sm ghost", type: "button", onclick: () => patch(u, { disabled: !u.disabled }, u.disabled ? "Enabled" : "Disabled") }, u.disabled ? "Enable" : "Disable"),
+            u.username === ME.username ? null : h("button", { class: "btn sm danger", type: "button", onclick: () => remove(u) }, "Remove"))))))),
       h("p", { class: "small muted", style: { marginTop: "12px" } },
         "Each user has their own models, results, palettes, picks and jobs. Administrators see everything, with who owns it. Lost the only administrator password: ",
         h("code", {}, "python3 webapp/users_cli.py reset <name>"), " on the machine."));

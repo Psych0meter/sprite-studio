@@ -129,6 +129,8 @@ def make_router(
     async def update(username: str, request: Request):
         w = admin()
         b = await body(request)
+        if username == w.name and b.get("disabled"):
+            raise HTTPException(400, "you cannot disable your own account")
         if b.get("password") is not None:  # a reset: the person must choose their own at the next sign-in
             accounts.set_password(username, b["password"], must_change=b.get("must_change", True), by=w.name)
         accounts.update(
@@ -143,6 +145,8 @@ def make_router(
     @r.delete("/api/users/{username}")
     def delete(username: str, transfer_to: str = ""):
         w = admin()
+        if username == w.name:
+            raise HTTPException(400, "you cannot remove your own account: ask another administrator")
         users = accounts.users()
         if username not in users:
             raise HTTPException(404, "no such user")

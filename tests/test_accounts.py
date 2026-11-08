@@ -149,7 +149,7 @@ def test_only_administrators_manage_users_and_settings(team):
 
 def test_the_last_administrator_cannot_be_removed_or_demoted(client):
     assert client.patch("/api/users/admin", json={"role": "user"}).status_code == 409
-    assert client.patch("/api/users/admin", json={"disabled": True}).status_code == 409
+    assert client.patch("/api/users/admin", json={"disabled": True}).status_code == 400  # (not one's own)
     assert client.delete("/api/users/admin?transfer_to=admin").status_code == 400
 
 
@@ -349,3 +349,12 @@ def test_a_comparison_only_uses_loras_of_models_you_may_use(team, env):
     assert bob.get("/api/loras").json()["files"][0]["name"] == "pxunit.safetensors"
     assert bob.post("/api/loras/delete", json={"names": ["pxunit.safetensors"]}).status_code == 403
     assert (env["comfy"] / "models" / "loras" / "pxunit.safetensors").exists()
+
+
+def test_nobody_removes_or_disables_their_own_account(client):
+    client.post("/api/users", json={"username": "second", "password": PW, "role": "admin", "must_change": False})
+    for url in ("/api/users/admin?transfer_to=second",):
+        r = client.delete(url)
+        assert r.status_code == 400 and "your own" in r.json()["error"]
+    assert client.patch("/api/users/admin", json={"disabled": True}).status_code == 400
+    assert client.get("/api/auth/me").status_code == 200
