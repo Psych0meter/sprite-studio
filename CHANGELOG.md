@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Results**: a result folder that cannot be read (an empty `job.txt`, for one) no longer empties the whole Results page; it is skipped and named in the service log.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added

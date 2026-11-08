@@ -372,3 +372,15 @@ def test_updating_is_for_administrators_and_waits_for_an_idle_gpu(team, monkeypa
     app.JOBS.jobs["busy"] = {"status": "running", "lane": "gpu", "kind": "train", "owner": "ann"}
     assert admin.post("/api/updates/apply", json={"target": "comfyui"}).status_code == 409
     app.JOBS.jobs.pop("busy")
+
+
+def test_one_broken_result_folder_does_not_hide_the_others(client):
+    out = client.module.setting_path("px_output")
+    good, bad = out / "good_1", out / "empty_1"
+    for d in (good, bad):
+        d.mkdir(parents=True)
+    (good / "job.txt").write_text("name=good kind=small\n")
+    (bad / "job.txt").write_text("")  # an empty job.txt used to fail the whole list
+    r = client.get("/api/results")
+    assert r.status_code == 200, r.text
+    assert {i["path"].rsplit("/", 1)[1] for i in r.json()} >= {"good_1", "empty_1"}

@@ -887,6 +887,62 @@ def _variants(d: Path) -> list[Path]:
     return [v for v in d.glob("*.png") if is_variant(v)]
 
 
+def _scan_result(d: Path, mtime: float) -> list[dict]:
+    """The list row of one output folder (none when it is not a result)."""
+    items: list[dict] = []
+    if d.name.startswith("batch-"):
+        sets = [s.parent for s in d.glob("*/*/job.txt")]
+        made = [s for s in sets if _variants(s)]
+        classes = sorted({s.parent.name for s in sets})
+        cover = next((str(v) for s in made for v in s.glob("*_s*.png") if not v.stem.endswith("_x4")), "")
+        items.append(
+            {
+                "type": "batch",
+                "path": str(d),
+                "title": d.name[6:],
+                "count": len(made),
+                "tried": len(sets),
+                "classes": classes,
+                "mtime": max([mtime] + [s.stat().st_mtime for s in sets]),
+                "cover": cover,
+                "empty": not made,
+            }
+        )
+    elif d.name.startswith("matrix-"):
+        sheets = sorted(str(s) for s in d.glob("sheet_*.png"))
+        made = any(_variants(c) for c in d.glob("*/*/") if c.is_dir())
+        items.append(
+            {
+                "type": "matrix",
+                "path": str(d),
+                "title": d.name[7:],
+                "count": len(sheets),
+                "mtime": mtime,
+                "cover": sheets[0] if sheets and made else "",
+                "empty": not made,
+            }
+        )
+    elif (d / "job.txt").exists():
+        vs = _variants(d)
+        head = ((d / "job.txt").read_text(errors="replace").splitlines() or [""])[0]
+        name = (re.search(r"name=(\S+)", head) or [None, d.name])[1]
+        kind = (re.search(r"(?:kind|category)=(\S+)", head) or [None, ""])[1]
+        items.append(
+            {
+                "type": "single",
+                "path": str(d),
+                "title": name,
+                "kind": kind,
+                "count": len(vs),
+                "mtime": mtime,
+                "cover": str(sorted(vs)[0]) if vs else "",
+                "done": (d / ".done").exists(),
+                "empty": not vs,
+            }
+        )
+    return items
+
+
 def scan_results() -> list[dict]:
     """Every result folder; "empty" ones (nothing rendered, e.g. every sprite failed) are flagged."""
     out_root = setting_path("px_output")
@@ -898,58 +954,9 @@ def scan_results() -> list[dict]:
             continue
         try:
             mtime = d.stat().st_mtime
-        except OSError:
-            continue
-        if d.name.startswith("batch-"):
-            sets = [s.parent for s in d.glob("*/*/job.txt")]
-            made = [s for s in sets if _variants(s)]
-            classes = sorted({s.parent.name for s in sets})
-            cover = next((str(v) for s in made for v in s.glob("*_s*.png") if not v.stem.endswith("_x4")), "")
-            items.append(
-                {
-                    "type": "batch",
-                    "path": str(d),
-                    "title": d.name[6:],
-                    "count": len(made),
-                    "tried": len(sets),
-                    "classes": classes,
-                    "mtime": max([mtime] + [s.stat().st_mtime for s in sets]),
-                    "cover": cover,
-                    "empty": not made,
-                }
-            )
-        elif d.name.startswith("matrix-"):
-            sheets = sorted(str(s) for s in d.glob("sheet_*.png"))
-            made = any(_variants(c) for c in d.glob("*/*/") if c.is_dir())
-            items.append(
-                {
-                    "type": "matrix",
-                    "path": str(d),
-                    "title": d.name[7:],
-                    "count": len(sheets),
-                    "mtime": mtime,
-                    "cover": sheets[0] if sheets and made else "",
-                    "empty": not made,
-                }
-            )
-        elif (d / "job.txt").exists():
-            vs = _variants(d)
-            head = (d / "job.txt").read_text(errors="replace").splitlines()[0]
-            name = (re.search(r"name=(\S+)", head) or [None, d.name])[1]
-            kind = (re.search(r"(?:kind|category)=(\S+)", head) or [None, ""])[1]
-            items.append(
-                {
-                    "type": "single",
-                    "path": str(d),
-                    "title": name,
-                    "kind": kind,
-                    "count": len(vs),
-                    "mtime": mtime,
-                    "cover": str(sorted(vs)[0]) if vs else "",
-                    "done": (d / ".done").exists(),
-                    "empty": not vs,
-                }
-            )
+            items.extend(_scan_result(d, mtime))
+        except Exception as e:  # one unreadable folder must not hide the others
+            print(f"results: skipped {d.name}: {e!r}", file=sys.stderr, flush=True)
     items = [tagged("result", Path(i["path"]).name, i) for i in items if can("result", Path(i["path"]).name)]
     busy = busy_outputs()
     for i in items:
