@@ -2155,6 +2155,7 @@ routes.models = async (main, parts) => {
       h("tbody", {}, plist.map((p) => {
         let dest = "";
         const others = plist.filter((x) => x.name !== p.name);
+        if (!others.some((x) => x.name === "")) others.push({ name: "" });  // "No project" is always a place to move to
         return h("tr", {},
           h("td", {}, p.name ? h("b", {}, p.name) : h("span", { class: "muted" }, "No project")),
           h("td", { class: "small" }, p.models.length ? p.models.map((id) => (S.catalog.models.find((m) => m.id === id) || { label: id }).label).join(", ") : h("span", { class: "muted" }, "none yet")),

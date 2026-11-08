@@ -28,7 +28,9 @@ set -euo pipefail
 SG_USER="${SG_USER:-spritegen}"
 HOME_DIR="/home/$SG_USER"
 SG_APP="${SG_APP:-$HOME_DIR/spritegen}"
-SG_DATA="${SG_DATA:-$HOME_DIR/sprites}"
+# A reinstall keeps the data folder the service already uses (SG_DATA given to this script wins).
+OLD_DATA="$(grep -hoE 'SG_DATA=[^ ]+' /etc/systemd/system/spritegen-web.service 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+SG_DATA="${SG_DATA:-${OLD_DATA:-$HOME_DIR/sprites}}"
 TORCH_INDEX="${TORCH_INDEX:-}"
 TORCH_VERSION="${TORCH_VERSION:-}"
 NVIDIA_RUN="${NVIDIA_RUN:-}"

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Install**: running `install.sh` again keeps the data folder (`SG_DATA`) the service already uses, instead of going back to `~/sprites` when it is not given again (results, sources and picks seemed to vanish).
+- **Projects**: the delete menu on a project always offers *No project*, so it is no longer empty when there is only one project.
 - **Results**: a result folder that cannot be read (an empty `job.txt`, for one) no longer empties the whole Results page; it is skipped and named in the service log.
 
 ## [0.3.0] - 2026-11-08
