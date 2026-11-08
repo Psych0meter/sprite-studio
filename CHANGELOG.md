@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Install**: running `install.sh` again keeps the data folder (`SG_DATA`) the service already uses, instead of going back to `~/sprites` when it is not given again (results, sources and picks seemed to vanish).
-- **Projects**: the delete menu on a project always offers *No project*, so it is no longer empty when there is only one project.
-- **Results**: a result folder that cannot be read (an empty `job.txt`, for one) no longer empties the whole Results page; it is skipped and named in the service log.
-
 ## [0.3.0] - 2026-11-08
 
 ### Added
@@ -76,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Install**: running `install.sh` again keeps the data folder (`SG_DATA`) the service already uses, instead of going back to `~/sprites` when it is not given again (results, sources and picks seemed to vanish).
+- **Projects**: the delete menu on a project always offers *No project*, so it is no longer empty when there is only one project.
+- **Results**: a result folder that cannot be read (an empty `job.txt`, for one) no longer empties the whole Results page; it is skipped and named in the service log.
 - **Users**: you can no longer remove or disable your own account (the buttons are hidden on your row and the server refuses).
 - **Results**: the list of results is faster with many shared items (the access list is read once per change, not once per request).
 - **Train on picks**: a refused request (an unknown group or kind, an invalid model) no longer leaves a new model behind, and only the picks that really became sprites lose their star.
@@ -83,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Models**: resetting a model to its template checks that you may use it before anything else, so someone else's model answers "not found".
 - **Sign-in**: the single shared password (HTTP Basic) is replaced by accounts with per-user sessions, hashed passwords, lockout after wrong attempts, an administrator role, and ownership checks on every model, result, palette, LoRA file, pick and job (404 for what is not yours, 403 for what is only shared with you).
 - **Request size**: the limit on a request body is enforced on the bytes really read, so a missing or false `Content-Length` no longer gets round it; an uploaded file's size is also checked before its base64 is decoded.
 - **Zip import**: at most 250 MB unpacked by default (was 1 GB), `SG_MAX_ZIP_MB` changes it.

@@ -384,3 +384,48 @@ def test_one_broken_result_folder_does_not_hide_the_others(client):
     r = client.get("/api/results")
     assert r.status_code == 200, r.text
     assert {i["path"].rsplit("/", 1)[1] for i in r.json()} >= {"good_1", "empty_1"}
+
+
+FOREIGN_MODEL_ROUTES = [
+    ("get", "/api/models/units"),
+    ("put", "/api/models/units"),
+    ("get", "/api/models/units/prompt?group=a"),
+    ("get", "/api/models/units/export"),
+    ("post", "/api/models/units/reset"),
+    ("post", "/api/models/units/sprites"),
+    ("delete", "/api/models/units/sprites"),
+    ("post", "/api/models/units/upload"),
+    ("post", "/api/models/units/upload-zip"),
+    ("post", "/api/models/units/import"),
+    ("get", "/api/models/units/lighting"),
+    ("post", "/api/train/units/dataset"),
+    ("post", "/api/train/units/start"),
+    ("post", "/api/train/units/previews"),
+    ("put", "/api/train/units/caption"),
+]
+ADMIN_ONLY_ROUTES = [
+    ("get", "/api/settings"),
+    ("put", "/api/settings"),
+    ("post", "/api/comfy/stop"),
+    ("get", "/api/updates"),
+    ("post", "/api/updates/apply"),
+    ("post", "/api/train/setup-sdxl"),
+    ("get", "/api/users"),
+]
+
+
+@pytest.mark.parametrize("method,url", FOREIGN_MODEL_ROUTES)
+def test_nobody_reaches_a_model_that_is_not_theirs_by_any_route(team, method, url):
+    admin, ann, bob = team
+    make_model(ann)
+    r = getattr(bob, method)(url, **({} if method in ("get", "delete") else {"json": {}}))
+    assert r.status_code in (403, 404), (method, url, r.status_code, r.text[:200])
+    assert r.status_code != 200
+
+
+@pytest.mark.parametrize("method,url", ADMIN_ONLY_ROUTES)
+def test_administrator_only_routes_refuse_users_and_anonymous(team, web, method, url):
+    admin, ann, bob = team
+    for c, want in ((ann, 403), (TestClient(web.module.app), 401)):
+        r = getattr(c, method)(url, **({} if method == "get" else {"json": {}}))
+        assert r.status_code == want, (method, url, r.status_code)

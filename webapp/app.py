@@ -2652,11 +2652,11 @@ async def api_model_reset(mid: str, request: Request):
     """Back to the built-in settings of this model (groups, kinds, words...),
     keeping its sprites and what was set by hand on them; with "keep" the
     listed fields stay as they are."""
+    old = model_cfg(mid)  # first: someone else's model does not exist for you
     p = pm()
     sid = next((k for k, t in p.template_sets().items() if mid in t["models"]), None)
     if not sid:
         raise HTTPException(400, "this model does not come from a template")
-    old = model_cfg(mid)
     b = await request.json()
     m = p.from_template(sid, mid, project=old["project"])
     m["sprites"] = old["sprites"]
