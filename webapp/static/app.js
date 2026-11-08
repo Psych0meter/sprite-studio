@@ -1612,7 +1612,7 @@ routes.train = async (main, parts) => {
         h("a", { href: "#/models/" + cat }, `Groups: ${c.groups.filter((g) => g.enabled).map((g) => g.label).join(", ") || "none"}.`), " Change them in Models, then build again."),
       h("div", { class: "row" },
         h("div", { class: "field", style: { width: "130px" } }, h("label", {}, "Repeats"),
-          h("input", { type: "number", min: 1, max: 30, value: opts.repeats, placeholder: String(c.repeats || ""), oninput: (e) => { opts.repeats = e.target.value; keep(); } })),
+          h("input", { type: "number", min: 1, max: 30, value: opts.repeats, placeholder: String(c.repeats || ""), oninput: (e) => { opts.repeats = e.target.value; keep(); refreshEstimate(); } })),
         h("button", { class: "btn" + (ds.exists ? "" : " primary"), style: { alignSelf: "flex-end" }, disabled: !!running,
           onclick: async () => { const j = await attempt(() => api(`/train/${cat}/dataset`, { body: opts }), "Building the training set"); if (j) schedule(800); } },
           ds.exists ? "Build again" : "Build the training set")),
@@ -1645,9 +1645,12 @@ routes.train = async (main, parts) => {
     box.append(s1);
 
     // 2. training
+    const stepsOf = () => (ds.exists ? ds.count * (Number(opts.repeats) || ds.repeats || 1) * (Number(opts.epochs) || (xl ? 8 : 12)) : 0);
+    const estimate = h("span", { class: "muted small" }, trainEstimate(xl, stepsOf()));
+    refreshEstimate = () => { estimate.textContent = trainEstimate(xl, stepsOf()); };
     const s2 = h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("div", { class: "step-head" }, h("span", { class: "n" + (info.checkpoints.length ? " done" : "") }, "2"), h("h2", {}, "Train")),
-        h("span", { class: "muted small" }, trainEstimate(xl))));
+        estimate));
     if (trainJob && ["running", "queued"].includes(trainJob.status)) {
       const holder = h("div", {}, trainProgress(trainJob));
       live.train = { id: trainJob.id, el: holder };
@@ -1773,8 +1776,9 @@ routes.train = async (main, parts) => {
     update();
     return el;
   };
+  let refreshEstimate = () => {};
   const numField = (label, key, min, max, step, hint, placeholder) => h("div", { class: "field" }, h("label", {}, label),
-    h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); } }), h("div", { class: "hint" }, hint));
+    h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); if (key === "epochs") refreshEstimate(); } }), h("div", { class: "hint" }, hint));
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
     if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); redraw(); }
@@ -1782,9 +1786,13 @@ routes.train = async (main, parts) => {
   await redraw();
 };
 
-/** How long a training run takes here: the last run's time when there is one. */
-function trainEstimate(xl) {
-  const t = S.catalog && S.catalog.speed && S.catalog.speed.train_minutes[xl ? "sdxl" : "sd15"];
+/** How long a training run takes here: the seconds per step measured on this machine's finished runs of this base
+ *  model, times the steps this run will have (images x repeats x epochs). Without steps or runs: a rough guide. */
+function trainEstimate(xl, steps) {
+  const sp = S.catalog && S.catalog.speed;
+  const sps = sp && sp.train_sec_per_step && sp.train_sec_per_step[xl ? "sdxl" : "sd15"];
+  if (sps && steps) return `about ${fmtDur(sps * steps)} (${steps} steps at ${sps.toFixed(1)} s each, from your last runs)`;
+  const t = sp && sp.train_minutes && sp.train_minutes[xl ? "sdxl" : "sd15"];
   if (t) return `about ${fmtDur(t * 60)} (your last run)`;
   return xl ? "several hours on an 8 GB card, less on newer ones" : "about 1 to 2 hours on an 8 GB card, less on newer ones";
 }

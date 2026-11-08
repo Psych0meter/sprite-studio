@@ -731,10 +731,34 @@ def must_free_gpu() -> bool:
     return not mem or mem < 15000
 
 
+def _clock_seconds(text: str) -> int:
+    """'1:46:02' or '05:32' as seconds."""
+    n = 0
+    for part in text.split(":"):
+        n = n * 60 + int(part)
+    return n
+
+
+def train_seconds_per_step(log: str) -> float | None:
+    """Seconds one training step took in a finished run, from the last progress line of its log (the run's
+    own total time also holds the start-up and the saves, and depends on how many steps it had)."""
+    last = None
+    for piece in re.split(r"[\r\n]", log[-200000:]):
+        m = STEP_RE.search(piece)
+        if m:
+            last = m
+    if not last or not int(last.group(2)):
+        return None
+    try:
+        return _clock_seconds(last.group(4)) / int(last.group(2))
+    except ValueError:
+        return None
+
+
 def speed() -> dict:
-    """How fast this machine is, from the logs of finished jobs: seconds per
-    rendered image, and minutes per training run (per base model)."""
-    per_image, train = [], {}
+    """How fast this machine is, from the logs of finished jobs: seconds per rendered image, and per
+    training step (per base model; the median of the last runs), plus minutes of the last run."""
+    per_image, train, steps = [], {}, {}
     with _lock:
         jobs = sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
     for j in jobs:
@@ -743,11 +767,16 @@ def speed() -> dict:
         if j["kind"] in ("generate", "batch", "matrix", "previews") and len(per_image) < 200:
             per_image += [int(x) for x in re.findall(r"\] seed=\d+\s+(\d+) s", read_log(j, 200000))][-50:]
         elif j["kind"] == "train" and j.get("started") and j.get("ended"):
-            train.setdefault(model_ok(j["meta"].get("model")), (j["ended"] - j["started"]) / 60)
+            base = model_ok(j["meta"].get("model"))
+            train.setdefault(base, (j["ended"] - j["started"]) / 60)
+            sps = train_seconds_per_step(read_log(j, 200000))
+            if sps and len(steps.setdefault(base, [])) < 5:
+                steps[base].append(sps)
     per_image.sort()
     return {
         "sec_per_image": per_image[len(per_image) // 2] if len(per_image) >= 3 else None,
         "train_minutes": {k: round(v) for k, v in train.items()},
+        "train_sec_per_step": {k: round(sorted(v)[len(v) // 2], 3) for k, v in steps.items()},
     }
 
 

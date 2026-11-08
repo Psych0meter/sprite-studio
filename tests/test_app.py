@@ -388,3 +388,35 @@ def test_picks_become_training_sprites(client, env):
     assert r.status_code == 400
     r = client.post("/api/picks/to-model", json={"model": "boss"})
     assert r.json()["saved"] == ["ship_3.png"]
+
+
+def test_training_speed_is_seconds_per_step_of_each_base_model(client, tmp_path):
+    import app as webapp
+
+    bar = "steps: 100%|##########| {n}/{n} [{el}<00:00, 1.00it/s, avr_loss=0.1]"
+    assert webapp.train_seconds_per_step(bar.format(n=3648, el="1:46:00")) == 6360 / 3648
+    assert (
+        webapp.train_seconds_per_step(
+            "steps:  50%|#####     | 10/20 [00:30<00:30, 1.0s/it]\r" + bar.format(n=20, el="00:40")
+        )
+        == 2.0
+    )
+    assert webapp.train_seconds_per_step("nothing here") is None
+
+    def job(jid, base, steps, elapsed, created):
+        log = tmp_path / f"{jid}.log"
+        log.write_text(bar.format(n=steps, el=elapsed))
+        return {
+            "id": jid, "kind": "train", "status": "done", "returncode": 0, "error": None, "log": str(log),
+            "created": created, "started": 1.0, "ended": 7000.0, "meta": {"model": base},
+        }  # fmt: skip
+
+    with webapp._lock:
+        webapp.JOBS.jobs.clear()
+        webapp.JOBS.jobs["a"] = job("a", "sd15", 3000, "1:40:00", 1.0)  # 2 s per step
+        webapp.JOBS.jobs["b"] = job("b", "sd15", 6000, "3:20:00", 2.0)  # 2 s per step
+        webapp.JOBS.jobs["c"] = job("c", "sdxl", 1000, "1:00:00", 3.0)  # 3.6 s per step
+    try:
+        assert webapp.speed()["train_sec_per_step"] == {"sd15": 2.0, "sdxl": 3.6}
+    finally:
+        webapp.JOBS.jobs.clear()
