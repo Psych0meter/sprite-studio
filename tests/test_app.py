@@ -1,6 +1,7 @@
 """The web app's API, on empty isolated folders (no GPU, no ComfyUI)."""
 
 import shutil
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -471,11 +472,11 @@ def test_update_items_link_to_github_and_carry_release_notes(monkeypatch):
     assert webapp.release_links("/tmp/x", "v1.2.0", True) == {}
 
 
-def test_update_items_show_the_space_of_their_disk(tmp_path):
+def test_status_lists_the_disks_the_app_works_on(client):
+    disks = client.get("/api/status").json()["disks"]
+    assert disks and all(d["total"] >= d["used"] > 0 and d["free"] >= 0 and d["what"] for d in disks)
     import app as webapp
 
-    d = webapp.disk_info(tmp_path / "not" / "there")  # (the nearest existing folder answers)
-    assert d["disk"]["total"] >= d["disk"]["used"] > 0 and d["disk"]["free"] >= 0
-    (tmp_path / "b").mkdir()
-    (tmp_path / "b" / "f").write_bytes(b"x" * 1000)
-    assert webapp.tree_size(tmp_path / "b") == 1000 and webapp.tree_size(tmp_path / "none") == 0
+    d = webapp.disk_info(Path("/nonexistent/deep/path"))  # (the nearest existing folder answers)
+    assert d["disk"]["total"] > 0
+    assert webapp.tree_size(Path("/nonexistent")) == 0

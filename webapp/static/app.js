@@ -282,6 +282,13 @@ const statusLoop = autoRefresh({
   global: true,
 });
 
+// A label, a small bar (amber from 80 %, red from 92 % when `warn`) and a value, for the status line.
+function meter(label, frac, text, title, warn = true) {
+  const f = Math.max(0, Math.min(1, frac || 0));
+  const cls = "meter" + (warn && f > 0.92 ? " bad" : warn && f > 0.8 ? " warn" : "");
+  return h("span", { class: cls, title }, label, h("span", { class: "bar" }, h("i", { style: { width: Math.round(f * 100) + "%" } })), text);
+}
+
 function renderStatus() {
   const st = S.status;
   const c = st.comfy;
@@ -290,11 +297,16 @@ function renderStatus() {
   line.innerHTML = "";
   line.append(h("span", {}, h("i", { class: "dot " + (c.up ? "up" : "down") }), c.up ? "ComfyUI running" : "ComfyUI stopped"));
   if (st.gpu) {
-    line.append(h("span", {}, `${st.gpu.name.replace("NVIDIA GeForce ", "")}  memory ${(st.gpu.mem_used / 1024).toFixed(1)} of ${(st.gpu.mem_total / 1024).toFixed(0)} GB, GPU busy ${st.gpu.util} %, ${st.gpu.temp} °C`));
-    line.lastChild.title = "Memory: what is allocated on the card. GPU busy: the share of time the card was computing (100 % while training or rendering is normal, it is not memory).";
+    const g = st.gpu;
+    line.append(meter(g.name.replace("NVIDIA GeForce ", ""), g.mem_used / g.mem_total, `${(g.mem_used / 1024).toFixed(1)} of ${(g.mem_total / 1024).toFixed(0)} GB`,
+      "Memory: what is allocated on the card."));
+    line.append(meter("GPU busy", g.util / 100, `${g.util} %  ${g.temp} °C`,
+      "The share of time the card was computing (100 % while training or rendering is normal, it is not memory).", false));
   } else if (c.up && c.vram_total) {
-    line.append(h("span", {}, `${(c.device || "GPU").replace("NVIDIA GeForce ", "")}  ${((c.vram_total - c.vram_free) / 1073741824).toFixed(1)} of ${(c.vram_total / 1073741824).toFixed(0)} GB in use`));
+    const used = c.vram_total - c.vram_free;
+    line.append(meter((c.device || "GPU").replace("NVIDIA GeForce ", ""), used / c.vram_total, `${(used / 1073741824).toFixed(1)} of ${(c.vram_total / 1073741824).toFixed(0)} GB`, "Memory in use on the card."));
   }
+  (st.disks || []).forEach((d) => line.append(meter("Disk", d.used / d.total, `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}`, `Holds: ${d.what.join(", ")}`)));
   const aj = $("#active-job");
   aj.innerHTML = "";
   const run = st.running.find((j) => j.lane === "gpu") || st.running[0];
@@ -3053,9 +3065,7 @@ routes.updates = async (main) => {
       h("div", { class: "panel-head" }, h("h2", {}, it.name),
         it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.latest} available`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
       it.studio ? studioNotes(it) : null,
-      it.disk ? h("p", { class: "small muted" }, `Disk of ${it.path}: ${fmtBytes(it.disk.used)} used of ${fmtBytes(it.disk.total)}, ${fmtBytes(it.disk.free)} free`,
-        it.backups_bytes ? ` · kept previous versions: ${fmtBytes(it.backups_bytes)}` : "") : null,
-      it.disk && it.behind && it.disk.free < 2e9 ? h("div", { class: "note warn" }, "Less than 2 GB are free here: an update downloads and installs packages, make some room first.") : null,
+      it.backups_bytes ? h("p", { class: "small muted" }, `Kept previous versions: ${fmtBytes(it.backups_bytes)}`) : null,
       it.repo_url ? h("p", { class: "small" }, h("a", { href: it.repo_url, target: "_blank", rel: "noopener noreferrer" }, "GitHub page"),
         it.behind && it.release_url ? [" · ", h("a", { href: it.release_url, target: "_blank", rel: "noopener noreferrer" }, `Release ${it.latest}`)] : null) : null,
       it.behind && it.notes ? h("details", { class: "small", open: true }, h("summary", {}, `What's new in ${it.latest}`),

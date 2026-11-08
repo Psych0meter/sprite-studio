@@ -1420,6 +1420,7 @@ def api_status():
     return {
         "comfy": comfy_status(),
         "gpu": gpu_info(),
+        "disks": disks_info(),
         "running": running,
         "queued": queued,
         "time": time.time(),
@@ -1452,6 +1453,31 @@ def disk_info(path: Path) -> dict:
     except OSError:
         return {}
     return {"disk": {"total": u.total, "used": u.used, "free": u.free}}
+
+
+def disks_info() -> list[dict]:
+    """The disks the app works on (results, models and LoRAs, ComfyUI, its own state): one entry per volume with the
+    folders on it, space in bytes."""
+    s = settings()
+    folders = [
+        ("results", s["px_output"]),
+        ("models", s["lora_home"]),
+        ("ComfyUI", s["comfy_dir"]),
+        ("app", str(STATE_DIR)),
+    ]
+    vols: dict[int, dict] = {}
+    for label, f in folders:
+        p = Path(f)
+        while not p.exists() and p != p.parent:
+            p = p.parent
+        try:
+            dev = p.stat().st_dev
+            u = shutil.disk_usage(p)
+        except OSError:
+            continue
+        v = vols.setdefault(dev, {"total": u.total, "used": u.used, "free": u.free, "what": []})
+        v["what"].append(label)
+    return list(vols.values())
 
 
 def tree_size(path: Path) -> int:
@@ -1525,7 +1551,6 @@ def check_repo_update(name: str, repo: Path) -> dict:
             behind=0 if at_or_past else 1,
             dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),  # tracked files edited here
             **release_links(_git(repo, "remote", "get-url", "origin"), tag, not at_or_past),
-            **disk_info(repo),
         )
     except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
         info.update(ok=False, error=str(e)[:300])
