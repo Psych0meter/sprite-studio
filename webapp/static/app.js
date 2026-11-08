@@ -862,12 +862,12 @@ routes[""] = async (main) => {
       "kohya sd-scripts": "git pull, then pip install -r requirements.txt in the training env (lora/venv); no training should be running" };
     return h("div", { style: { margin: "8px 0 10px" } },
       h("div", { class: "row", style: { gap: "8px" } },
-        h("button", { class: "btn sm ghost", disabled: updating, title: "Looks at the upstream repositories of ComfyUI and kohya sd-scripts (git fetch). Nothing is changed.",
+        h("button", { class: "btn sm ghost", disabled: updating, title: "Looks at the upstream repositories of ComfyUI and kohya sd-scripts (a git fetch: git's own records are refreshed, nothing is updated or installed). An answer is kept for 15 minutes.",
           onclick: async () => {
             updating = true; drawCards();
-            try { updates = await api("/updates"); } catch (err) { toast(String(err.message || err), true); }
+            try { updates = await api("/updates" + (updates ? "?force=1" : "")); } catch (err) { toast(String(err.message || err), true); }
             updating = false; drawCards();
-          } }, updating ? "Checking…" : "Check for updates"),
+          } }, updating ? "Checking…" : updates ? "Check again" : "Check for updates"),
         updates ? h("span", { class: "muted small" }, "checked " + fmtTime(updates.checked)) : null),
       updates ? updates.items.map((it) => h("div", { class: "small", style: { marginTop: "6px" } },
         it.ok ? [

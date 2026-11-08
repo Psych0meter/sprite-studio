@@ -162,7 +162,9 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   without an error.
 - **Updates**: `GET /api/updates` runs `git fetch` in the ComfyUI folder and
   in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
-  never pulls or installs.
+  never pulls or installs (the fetch refreshes git's own remote records only).
+  The answer is cached for 15 minutes (`?force=1` looks again) and one check
+  runs at a time.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.
@@ -178,11 +180,14 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   folder (`safe_path`); writes go only to the output and model folders.
   `/api/file` serves images and small text files only (`SERVED_SUFFIXES`),
   never model weights or code.
-- **Limits**: a request over `SG_MAX_UPLOAD_MB` (413) or without a length (411)
-  is refused; a change (POST, PUT, DELETE) from another site is refused (the
+- **Limits**: a request body over `SG_MAX_UPLOAD_MB` is refused (413), counted
+  as it is read by the `BodyLimit` ASGI middleware (a missing or false
+  `Content-Length` does not get round it); a chunked one with no length (411); a change (POST, PUT, DELETE) from another site is refused (the
   `Origin` must be the app's own `Host`, `SG_ALLOWED_ORIGINS` adds more). Uploads
   are strict base64 and must open as images (`check_image`), at most 64 million
-  pixels and 25 MB each; a zip may hold 5000 files and 1 GB unpacked. At most
+  pixels and 25 MB each; a base64 file is size-checked before it is decoded; a zip may hold 5000
+  files and `SG_MAX_ZIP_MB` (250) unpacked; `/api/info` analyses images up to
+  16 million pixels; `/api/file` serves text files up to 10 MB. At most
   `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429). The
   logs of jobs that fell off the 300 kept are deleted after a day.
 - **Front end**: `app.js` and `palette.js`, a small `h()` element helper, one route

@@ -119,3 +119,99 @@ def test_a_password_with_non_ascii_characters_does_not_crash(client, monkeypatch
     bad = base64.b64encode(b"u:wrong").decode()
     assert client.get("/api/status", headers={"Authorization": "Basic " + bad}).status_code == 401
     assert client.get("/api/status").status_code == 401
+
+
+def test_body_limit_counts_what_is_really_read(monkeypatch):
+    """No Content-Length and no chunked header: the bytes read are still counted."""
+    import asyncio
+
+    import app as webapp
+
+    monkeypatch.setattr(webapp, "MAX_BODY", 1000)
+    sent = []
+
+    async def inner(scope, receive, send):
+        while True:
+            msg = await receive()
+            if not msg.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    chunks = [
+        {"type": "http.request", "body": b"x" * 600, "more_body": True},
+        {"type": "http.request", "body": b"x" * 600},
+    ]
+
+    async def run(parts):
+        it = iter(parts)
+
+        async def receive():
+            return next(it)
+
+        async def send(msg):
+            sent.append(msg)
+
+        await webapp.BodyLimit(inner)(
+            {"type": "http", "method": "POST", "path": "/api/x", "headers": []}, receive, send
+        )
+
+    asyncio.run(run(chunks))
+    assert sent[0]["status"] == 413
+    sent.clear()
+    asyncio.run(run(chunks[:1] + [{"type": "http.request", "body": b"x" * 100}]))
+    assert sent[0]["status"] == 200
+
+
+def test_data_url_size_is_checked_before_decoding(monkeypatch):
+    from fastapi import HTTPException
+
+    import app as webapp
+
+    big = "data:image/png;base64," + "A" * 4000
+    with pytest.raises(HTTPException) as e:
+        webapp.decode_data_url(big, limit=1000)
+    assert e.value.status_code == 413
+
+
+def test_info_refuses_huge_images_without_decoding(client, env, monkeypatch):
+    import app as webapp
+
+    p = env["output"] / "big.png"
+    Image.new("RGBA", (40, 30), (1, 2, 3, 255)).save(p)
+    assert client.get("/api/info", params={"path": str(p)}).json()["colours"] == 1
+    monkeypatch.setattr(webapp, "INFO_PIXELS", 100)
+    assert client.get("/api/info", params={"path": str(p)}).status_code == 400
+
+
+def test_failed_picks_import_leaves_nothing_behind(client, env):
+    good = env["output"] / "good.png"
+    Image.new("RGBA", (8, 8), (200, 50, 50, 255)).save(good)
+    bad = env["output"] / "bad.png"
+    bad.write_bytes(b"not an image")
+    client.post("/api/picks", json={"path": str(good), "picked": True, "as": "good"})
+    client.post("/api/picks", json={"path": str(bad), "picked": True, "as": "bad"})
+    # an invalid group: no model is created
+    r = client.post("/api/picks/to-model", json={"new": {"id": "fresh", "label": "Fresh"}, "group": "nope"})
+    assert r.status_code == 400
+    assert client.get("/api/models/fresh").status_code == 404
+    assert client.post("/api/picks/to-model", json={"new": "x"}).status_code == 400
+    # the unusable pick keeps its star, the good one loses it
+    r = client.post("/api/picks/to-model", json={"new": {"id": "fresh", "label": "Fresh"}, "unpick": True})
+    assert r.status_code == 200 and r.json()["saved"] == ["good.png"] and len(r.json()["skipped"]) == 1
+    assert list(client.get("/api/picks").json()) == [str(bad)]
+
+
+def test_updates_are_cached(client, monkeypatch):
+    import app as webapp
+
+    calls = []
+    monkeypatch.setattr(
+        webapp, "check_repo_update", lambda name, repo: calls.append(name) or {"name": name, "ok": True}
+    )
+    webapp._updates_cache.update(at=0.0, data=None)
+    client.get("/api/updates")
+    client.get("/api/updates")
+    assert len(calls) == 2  # two repositories, looked at once
+    client.get("/api/updates?force=1")
+    assert len(calls) == 4
