@@ -34,5 +34,7 @@ if [ ! -x "$VENV/bin/uvicorn" ]; then
 	"$VENV/bin/pip" install -q --upgrade pip
 	"$VENV/bin/pip" install -q "fastapi>=0.110" "uvicorn>=0.29"
 fi
+# An update of Sprite Studio that is not confirmed after a few starts is undone here.
+python3 "$HERE/../scripts/pxupdate.py" studio-guard || true
 cd "$HERE"
 exec "$VENV/bin/python" app.py

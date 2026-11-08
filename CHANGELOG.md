@@ -9,8 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.2] - 2026-11-08
 
+### Added
+
+- **Updates**: the Updates page also updates Sprite Studio itself. It replaces its files, restarts, and goes back to the previous version by itself if the new one does not start or answer (a *Go back* button does it by hand). It needs an installation made by `install.sh`, not a git checkout.
+
 ### Changed
 
+- **Updates**: ComfyUI, kohya sd-scripts and Sprite Studio now move only to the latest *released* version (the highest `vX.Y.Z` tag), no longer to the tip of the upstream branch. The packages are saved first and the previous version is put back when the new one fails its check. **Breaking**: the update check no longer lists commits, and `scripts/pxupdate.sh` is replaced by `scripts/pxupdate.py`.
 - **ComfyUI**: `install.sh` now makes ComfyUI listen on `127.0.0.1` only (it has no login, so it was open to the whole network). Running it again on an existing installation changes that. To reach ComfyUI from another machine use an SSH tunnel, or install with `COMFY_LISTEN=0.0.0.0` behind a firewall.
 - **Security**: the app's own state (accounts, prompts, paths, picks, job logs, `auth.log`) is kept in a folder only its user can enter (0700, files 0600); API answers are never cached (`Cache-Control: private, no-store`); the API schema (`/openapi.json`) is no longer published; image analysis runs two at a time.
 - **Accounts**: every account has a permanent internal id, and sharing, ownership, jobs, picks, projects and the per-user folders use it instead of the user name (a name could be given again after a deletion). Existing installations are migrated when the app starts (names in your sharing lists, jobs, picks, projects and the `uploads`, `picked` and `recoloured` folders become ids; a name with no account is dropped). The pages still show names. Downgrading to 0.3.1 afterwards is not supported.

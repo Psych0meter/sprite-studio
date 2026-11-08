@@ -67,6 +67,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import accounts as acc  # noqa: E402  (users, sessions, ownership: webapp/accounts.py)
 import auth_routes  # noqa: E402  (sign in, users, sharing)
+import pxupdate  # noqa: E402  (updates to released versions: scripts/pxupdate.py)
 
 import pxmodel  # noqa: E402  (the sprite models: scripts/pxmodel.py)
 from pxtool import MAX_COLOURS  # noqa: E402  (the most colours a palette holds)
@@ -1439,72 +1440,174 @@ UPDATES_TTL = 15 * 60  # a check is reused for 15 minutes; ?force=1 looks again
 
 
 def check_repo_update(name: str, repo: Path) -> dict:
-    """Compares a git checkout with its upstream branch. `git fetch` refreshes git's own records of the remote
-    (remote branches, tags); the files of the checkout are never touched and nothing is installed."""
+    """Compares a git checkout with the latest released version (the highest stable `vX.Y.Z` tag). `git fetch --tags`
+    refreshes git's own records of the remote; the files of the checkout are never touched and nothing is installed."""
     info: dict[str, Any] = {"name": name, "path": str(repo)}
     if not (repo / ".git").exists():
         return {**info, "ok": False, "error": "not a git checkout"}
     try:
         _git(repo, "fetch", "--quiet", "--tags", "origin", timeout=90)
-        try:
-            upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-        except OSError:
-            raise OSError("this checkout has no upstream branch to compare with") from None
-        behind = int(_git(repo, "rev-list", "--count", "HEAD..@{u}"))
+        tag = pxupdate.latest_release(_git(repo, "remote", "get-url", "origin"))
+        if not tag:
+            raise OSError("no released version (a vX.Y.Z tag) found upstream")
+        at_or_past = (
+            subprocess.run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor", tag, "HEAD"], capture_output=True, check=False
+            ).returncode
+            == 0
+        )
         info.update(
             ok=True,
-            branch=_git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
-            upstream=upstream,
             current=_git(repo, "describe", "--tags", "--always"),
-            latest=_git(repo, "describe", "--tags", "--always", "@{u}"),
-            behind=behind,
+            latest=tag,
+            behind=0 if at_or_past else 1,
             dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),  # tracked files edited here
-            commits=_git(repo, "log", "--format=%h %s", "-n", "8", "HEAD..@{u}").splitlines() if behind else [],
         )
-    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+    except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
         info.update(ok=False, error=str(e)[:300])
     return info
 
 
+def studio_state() -> dict:
+    """What the Updates page shows for Sprite Studio itself (the pending / last result are local files)."""
+    d: dict[str, Any] = {}
+    pend = STATE_DIR / "update_pending"
+    if pend.is_dir():
+        d["pending"] = {k: (pend / k).read_text().strip() for k in ("from", "to") if (pend / k).exists()}
+    last = STATE_DIR / "last_update.json"
+    if last.exists():
+        with contextlib.suppress(OSError, ValueError):
+            d["last"] = json.loads(last.read_text())
+    d["can_roll_back"] = bool(pxupdate.backups())
+    return d
+
+
+def check_studio_update() -> dict:
+    info: dict[str, Any] = {"name": "Sprite Studio", "path": str(pxupdate.app_dir()), "studio": True, **studio_state()}
+    if (pxupdate.app_dir() / ".git").exists():
+        return {
+            **info,
+            "ok": False,
+            "error": "this is a git checkout: update it with git pull (an installation made by install.sh updates here)",
+        }
+    try:
+        tag = pxupdate.latest_release(os.environ.get("SG_UPDATE_REPO", pxupdate.STUDIO_REPO))
+        if not tag:
+            raise OSError("no released version (a vX.Y.Z tag) found upstream")
+        behind = pxupdate.version_key(tag) > pxupdate.version_key(VERSION)
+        info.update(ok=True, current="v" + VERSION, latest=tag, behind=1 if behind else 0, dirty=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
+        info.update(ok=False, error=str(e)[:300])
+    return info
+
+
+def restart_self(delay: float = 3.0) -> None:
+    """Starts this program again in place (same process id, so systemd keeps watching it) after a short delay."""
+
+    def go() -> None:
+        time.sleep(delay)
+        os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606
+
+    threading.Thread(target=go, daemon=True).start()
+
+
+def confirm_update_when_healthy(wait: float = 25.0) -> None:
+    """After Sprite Studio updated itself: once the new version has answered for a while, the update is confirmed
+    (the safety copy stays for a manual roll back); if it does not answer, it is rolled back and restarted."""
+    pend = STATE_DIR / "update_pending"
+    if not pend.is_dir():
+        return
+    try:
+        target = (pend / "to").read_text().strip()
+    except OSError:
+        target = ""
+    if target != VERSION:  # (a leftover from an update that never started, or a hand roll back)
+        shutil.rmtree(pend, ignore_errors=True)
+        return
+
+    def check() -> None:
+        time.sleep(wait)
+        port = os.environ.get("SG_WEB_PORT", "8189")
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/auth/state", timeout=5) as r:
+                ok = r.status == 200
+        except (OSError, ValueError):
+            ok = False
+        if ok:
+            shutil.rmtree(pend, ignore_errors=True)
+            _save_private_text(
+                STATE_DIR / "last_update.json", json.dumps({"status": "ok", "to": VERSION, "at": time.time()})
+            )
+            return
+        subprocess.run(
+            [sys.executable, str(SCRIPTS / "pxupdate.py"), "studio-rollback", "the new version did not answer"],
+            check=False,
+            env=job_env(),
+        )
+        restart_self(1.0)
+
+    threading.Thread(target=check, daemon=True).start()
+
+
+def _save_private_text(path: Path, text: str) -> None:
+    with _private_open(str(path), "w") as fh:
+        fh.write(text)
+
+
 @app.get("/api/updates")
 def api_updates(force: int = 0):
-    """Are there newer ComfyUI and kohya sd-scripts versions? The answer is kept for 15 minutes and one check runs at
-    a time (a second request waits for it and gets its answer); the update itself is a manual step."""
+    """Are there newer released versions of ComfyUI, kohya sd-scripts and Sprite Studio? The answer is kept for 15
+    minutes and one check runs at a time (a second request waits for it and gets its answer); the update itself is a
+    manual step."""
     with _updates_lock:
         c = _updates_cache
         if force or not c["data"] or time.time() - c["at"] > UPDATES_TTL:
             c["data"] = [
+                check_studio_update(),
                 check_repo_update("ComfyUI", setting_path("comfy_dir")),
                 check_repo_update("kohya sd-scripts", setting_path("lora_home") / "sd-scripts"),
             ]
             c["at"] = time.time()
-        return {"checked": c["at"], "items": c["data"]}
+        items = [{**i, **studio_state()} if i.get("studio") else i for i in c["data"]]  # (pending / last stay fresh)
+        return {"checked": c["at"], "items": items}
 
 
 @app.post("/api/updates/apply")
 async def api_updates_apply(request: Request):
-    """Updates ComfyUI or kohya sd-scripts (scripts/pxupdate.sh: a fast-forward pull, then their requirements) as a
-    job. Refused while a job uses the GPU, because the code and packages would change under it."""
+    """Updates ComfyUI, kohya sd-scripts or Sprite Studio to their latest released version (scripts/pxupdate.py), as a
+    job; a failed check puts the previous version back. Refused while a job uses the GPU, because the code and
+    packages would change under it; Sprite Studio itself waits for every job to end and then restarts. Target
+    "studio-rollback" puts the safety copy of the previous Sprite Studio version back."""
     b = await request.json()
     target = b.get("target")
-    if target not in ("comfyui", "sd-scripts"):
-        raise HTTPException(400, "choose comfyui or sd-scripts")
+    if target not in ("comfyui", "sd-scripts", "studio", "studio-rollback"):
+        raise HTTPException(400, "choose comfyui, sd-scripts or studio")
+    own = target in ("studio", "studio-rollback")
     with _lock:
-        if any(j["status"] in ("running", "queued") and j["lane"] == "gpu" for j in JOBS.jobs.values()):
+        active = [j for j in JOBS.jobs.values() if j["status"] in ("running", "queued")]
+        if own and active:
+            raise HTTPException(409, "Sprite Studio restarts after its update: wait until no job is running")
+        if any(j["lane"] == "gpu" for j in active):
             raise HTTPException(409, "a job is using the GPU: update when the queue is empty")
-        if any(j["status"] in ("running", "queued") and j["kind"] == "update" for j in JOBS.jobs.values()):
+        if any(j["kind"] == "update" for j in active):
             raise HTTPException(409, "an update is running already")
     _updates_cache["at"] = 0.0  # (the next check looks again)
-    title = "Update ComfyUI" if target == "comfyui" else "Update kohya sd-scripts"
+    title = {
+        "comfyui": "Update ComfyUI",
+        "sd-scripts": "Update kohya sd-scripts",
+        "studio": "Update Sprite Studio",
+        "studio-rollback": "Go back to the previous Sprite Studio",
+    }[target]
     return JOBS.submit(
         "update",
         title,
-        [str(SCRIPTS / "pxupdate.sh"), target],
+        [sys.executable, str(SCRIPTS / "pxupdate.py"), target],
         lane="cpu",
         env={
             "COMFY": str(setting_path("comfy_dir")),
             "PX_LORA_HOME": str(setting_path("lora_home")),
             "COMFY_SERVICE": settings()["comfy_service"],
+            "SG_WEB_STATE": str(STATE_DIR),
         },
         meta={"target": target},
     )
@@ -2086,7 +2189,16 @@ def submit_previews(cat: str, model: str, epochs: list[int] | None = None, promp
 
 
 def follow_up(job: dict) -> None:
-    """What a finished job asked for next: a training run started with "render previews afterwards"."""
+    """What a finished job asked for next: a training run started with "render previews afterwards"; the app itself
+    restarting after it updated (or rolled back) its own files."""
+    if (
+        job["kind"] == "update"
+        and job["meta"].get("target") in ("studio", "studio-rollback")
+        and job["status"] == "done"
+    ):
+        if job["meta"].get("restart", True):
+            restart_self(3.0)
+        return
     if job["kind"] != "train" or job["status"] != "done" or not job["meta"].get("then_previews"):
         return
     cat, model = job["meta"]["category"], model_ok(job["meta"].get("model"))
@@ -3787,6 +3899,7 @@ if __name__ == "__main__":
     import uvicorn
 
     announce_setup()
+    confirm_update_when_healthy()
     uvicorn.run(
         app,
         host=os.environ.get("SG_WEB_HOST", "127.0.0.1"),

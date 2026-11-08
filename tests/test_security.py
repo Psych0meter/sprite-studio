@@ -207,9 +207,12 @@ def test_updates_are_cached(client, monkeypatch):
     monkeypatch.setattr(
         webapp, "check_repo_update", lambda name, repo: calls.append(name) or {"name": name, "ok": True}
     )
+    monkeypatch.setattr(
+        webapp, "check_studio_update", lambda: calls.append("studio") or {"name": "Sprite Studio", "ok": True}
+    )
     webapp._updates_cache.update(at=0.0, data=None)
     client.get("/api/updates")
     client.get("/api/updates")
-    assert len(calls) == 2  # two repositories, looked at once
+    assert len(calls) == 3  # Sprite Studio and two repositories, looked at once
     client.get("/api/updates?force=1")
-    assert len(calls) == 4
+    assert len(calls) == 6

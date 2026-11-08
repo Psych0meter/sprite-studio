@@ -153,6 +153,8 @@ user's home, downloads SD 1.5, installs the `comfyui` service, installs
 kohya sd-scripts with the same PyTorch, and installs the `spritegen-web`
 service with the sudo rule that lets it stop and start ComfyUI.
 
+Updating from the web page (Updates) needs no extra rights: the app replaces its own files in the installation folder and restarts itself (the service restarts on failure). The server needs outbound access to GitHub. Update a git checkout with `git pull` instead.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `SG_USER` | `spritegen` | the user that owns and runs everything |

@@ -206,16 +206,42 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   `DELETE /api/jobs` clears the finished ones (`?only=done`: the successful
   ones only). The speed estimates (`speed()`) read only jobs that exited 0
   without an error.
-- **Updates**: `GET /api/updates` runs `git fetch` in the ComfyUI folder and
-  in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
-  never pulls or installs (the fetch refreshes git's own remote records only).
-  The answer is cached for 15 minutes (`?force=1` looks again) and one check
-  runs at a time. `POST /api/updates/apply` (`{"target": "comfyui"|"sd-scripts"}`,
-  administrators only) submits a CPU-lane `update` job running
-  `scripts/pxupdate.sh`: it refuses modified tracked files, does
-  `git pull --ff-only`, installs the requirements in the checkout's venv and
-  restarts the ComfyUI service (the sudoers rule of `install.sh` allows it).
-  409 while a GPU job or another update runs.
+- **Updates**: only released versions are installed: the latest release is the
+  highest stable tag `vX.Y.Z` (`git ls-remote --tags --refs`; pre-release tags
+  such as `v1.2.0-rc.1` and other names are ignored). `GET /api/updates`
+  compares the installed version of Sprite Studio (`VERSION`, against
+  `SG_UPDATE_REPO`, default the project's repository), the ComfyUI folder and
+  `<lora_home>/sd-scripts` (a `git fetch --tags`; a checkout is behind when the
+  release tag is not an ancestor of `HEAD`, so a checkout past the release is
+  left alone). It never pulls or installs. The answer is cached for 15 minutes
+  (`?force=1` looks again) and one check runs at a time.
+  `POST /api/updates/apply` (`{"target": "comfyui"|"sd-scripts"|"studio"|
+  "studio-rollback"}`, administrators only) submits a CPU-lane `update` job
+  running `scripts/pxupdate.py <target>`; 409 while a GPU job or another
+  update runs (for `studio`, while any job runs).
+  - **ComfyUI, sd-scripts** (`git_target`): refuses modified tracked files,
+    saves `pip freeze` to `<state>/update/<target>-freeze.txt`, checks out the
+    release tag (detached), installs `requirements.txt`, then checks the result
+    (ComfyUI: restart the service, `/system_stats` answers within 2 minutes;
+    sd-scripts: `import library.train_util`). On any failure the previous
+    branch or commit is checked out and the frozen packages reinstalled.
+  - **Sprite Studio** (`studio_update`): refused on a git checkout (the
+    installation made by `install.sh` is a copy). The release is cloned, its tag
+    must be on the default branch and its `VERSION` must equal the tag, its
+    Python files must compile; the running files are copied to
+    `<state>/backups/app-<version>-<time>` (the last three are kept), the new
+    ones copied over (`scripts`, `webapp`, `docs`, `README.md`, `CHANGELOG.md`,
+    `VERSION`) and a marker `<state>/update_pending/` (`boots`, `backup`,
+    `from`, `to`) written. When the job ends the app re-executes itself. Two
+    safeguards undo an update that does not work: `webapp/run.sh` calls
+    `pxupdate.py studio-guard` at each start (the marker's `boots` counter
+    reaches 3 without a confirmation: the backup is copied back), and the
+    new process probes `/api/auth/state` after 25 s (answers: marker removed,
+    `last_update.json` says `ok`; no answer: `studio-rollback` and restart).
+    `studio-rollback` (the *Go back* button) copies the newest backup back and
+    records `last_update.json` (`rolled back`). Limit: the guard is the new
+    version's own `run.sh`, so a release whose `run.sh` is broken is only
+    caught by systemd restarting it into the 25 s probe, not by the guard.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.

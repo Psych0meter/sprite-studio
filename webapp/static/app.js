@@ -3017,29 +3017,38 @@ routes.settings = async (main) => {
 routes.users = (main) => usersPage(main);
 
 routes.updates = async (main) => {
-  if (!isAdmin()) { main.append(h("div", { class: "note bad" }, "Only an administrator updates ComfyUI and kohya sd-scripts.")); return; }
+  if (!isAdmin()) { main.append(h("div", { class: "note bad" }, "Only an administrator updates Sprite Studio, ComfyUI and kohya sd-scripts.")); return; }
   const box = h("div", { class: "stack" });
   const note = h("p", { class: "muted small" });
-  main.append(head("Updates", "ComfyUI and kohya sd-scripts, compared with their upstream repositories. Checking only reads (a git fetch); updating pulls the new code and its Python packages, never touches your models, LoRAs or results."),
+  main.append(head("Updates", "Sprite Studio, ComfyUI and kohya sd-scripts move to their latest released version only (a vX.Y.Z tag), never to unfinished work. Checking only reads; updating never touches your models, LoRAs or results. If an update fails its check, the previous version is put back automatically."),
     h("div", { class: "row", style: { marginBottom: "12px" } }, h("button", { class: "btn", type: "button", id: "recheck" }, "Check again"), note), box);
-  const targets = { "ComfyUI": "comfyui", "kohya sd-scripts": "sd-scripts" };
+  const targets = { "Sprite Studio": "studio", "ComfyUI": "comfyui", "kohya sd-scripts": "sd-scripts" };
   let data = null, checking = false;
+  const start = async (target, text, title, ok) => {
+    if (!(await askConfirm(text, { ok, title }))) return;
+    const job = await attempt(() => api("/updates/apply", { body: { target } }), "Started");
+    if (job) location.hash = "#/jobs/" + job.id;
+  };
+  const studioNotes = (it) => [
+    it.pending ? h("div", { class: "note warn" }, `Version ${it.pending.to} was installed and has not been confirmed yet. It is confirmed once it has run for 25 seconds; if it does not start, the previous version comes back on its own.`) : null,
+    it.last && it.last.status === "rolled back" ? h("div", { class: "note bad" }, `The last update (to ${it.last.from || "?"}) was rolled back: ${it.last.reason || "it failed"}. You are on ${it.last.to}.`) : null,
+  ];
   const draw = () => {
     note.textContent = checking ? "Checking…" : data ? "Checked " + fmtTime(data.checked) : "";
     box.replaceChildren(...(data ? data.items.map((it) => h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, it.name),
-        it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.behind} newer commit${it.behind === 1 ? "" : "s"}`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
+        it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.latest} available`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
+      it.studio ? studioNotes(it) : null,
       it.ok ? [
-        h("p", { class: "small" }, `Installed ${it.current} on ${it.branch}`, it.behind ? `, latest ${it.latest}` : "", h("span", { class: "muted mono" }, "  " + it.path)),
-        it.behind ? h("ul", { class: "small mono", style: { margin: "6px 0 10px 18px", padding: 0 } }, it.commits.map((c) => h("li", {}, c))) : null,
-        it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, git pull, git stash pop), or the update refuses.") : null,
-        it.behind ? h("button", { class: "btn primary", type: "button", disabled: it.dirty, onclick: async () => {
-          const extra = it.name === "ComfyUI" ? " ComfyUI restarts at the end." : " No training should be running.";
-          if (!(await askConfirm(`Update ${it.name} from ${it.current} to ${it.latest}?${extra} It runs as a job: you can follow it in Jobs.`, { ok: "Update", title: "Update " + it.name }))) return;
-          const job = await attempt(() => api("/updates/apply", { body: { target: targets[it.name] } }), "Update started");
-          if (job) location.hash = "#/jobs/" + job.id;
-        } }, "Update now") : null,
-      ] : h("p", { class: "muted small" }, it.error || "unknown error"))) : []));
+        h("p", { class: "small" }, `Installed ${it.current}`, `, latest release ${it.latest}`, h("span", { class: "muted mono" }, "  " + it.path)),
+        it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, then update, then git stash pop), or the update refuses.") : null,
+        it.behind ? h("button", { class: "btn primary", type: "button", disabled: it.dirty, onclick: () => start(targets[it.name],
+          it.studio ? `Update Sprite Studio from ${it.current} to ${it.latest}? No job may be running. The page restarts by itself in a few seconds; if the new version does not start or answer, the previous one is put back automatically.`
+            : `Update ${it.name} from ${it.current} to ${it.latest}?${it.name === "ComfyUI" ? " ComfyUI restarts at the end." : " No training should be running."} If its check fails, the previous version is put back. It runs as a job: you can follow it in Jobs.`,
+          "Update " + it.name, "Update") }, "Update now") : null,
+      ] : h("p", { class: "muted small" }, it.error || "unknown error"),
+      it.studio && it.can_roll_back ? h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "btn ghost sm", type: "button", onclick: () => start("studio-rollback",
+        "Put the previous Sprite Studio version back (the copy kept before the last update)? The page restarts by itself.", "Go back", "Go back") }, "Go back to the previous version")) : null)) : []));
   };
   const check = async (force) => {
     checking = true; draw();

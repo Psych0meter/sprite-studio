@@ -307,7 +307,7 @@ def test_jobs_clear_only_successful(client):
         webapp.JOBS.jobs.clear()
 
 
-def test_updates_compares_with_upstream(client, env, tmp_path):
+def test_updates_compare_with_the_latest_release_not_the_branch_tip(client, env, tmp_path, monkeypatch):
     import subprocess
 
     def git(cwd, *a):
@@ -321,15 +321,21 @@ def test_updates_compares_with_upstream(client, env, tmp_path):
     (up / "f").write_text("1")
     git(up, "add", "f")
     git(up, "commit", "-q", "-m", "first")
-    # the ComfyUI folder itself is the checkout
-    shutil.rmtree(env["comfy"])
+    git(up, "tag", "v1.0.0")
+    shutil.rmtree(env["comfy"])  # the ComfyUI folder itself is the checkout
     subprocess.run(["git", "clone", "-q", str(up), str(env["comfy"])], check=True, capture_output=True)
     (up / "f").write_text("2")
-    git(up, "commit", "-qam", "second")
+    git(up, "commit", "-qam", "unreleased work")
+    monkeypatch.setenv("SG_UPDATE_REPO", str(up))
+    monkeypatch.setenv("PXUPDATE_APP", str(tmp_path / "installed"))  # (an installation: a copy, not a checkout)
     items = {i["name"]: i for i in client.get("/api/updates?force=1").json()["items"]}
-    assert items["ComfyUI"]["ok"] and items["ComfyUI"]["behind"] == 1
-    assert items["ComfyUI"]["commits"][0].endswith("second")
+    assert items["ComfyUI"]["ok"] and items["ComfyUI"]["behind"] == 0  # the branch moved, no release did
+    git(up, "tag", "v1.1.0")
+    items = {i["name"]: i for i in client.get("/api/updates?force=1").json()["items"]}
+    assert items["ComfyUI"]["behind"] == 1 and items["ComfyUI"]["latest"] == "v1.1.0"
     assert not items["kohya sd-scripts"]["ok"]
+    studio = items["Sprite Studio"]
+    assert studio["ok"] and studio["latest"] == "v1.1.0" and studio["behind"] == 1 and studio["can_roll_back"] is False
 
 
 def test_speed_ignores_jobs_that_did_not_really_finish(client):
@@ -420,3 +426,19 @@ def test_training_speed_is_seconds_per_step_of_each_base_model(client, tmp_path)
         assert webapp.speed()["train_sec_per_step"] == {"sd15": 2.0, "sdxl": 3.6}
     finally:
         webapp.JOBS.jobs.clear()
+
+
+def test_a_leftover_update_marker_is_cleared_and_a_finished_studio_update_restarts(client, monkeypatch):
+    import app as webapp
+
+    marker = webapp.STATE_DIR / "update_pending"
+    marker.mkdir(parents=True)
+    (marker / "to").write_text("0.0.1-not-this-one")
+    webapp.confirm_update_when_healthy(0.0)
+    assert not marker.exists()  # (the running version is not the one the marker waits for)
+    seen = []
+    monkeypatch.setattr(webapp, "restart_self", lambda delay=3.0: seen.append(delay))
+    webapp.follow_up({"kind": "update", "status": "done", "meta": {"target": "studio"}})
+    webapp.follow_up({"kind": "update", "status": "failed", "meta": {"target": "studio"}})
+    webapp.follow_up({"kind": "update", "status": "done", "meta": {"target": "comfyui"}})
+    assert seen == [3.0]

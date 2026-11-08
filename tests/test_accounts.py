@@ -369,6 +369,10 @@ def test_updating_is_for_administrators_and_waits_for_an_idle_gpu(team, monkeypa
     monkeypatch.setattr(app.JOBS, "submit", lambda *a, **k: seen.append((a, k)) or {"id": "j1", "kind": a[0]})
     r = admin.post("/api/updates/apply", json={"target": "sd-scripts"})
     assert r.status_code == 200 and seen[0][0][0] == "update" and seen[0][0][2][-1] == "sd-scripts"
+    app.JOBS.jobs["idle"] = {"status": "running", "lane": "cpu", "kind": "batch", "owner": "ann"}
+    assert admin.post("/api/updates/apply", json={"target": "studio"}).status_code == 409  # it restarts: no job at all
+    app.JOBS.jobs.pop("idle")
+    assert admin.post("/api/updates/apply", json={"target": "studio"}).status_code == 200
     app.JOBS.jobs["busy"] = {"status": "running", "lane": "gpu", "kind": "train", "owner": "ann"}
     assert admin.post("/api/updates/apply", json={"target": "comfyui"}).status_code == 409
     app.JOBS.jobs.pop("busy")
