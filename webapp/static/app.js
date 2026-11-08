@@ -17,7 +17,7 @@ function h(tag, attrs, ...kids) {
     if (v === null || v === undefined || v === false) continue;
     if (k === "class") el.className = v;
     else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), k === "onclick" || k === "onchange" ? loadingWhileCalling(v) : v);
     else if (k === "html") el.innerHTML = v;
     else if (v === true) el.setAttribute(k, "");
     else el.setAttribute(k, v);
@@ -45,6 +45,21 @@ async function busyWhile(els, work) {
   const list = [].concat(els).filter(Boolean);
   list.forEach((el) => el.classList.add("is-loading"));
   try { return await work(); } finally { list.forEach((el) => el.classList.remove("is-loading")); }
+}
+
+/** Wraps a click / change handler: when it returns a promise and a request is still running after a moment, the
+ *  element is dimmed with a spinner until it settles (a handler waiting for the person, like a dialog, shows nothing). */
+function loadingWhileCalling(fn) {
+  return function (e) {
+    const out = fn.call(this, e);
+    if (!out || typeof out.then !== "function") return out;
+    const el = e && e.currentTarget;
+    if (!el || !el.classList) return out;
+    const t = setTimeout(() => { if (pendingCalls > 0) el.classList.add("is-loading"); }, 250);
+    const done = () => { clearTimeout(t); el.classList.remove("is-loading"); };
+    out.then(done, done);
+    return out;
+  };
 }
 
 async function api(path, opts = {}) {
