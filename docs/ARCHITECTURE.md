@@ -201,7 +201,12 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
   never pulls or installs (the fetch refreshes git's own remote records only).
   The answer is cached for 15 minutes (`?force=1` looks again) and one check
-  runs at a time.
+  runs at a time. `POST /api/updates/apply` (`{"target": "comfyui"|"sd-scripts"}`,
+  administrators only) submits a CPU-lane `update` job running
+  `scripts/pxupdate.sh`: it refuses modified tracked files, does
+  `git pull --ff-only`, installs the requirements in the checkout's venv and
+  restarts the ComfyUI service (the sudoers rule of `install.sh` allows it).
+  409 while a GPU job or another update runs.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.

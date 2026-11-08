@@ -358,3 +358,17 @@ def test_nobody_removes_or_disables_their_own_account(client):
         assert r.status_code == 400 and "your own" in r.json()["error"]
     assert client.patch("/api/users/admin", json={"disabled": True}).status_code == 400
     assert client.get("/api/auth/me").status_code == 200
+
+
+def test_updating_is_for_administrators_and_waits_for_an_idle_gpu(team, monkeypatch):
+    admin, ann, _ = team
+    app = admin.module
+    assert ann.post("/api/updates/apply", json={"target": "comfyui"}).status_code == 403
+    assert admin.post("/api/updates/apply", json={"target": "rm -rf"}).status_code == 400
+    seen = []
+    monkeypatch.setattr(app.JOBS, "submit", lambda *a, **k: seen.append((a, k)) or {"id": "j1", "kind": a[0]})
+    r = admin.post("/api/updates/apply", json={"target": "sd-scripts"})
+    assert r.status_code == 200 and seen[0][0][0] == "update" and seen[0][0][2][-1] == "sd-scripts"
+    app.JOBS.jobs["busy"] = {"status": "running", "lane": "gpu", "kind": "train", "owner": "ann"}
+    assert admin.post("/api/updates/apply", json={"target": "comfyui"}).status_code == 409
+    app.JOBS.jobs.pop("busy")

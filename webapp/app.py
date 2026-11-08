@@ -1287,7 +1287,7 @@ OWN_ACCOUNT_API = {
     "/api/auth/password",
     "/api/auth/logout",
 }  # all a user who must change their password may use
-ADMIN_ONLY = re.compile(r"^/api/(settings$|comfy/|updates$|train/setup-sdxl$|users(?!/names$))")
+ADMIN_ONLY = re.compile(r"^/api/(settings$|comfy/|updates(/|$)|train/setup-sdxl$|users(?!/names$))")
 
 
 @app.middleware("http")
@@ -1406,6 +1406,35 @@ def api_updates(force: int = 0):
             ]
             c["at"] = time.time()
         return {"checked": c["at"], "items": c["data"]}
+
+
+@app.post("/api/updates/apply")
+async def api_updates_apply(request: Request):
+    """Updates ComfyUI or kohya sd-scripts (scripts/pxupdate.sh: a fast-forward pull, then their requirements) as a
+    job. Refused while a job uses the GPU, because the code and packages would change under it."""
+    b = await request.json()
+    target = b.get("target")
+    if target not in ("comfyui", "sd-scripts"):
+        raise HTTPException(400, "choose comfyui or sd-scripts")
+    with _lock:
+        if any(j["status"] in ("running", "queued") and j["lane"] == "gpu" for j in JOBS.jobs.values()):
+            raise HTTPException(409, "a job is using the GPU: update when the queue is empty")
+        if any(j["status"] in ("running", "queued") and j["kind"] == "update" for j in JOBS.jobs.values()):
+            raise HTTPException(409, "an update is running already")
+    _updates_cache["at"] = 0.0  # (the next check looks again)
+    title = "Update ComfyUI" if target == "comfyui" else "Update kohya sd-scripts"
+    return JOBS.submit(
+        "update",
+        title,
+        [str(SCRIPTS / "pxupdate.sh"), target],
+        lane="cpu",
+        env={
+            "COMFY": str(setting_path("comfy_dir")),
+            "PX_LORA_HOME": str(setting_path("lora_home")),
+            "COMFY_SERVICE": settings()["comfy_service"],
+        },
+        meta={"target": target},
+    )
 
 
 @app.post("/api/comfy/{action}")

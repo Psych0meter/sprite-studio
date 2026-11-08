@@ -435,7 +435,7 @@ a batch. The preview is computed exactly as generation will do it.
 | Training precision | Automatic: bf16 on RTX 30 and newer, fp16 on RTX 20, full precision on older cards; SDXL always in half precision |
 | ComfyUI during training | stopped on cards under 15 GB (Settings: auto, always, never) |
 | Time estimates | measured from your own jobs that finished without error (failed, cancelled and partly failed ones are ignored) |
-| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only); updating stays a manual `git pull` |
+| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only). Administrators update from the **Updates** page (*Update now*: `git pull --ff-only`, requirements, ComfyUI restart; it waits for an idle GPU and refuses local changes) |
 
 ## 9. Accounts and sharing
 

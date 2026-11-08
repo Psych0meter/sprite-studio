@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Rename** and **Delete** manage them (several at once), **Compare** opens
   Compare LoRAs with the ticked files.
 - **Menu**: the version of the app is shown at the bottom of the left menu.
+- **Updates**: an administrator page (*Updates* in the menu, also linked from the Overview) shows what is new upstream for ComfyUI and kohya sd-scripts and has an *Update now* button: a fast-forward `git pull`, the Python requirements, and a ComfyUI restart, as a job with a log. It waits for an idle GPU and refuses a checkout with local changes (`scripts/pxupdate.sh`).
+- **Spinners**: a small spinner appears while the app waits for the server (after 0.4 s), pages show a loading note, and the thing you changed (a model chip in Generate, a select in Train or Compare) is dimmed until its data arrives.
 
 ### Changed
 
@@ -66,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Users**: you can no longer remove or disable your own account (the buttons are hidden on your row and the server refuses).
+- **Results**: the list of results is faster with many shared items (the access list is read once per change, not once per request).
 - **Train on picks**: a refused request (an unknown group or kind, an invalid model) no longer leaves a new model behind, and only the picks that really became sprites lose their star.
 - **Updates**: the check is kept for 15 minutes, only one runs at a time, and a checkout with no upstream branch says so. *Check again* looks again at once.
 

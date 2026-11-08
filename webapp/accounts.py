@@ -148,15 +148,27 @@ class Accounts:
         self.state = Path(state)
         self.lock = threading.RLock()
         self._fails: dict[str, list[float]] = {}  # key -> [count, locked_until]
+        self._cache: dict[str, tuple[tuple[int, int], Any]] = {}
         self._seen: dict[str, float] = {}  # session hash -> last write of its last_seen
         self.state.mkdir(parents=True, exist_ok=True)
 
     # ---- files (0600: hashes and tokens)
-    def _read(self, name: str, default: Any) -> Any:
+    def _read(self, name: str, default: Any, fresh: bool = False) -> Any:
+        """A state file. Readers share one parsed copy, parsed again only when the file changed (a list asks for
+        the same file for every row), so they must not change it; code that changes it asks for `fresh`."""
+        path = self.state / name
         try:
-            return json.loads((self.state / name).read_text())
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            hit = None if fresh else self._cache.get(name)
+            if hit and hit[0] == key:
+                return hit[1]
+            data = json.loads(path.read_text())
         except (OSError, ValueError):
             return default
+        if not fresh:
+            self._cache[name] = (key, data)
+        return data
 
     def _write(self, name: str, data: Any) -> None:
         tmp = self.state / (name + ".tmp")
@@ -183,7 +195,7 @@ class Accounts:
 
     # ---- users
     def users(self) -> dict[str, dict]:
-        return self._read("users.json", {})
+        return self._read("users.json", {}, True)
 
     def has_users(self) -> bool:
         return bool(self.users())
@@ -373,7 +385,7 @@ class Accounts:
         token = secrets.token_urlsafe(32)
         now = time.time()
         with self.lock:
-            sessions = self._read("sessions.json", {})
+            sessions = self._read("sessions.json", {}, True)
             sessions = {h: s for h, s in sessions.items() if self._alive(s, now)}
             sessions[self._hash(token)] = {"user": name, "created": now, "seen": now, "ip": ip, "agent": agent[:120]}
             self._write("sessions.json", sessions)
@@ -392,7 +404,7 @@ class Accounts:
             return None
         h = self._hash(token)
         now = time.time()
-        sessions = self._read("sessions.json", {})
+        sessions = self._read("sessions.json", {}, True)
         s = sessions.get(h)
         if not s or not self._alive(s, now):
             return None
@@ -401,7 +413,7 @@ class Accounts:
             return None
         if now - self._seen.get(h, 0) > 300:  # the last-seen time is written at most every 5 minutes
             with self.lock:
-                sessions = self._read("sessions.json", {})
+                sessions = self._read("sessions.json", {}, True)
                 if h in sessions:
                     sessions[h]["seen"] = now
                     self._write("sessions.json", sessions)
@@ -410,7 +422,7 @@ class Accounts:
 
     def logout(self, token: str) -> None:
         with self.lock:
-            sessions = self._read("sessions.json", {})
+            sessions = self._read("sessions.json", {}, True)
             s = sessions.pop(self._hash(token), None)
             self._write("sessions.json", sessions)
         if s:
@@ -420,13 +432,13 @@ class Accounts:
         """Ends the sessions of a user (all but the one of `keep_token`)."""
         keep = self._hash(keep_token) if keep_token else ""
         with self.lock:
-            sessions = self._read("sessions.json", {})
+            sessions = self._read("sessions.json", {}, True)
             sessions = {h: s for h, s in sessions.items() if s["user"] != username or h == keep}
             self._write("sessions.json", sessions)
 
     # ---- ownership and sharing
-    def _acl(self) -> dict:
-        return self._read("acl.json", {})
+    def _acl(self, fresh: bool = False) -> dict:
+        return self._read("acl.json", {}, fresh)
 
     def entry(self, kind: str, key: str) -> dict | None:
         return self._acl().get(kind, {}).get(key)
@@ -438,7 +450,7 @@ class Accounts:
     def claim(self, kind: str, key: str, owner: str, replace: bool = False) -> None:
         """Records the owner of a new resource (an existing owner is kept unless `replace`)."""
         with self.lock:
-            acl = self._acl()
+            acl = self._acl(True)
             e = acl.setdefault(kind, {}).get(key)
             if e and e.get("owner") and not replace:
                 return
@@ -447,13 +459,13 @@ class Accounts:
 
     def forget(self, kind: str, key: str) -> None:
         with self.lock:
-            acl = self._acl()
+            acl = self._acl(True)
             if acl.get(kind, {}).pop(key, None) is not None:
                 self._write("acl.json", acl)
 
     def rename(self, kind: str, old: str, new: str) -> None:
         with self.lock:
-            acl = self._acl()
+            acl = self._acl(True)
             e = acl.get(kind, {}).pop(old, None)
             if e is not None:
                 acl[kind][new] = e
@@ -464,7 +476,7 @@ class Accounts:
             raise AccountError("unknown kind of resource", 404)
         known = self.users()
         with self.lock:
-            acl = self._acl()
+            acl = self._acl(True)
             e = acl.get(kind, {}).get(key)
             if not e:
                 raise AccountError("this resource has no owner yet: an administrator can give it one", 409)
@@ -505,7 +517,7 @@ class Accounts:
         """Gives everything `source` owns to `target`; the shares of those resources are kept."""
         n = 0
         with self.lock:
-            acl = self._acl()
+            acl = self._acl(True)
             for items in acl.values():
                 for e in items.values():
                     if e.get("owner") == source:

@@ -378,3 +378,12 @@ th.sortable:hover { color: var(--text, inherit); }
 .account + .rail-version { margin-top: 0; }
 .rail [hidden] { display: none; }
 [hidden] { display: none !important; }
+
+/* ---- things that are loading */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--amber); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -3px; }
+.busy { position: fixed; top: 12px; right: 16px; z-index: 60; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 7px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3); }
+.page-loading { color: var(--muted); padding: 24px 4px; }
+.is-loading { position: relative; pointer-events: none; opacity: 0.55; transition: opacity 0.15s; }
+.is-loading::after { content: ""; position: absolute; top: 12px; right: 12px; width: 20px; height: 20px; border: 2px solid var(--line); border-top-color: var(--amber); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .spinner, .is-loading::after { animation-duration: 3s; } }

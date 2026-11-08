@@ -28,6 +28,7 @@
     <a href="#/loras" data-route="loras">Compare LoRAs</a>
     <div class="rail-gap"></div>
     <a href="#/jobs" data-route="jobs">Jobs <span class="count" id="queue-count"></span></a>
+    <a href="#/updates" data-route="updates" data-admin hidden>Updates</a>
     <a href="#/users" data-route="users" data-admin hidden>Users</a>
     <a href="#/settings" data-route="settings" data-admin hidden>Settings</a>
     <div id="account" class="account"></div>
@@ -41,6 +42,7 @@
     <main id="main" tabindex="-1"></main>
   </div>
 </div>
+<div id="busy" class="busy" hidden role="status" aria-label="Working"><span class="spinner"></span></div>
 <div id="toasts" class="toasts" aria-live="polite"></div>
 <div id="modal" class="modal" hidden></div>
 <script src="palette.js"></script>
