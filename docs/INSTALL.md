@@ -142,8 +142,9 @@ As root, from a checkout of the repository:
 git clone https://github.com/Psych0meter/sprite-studio.git
 cd sprite-studio
 sudo SG_DATA=/mnt/sprites scripts/install.sh      # SG_DATA optional
-Running it again later keeps the `SG_DATA` the service already uses; pass `SG_DATA=...` to change it.
 ```
+
+Running it again later keeps the `SG_DATA` the service already uses; pass `SG_DATA=...` to change it.
 
 It checks the GPU devices, installs the packages, creates the user,
 installs ComfyUI with a PyTorch build that supports the card (and stops
