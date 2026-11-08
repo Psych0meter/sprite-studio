@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-08
+
+### Fixed
+
+- **Spinners**: the corner spinner shows above dialogs (it was hidden behind them, so *Train on picks* looked frozen), and any button or select that waits for the server (more than a quarter of a second) is dimmed with its own spinner until it answers, in dialogs and pages alike.
+- **Models**: the *Remaster distance* of a kind moves in steps of 0.01 with the arrows (it jumped by 0.15 or more), and stays between 0.30 and 0.95.
+- **Models**: a new group or kind starts with the file name pattern `.` (every sprite) instead of an empty one, which matched nothing. An empty pattern still means "only sprites you sort by hand".
+- **Train**: the time estimate is now seconds per step, measured on your last finished runs of the same base model (SD 1.5 and SDXL apart), times the steps of the next run (images × repeats × epochs). It follows the *Epochs* and *Repeats* fields as you type. Before, it was the total time of the last run, whatever its size.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
@@ -205,7 +214,8 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Psych0meter/sprite-studio/releases/tag/v0.1.0

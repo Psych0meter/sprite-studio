@@ -17,7 +17,7 @@ function h(tag, attrs, ...kids) {
     if (v === null || v === undefined || v === false) continue;
     if (k === "class") el.className = v;
     else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), k === "onclick" || k === "onchange" ? loadingWhileCalling(v) : v);
     else if (k === "html") el.innerHTML = v;
     else if (v === true) el.setAttribute(k, "");
     else el.setAttribute(k, v);
@@ -45,6 +45,21 @@ async function busyWhile(els, work) {
   const list = [].concat(els).filter(Boolean);
   list.forEach((el) => el.classList.add("is-loading"));
   try { return await work(); } finally { list.forEach((el) => el.classList.remove("is-loading")); }
+}
+
+/** Wraps a click / change handler: when it returns a promise and a request is still running after a moment, the
+ *  element is dimmed with a spinner until it settles (a handler waiting for the person, like a dialog, shows nothing). */
+function loadingWhileCalling(fn) {
+  return function (e) {
+    const out = fn.call(this, e);
+    if (!out || typeof out.then !== "function") return out;
+    const el = e && e.currentTarget;
+    if (!el || !el.classList) return out;
+    const t = setTimeout(() => { if (pendingCalls > 0) el.classList.add("is-loading"); }, 250);
+    const done = () => { clearTimeout(t); el.classList.remove("is-loading"); };
+    out.then(done, done);
+    return out;
+  };
 }
 
 async function api(path, opts = {}) {
@@ -1597,7 +1612,7 @@ routes.train = async (main, parts) => {
         h("a", { href: "#/models/" + cat }, `Groups: ${c.groups.filter((g) => g.enabled).map((g) => g.label).join(", ") || "none"}.`), " Change them in Models, then build again."),
       h("div", { class: "row" },
         h("div", { class: "field", style: { width: "130px" } }, h("label", {}, "Repeats"),
-          h("input", { type: "number", min: 1, max: 30, value: opts.repeats, placeholder: String(c.repeats || ""), oninput: (e) => { opts.repeats = e.target.value; keep(); } })),
+          h("input", { type: "number", min: 1, max: 30, value: opts.repeats, placeholder: String(c.repeats || ""), oninput: (e) => { opts.repeats = e.target.value; keep(); refreshEstimate(); } })),
         h("button", { class: "btn" + (ds.exists ? "" : " primary"), style: { alignSelf: "flex-end" }, disabled: !!running,
           onclick: async () => { const j = await attempt(() => api(`/train/${cat}/dataset`, { body: opts }), "Building the training set"); if (j) schedule(800); } },
           ds.exists ? "Build again" : "Build the training set")),
@@ -1630,9 +1645,12 @@ routes.train = async (main, parts) => {
     box.append(s1);
 
     // 2. training
+    const stepsOf = () => (ds.exists ? ds.count * (Number(opts.repeats) || ds.repeats || 1) * (Number(opts.epochs) || (xl ? 8 : 12)) : 0);
+    const estimate = h("span", { class: "muted small" }, trainEstimate(xl, stepsOf()));
+    refreshEstimate = () => { estimate.textContent = trainEstimate(xl, stepsOf()); };
     const s2 = h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("div", { class: "step-head" }, h("span", { class: "n" + (info.checkpoints.length ? " done" : "") }, "2"), h("h2", {}, "Train")),
-        h("span", { class: "muted small" }, trainEstimate(xl))));
+        estimate));
     if (trainJob && ["running", "queued"].includes(trainJob.status)) {
       const holder = h("div", {}, trainProgress(trainJob));
       live.train = { id: trainJob.id, el: holder };
@@ -1758,8 +1776,9 @@ routes.train = async (main, parts) => {
     update();
     return el;
   };
+  let refreshEstimate = () => {};
   const numField = (label, key, min, max, step, hint, placeholder) => h("div", { class: "field" }, h("label", {}, label),
-    h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); } }), h("div", { class: "hint" }, hint));
+    h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); if (key === "epochs") refreshEstimate(); } }), h("div", { class: "hint" }, hint));
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
     if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); redraw(); }
@@ -1767,9 +1786,13 @@ routes.train = async (main, parts) => {
   await redraw();
 };
 
-/** How long a training run takes here: the last run's time when there is one. */
-function trainEstimate(xl) {
-  const t = S.catalog && S.catalog.speed && S.catalog.speed.train_minutes[xl ? "sdxl" : "sd15"];
+/** How long a training run takes here: the seconds per step measured on this machine's finished runs of this base
+ *  model, times the steps this run will have (images x repeats x epochs). Without steps or runs: a rough guide. */
+function trainEstimate(xl, steps) {
+  const sp = S.catalog && S.catalog.speed;
+  const sps = sp && sp.train_sec_per_step && sp.train_sec_per_step[xl ? "sdxl" : "sd15"];
+  if (sps && steps) return `about ${fmtDur(sps * steps)} (${steps} steps at ${sps.toFixed(1)} s each, from your last runs)`;
+  const t = sp && sp.train_minutes && sp.train_minutes[xl ? "sdxl" : "sd15"];
   if (t) return `about ${fmtDur(t * 60)} (your last run)`;
   return xl ? "several hours on an 8 GB card, less on newer ones" : "about 1 to 2 hours on an 8 GB card, less on newer ones";
 }
@@ -2330,7 +2353,7 @@ async function modelEditor(main, mid, tab) {
   };
 
   // ---- groups and kinds
-  const cell = (obj, key, opts = {}) => h("input", { type: opts.type || "text", value: obj[key] ?? "", placeholder: opts.ph || "", class: opts.mono ? "mono" : "",
+  const cell = (obj, key, opts = {}) => h("input", { type: opts.type || "text", value: obj[key] ?? "", placeholder: opts.ph || "", class: opts.mono ? "mono" : "", step: opts.step, min: opts.min, max: opts.max,
     style: { minWidth: opts.w || "80px" }, oninput: (e) => { obj[key] = opts.type === "number" ? (e.target.value === "" ? "" : Number(e.target.value)) : e.target.value; dirty = true; } });
   const drawGroups = () => {
     const counts = {};
@@ -2356,15 +2379,15 @@ async function modelEditor(main, mid, tab) {
         h("td", { title: "New sprites: how much of the canvas the longest side takes, 50 to 100 (0: the model's setting)" }, cell(k, "fill", { type: "number", w: "70px", ph: "0" })),
         h("td", {}, h("input", { type: "checkbox", checked: !!k.tile, title: "Opaque tiles (floors, walls) in full colour: no background removal, no colour limit, no outline", onchange: (e) => { k.tile = e.target.checked; dirty = true; } })),
         h("td", { title: "Tiles: a remaster keeps the original's outer pixels, so tiles that join still join (0: none, up to 64)" }, cell(k, "edge", { type: "number", w: "70px", ph: "0" })),
-        h("td", {}, cell(k, "pattern", { mono: true, w: "150px", ph: "^small_" })), h("td", {}, cell(k, "denoise", { type: "number", w: "80px" })),
+        h("td", {}, cell(k, "pattern", { mono: true, w: "150px", ph: "^small_" })), h("td", {}, cell(k, "denoise", { type: "number", w: "80px", step: 0.01, min: 0.3, max: 0.95 })),
         h("td", {}, iconBtn("x", "Remove this kind", () => { m.kinds.splice(i, 1); dirty = true; drawGroups(); }))))));
     body.append(
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Groups"),
-        h("button", { class: "btn sm", onclick: () => { m.groups.push({ id: "group" + (m.groups.length + 1), label: "New group", words: "", keywords: "", pattern: "", name_pattern: "", name_format: "{}", enabled: true }); dirty = true; drawGroups(); } }, "Add a group")),
+        h("button", { class: "btn sm", onclick: () => { m.groups.push({ id: "group" + (m.groups.length + 1), label: "New group", words: "", keywords: "", pattern: ".", name_pattern: "", name_format: "{}", enabled: true }); dirty = true; drawGroups(); } }, "Add a group")),
         h("p", { class: "small muted" }, "The main axis: a team, a family of items. Its words and keywords go into every caption of its sprites, and into the prompt when you generate for it. A sprite joins the first group whose pattern (a regular expression on the file name) matches, unless you set it by hand in Sprites. \"Own words from\": a pattern whose first (bracket) part becomes the sprite's own words, e.g. the item's name."),
         h("div", { class: "table-wrap" }, gt)),
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Kinds"),
-        h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: "", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
+        h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: ".", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
         h("p", { class: "small muted" }, "Optional second axis: a size class. Its words go into the captions too; its size sets the pixel grid of training and the size of what is generated. A model without kinds uses each sprite's own size."),
         m.kinds.length ? h("div", { class: "table-wrap" }, kt) : h("p", { class: "muted" }, "No kinds."),
         m.kinds.some((k) => !k.tile && Number(k.size) > 200) ? h("div", { class: "hint", style: { marginTop: "8px" } }, "A sprite rarely needs more than about 200 px. Smaller sprites keep the pixel-art look, are quicker to train and are easier for the model to get right.") : null),
