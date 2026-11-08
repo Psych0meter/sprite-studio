@@ -1439,6 +1439,68 @@ _updates_lock = threading.Lock()
 UPDATES_TTL = 15 * 60  # a check is reused for 15 minutes; ?force=1 looks again
 
 
+_notes_cache: dict[tuple[str, str], dict] = {}
+
+
+def disk_info(path: Path) -> dict:
+    """Space of the volume that holds `path` (its nearest existing parent): total, used, free in bytes."""
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        u = shutil.disk_usage(p)
+    except OSError:
+        return {}
+    return {"disk": {"total": u.total, "used": u.used, "free": u.free}}
+
+
+def tree_size(path: Path) -> int:
+    """Bytes under a folder (0 when it is missing); files that vanish meanwhile are skipped."""
+    total = 0
+    for f in Path(path).rglob("*") if Path(path).is_dir() else []:
+        with contextlib.suppress(OSError):
+            if f.is_file() and not f.is_symlink():
+                total += f.stat().st_size
+    return total
+
+
+def github_slug(url: str) -> str | None:
+    """`owner/repo` of a GitHub remote (https or ssh form), or None for any other host."""
+    m = re.match(
+        r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$",
+        url.strip(),
+    )
+    return m.group(1) if m else None
+
+
+def release_links(remote: str, tag: str | None, want_notes: bool) -> dict:
+    """The GitHub page of a repository, and (when a newer release exists) the page and notes of that release.
+    Only github.com is asked, with a short timeout; any failure leaves the link and no notes."""
+    slug = github_slug(remote)
+    if not slug:
+        return {}
+    out: dict[str, Any] = {"repo_url": f"https://github.com/{slug}"}
+    if not tag:
+        return out
+    out["release_url"] = f"https://github.com/{slug}/releases/tag/{tag}"
+    if want_notes:
+        key = (slug, tag)
+        if key not in _notes_cache:
+            notes = ""
+            try:
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{slug}/releases/tags/{tag}",
+                    headers={"Accept": "application/vnd.github+json", "User-Agent": "sprite-studio"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as r:  # noqa: S310  (a fixed https host)
+                    notes = str(json.loads(r.read(200000)).get("body") or "")[:6000]
+            except (OSError, ValueError):
+                pass
+            _notes_cache[key] = {"notes": notes}
+        out.update(_notes_cache[key])
+    return out
+
+
 def check_repo_update(name: str, repo: Path) -> dict:
     """Compares a git checkout with the latest released version (the highest stable `vX.Y.Z` tag). `git fetch --tags`
     refreshes git's own records of the remote; the files of the checkout are never touched and nothing is installed."""
@@ -1462,6 +1524,8 @@ def check_repo_update(name: str, repo: Path) -> dict:
             latest=tag,
             behind=0 if at_or_past else 1,
             dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),  # tracked files edited here
+            **release_links(_git(repo, "remote", "get-url", "origin"), tag, not at_or_past),
+            **disk_info(repo),
         )
     except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
         info.update(ok=False, error=str(e)[:300])
@@ -1479,11 +1543,18 @@ def studio_state() -> dict:
         with contextlib.suppress(OSError, ValueError):
             d["last"] = json.loads(last.read_text())
     d["can_roll_back"] = bool(pxupdate.backups())
+    d["backups_bytes"] = tree_size(STATE_DIR / "backups")
     return d
 
 
 def check_studio_update() -> dict:
-    info: dict[str, Any] = {"name": "Sprite Studio", "path": str(pxupdate.app_dir()), "studio": True, **studio_state()}
+    info: dict[str, Any] = {
+        "name": "Sprite Studio",
+        "path": str(pxupdate.app_dir()),
+        "studio": True,
+        **studio_state(),
+        **disk_info(pxupdate.app_dir()),
+    }
     if (pxupdate.app_dir() / ".git").exists():
         return {
             **info,
@@ -1491,11 +1562,19 @@ def check_studio_update() -> dict:
             "error": "this is a git checkout: update it with git pull (an installation made by install.sh updates here)",
         }
     try:
-        tag = pxupdate.latest_release(os.environ.get("SG_UPDATE_REPO", pxupdate.STUDIO_REPO))
+        repo = os.environ.get("SG_UPDATE_REPO", pxupdate.STUDIO_REPO)
+        tag = pxupdate.latest_release(repo)
         if not tag:
             raise OSError("no released version (a vX.Y.Z tag) found upstream")
         behind = pxupdate.version_key(tag) > pxupdate.version_key(VERSION)
-        info.update(ok=True, current="v" + VERSION, latest=tag, behind=1 if behind else 0, dirty=False)
+        info.update(
+            ok=True,
+            current="v" + VERSION,
+            latest=tag,
+            behind=1 if behind else 0,
+            dirty=False,
+            **release_links(repo, tag, behind),
+        )
     except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
         info.update(ok=False, error=str(e)[:300])
     return info

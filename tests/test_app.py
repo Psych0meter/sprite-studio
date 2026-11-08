@@ -442,3 +442,40 @@ def test_a_leftover_update_marker_is_cleared_and_a_finished_studio_update_restar
     webapp.follow_up({"kind": "update", "status": "failed", "meta": {"target": "studio"}})
     webapp.follow_up({"kind": "update", "status": "done", "meta": {"target": "comfyui"}})
     assert seen == [3.0]
+
+
+def test_update_items_link_to_github_and_carry_release_notes(monkeypatch):
+    import app as webapp
+
+    assert webapp.github_slug("https://github.com/Psych0meter/sprite-studio.git") == "Psych0meter/sprite-studio"
+    assert webapp.github_slug("git@github.com:comfyanonymous/ComfyUI.git") == "comfyanonymous/ComfyUI"
+    assert webapp.github_slug("https://example.com/a/b.git") is None
+    assert webapp.github_slug("/tmp/local/repo") is None
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"body": "- **Updates**: new things"}'
+
+    monkeypatch.setattr(webapp.urllib.request, "urlopen", lambda *a, **k: Resp())
+    webapp._notes_cache.clear()
+    out = webapp.release_links("https://github.com/o/r", "v1.2.0", True)
+    assert out["repo_url"] == "https://github.com/o/r" and out["release_url"].endswith("/releases/tag/v1.2.0")
+    assert out["notes"].startswith("- **Updates**")
+    assert webapp.release_links("https://github.com/o/r", "v1.2.0", False)["repo_url"]  # no notes asked: none fetched
+    assert webapp.release_links("/tmp/x", "v1.2.0", True) == {}
+
+
+def test_update_items_show_the_space_of_their_disk(tmp_path):
+    import app as webapp
+
+    d = webapp.disk_info(tmp_path / "not" / "there")  # (the nearest existing folder answers)
+    assert d["disk"]["total"] >= d["disk"]["used"] > 0 and d["disk"]["free"] >= 0
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "f").write_bytes(b"x" * 1000)
+    assert webapp.tree_size(tmp_path / "b") == 1000 and webapp.tree_size(tmp_path / "none") == 0

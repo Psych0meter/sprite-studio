@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Train**: the learning rate is written 1e-4 (not 0,0001 as some browsers showed it); 1e-4, 0.0001 and 0,0001 are all accepted.
+- **Updates**: each panel links to the project's GitHub page, shows the notes of the newer release when there is one, and the space used and free on the disk it lives on (with a warning under 2 GB free).
 - **Updates**: ComfyUI, kohya sd-scripts and Sprite Studio now move only to the latest *released* version (the highest `vX.Y.Z` tag), no longer to the tip of the upstream branch. The packages are saved first and the previous version is put back when the new one fails its check. **Breaking**: the update check no longer lists commits, and `scripts/pxupdate.sh` is replaced by `scripts/pxupdate.py`.
 - **ComfyUI**: `install.sh` now makes ComfyUI listen on `127.0.0.1` only (it has no login, so it was open to the whole network). Running it again on an existing installation changes that. To reach ComfyUI from another machine use an SSH tunnel, or install with `COMFY_LISTEN=0.0.0.0` behind a firewall.
 - **Security**: the app's own state (accounts, prompts, paths, picks, job logs, `auth.log`) is kept in a folder only its user can enter (0700, files 0600); API answers are never cached (`Cache-Control: private, no-store`); the API schema (`/openapi.json`) is no longer published; image analysis runs two at a time.

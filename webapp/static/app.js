@@ -114,6 +114,7 @@ function fmtDur(s) {
   if (s < 3600) return Math.floor(s / 60) + " min " + String(s % 60).padStart(2, "0") + " s";
   return Math.floor(s / 3600) + " h " + String(Math.floor(s % 3600 / 60)).padStart(2, "0") + " min";
 }
+const fmtBytes = (b) => b >= 1e9 ? (b / 1073741824).toFixed(1) + " GB" : b >= 1e6 ? (b / 1048576).toFixed(0) + " MB" : Math.max(0, Math.round(b / 1024)) + " KB";
 const fmtMB = (b) => b ? (b / 1048576).toFixed(b > 1e9 ? 0 : 1) + " MB" : "";
 function ago(t) {
   const s = Date.now() / 1000 - t;
@@ -1530,7 +1531,7 @@ routes.train = async (main, parts) => {
     onclick: () => { location.hash = "#/train/" + m.id; } }, m.label))));
   const box = h("div", { class: "stack" });
   main.append(box);
-  const opts = Object.assign({ model: "sd15", epochs: "", dim: "", lr: "0.0001", precision: "auto", repeats: "", src: "" }, store.get("train." + cat, {}));
+  const opts = Object.assign({ model: "sd15", epochs: "", dim: "", lr: "1e-4", precision: "auto", repeats: "", src: "" }, store.get("train." + cat, {}));
   if (opts.precision === "no" && !store.get("precisionChosen", false)) opts.precision = "auto"; // the old default, not a choice
   if (opts.epochs === 12) opts.epochs = "";
   if (opts.dim === 32) opts.dim = "";
@@ -1665,7 +1666,7 @@ routes.train = async (main, parts) => {
       s2.append(h("div", { class: "inline-fields" },
         numField("Epochs", "epochs", 1, 60, 1, "passes over the set; a checkpoint every 2", xl ? "8" : "12"),
         numField("Rank", "dim", 4, 128, 4, xl ? "LoRA size; 16 keeps SDXL in 8 GB" : "LoRA size; 32 is plenty", xl ? "16" : "32"),
-        numField("Learning rate", "lr", 0.00001, 0.001, 0.00001, "1e-4: slower is safer"),
+        lrField(),
         xl ? null : h("div", { class: "field" }, h("label", {}, "Precision"),
           h("select", { onchange: (e) => { opts.precision = e.target.value; store.set("precisionChosen", true); keep(); } },
             [["auto", "Automatic"], ["no", "Full (fp32)"], ["fp16", "Half (fp16)"], ["bf16", "Half (bf16, RTX 30 and newer)"]]
@@ -1782,6 +1783,20 @@ routes.train = async (main, parts) => {
   let refreshEstimate = () => {};
   const numField = (label, key, min, max, step, hint, placeholder) => h("div", { class: "field" }, h("label", {}, label),
     h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); if (key === "epochs") refreshEstimate(); } }), h("div", { class: "hint" }, hint));
+  // The learning rate is written the way trainers do (1e-4), whatever the browser's number format: a number input
+  // would show 0,0001 on some locales. Both 1e-4 and 0.0001 (or 0,0001) are accepted and shown as 1e-4.
+  const lrText = (v) => {
+    const n = Number(String(v).trim().replace(",", "."));
+    if (!(n > 0)) return String(v);
+    const [m, e] = n.toExponential(3).replace(/\.?0+e/, "e").split("e");
+    return `${m}e${Number(e)}`;
+  };
+  const lrField = () => {
+    const input = h("input", { type: "text", inputmode: "decimal", value: lrText(opts.lr), placeholder: "1e-4",
+      oninput: (e) => { opts.lr = String(e.target.value).trim().replace(",", "."); keep(); },
+      onchange: (e) => { const n = Number(opts.lr); if (n > 0 && n <= 0.01) { e.target.value = lrText(n); opts.lr = String(n); keep(); } else { toast("Learning rate: a number such as 1e-4 (between 1e-5 and 1e-3 is usual)", true); } } });
+    return h("div", { class: "field" }, h("label", {}, "Learning rate"), input, h("div", { class: "hint" }, "1e-4 is 0.0001: smaller is slower and safer"));
+  };
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
     if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); redraw(); }
@@ -3042,6 +3057,13 @@ routes.updates = async (main) => {
       h("div", { class: "panel-head" }, h("h2", {}, it.name),
         it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.latest} available`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
       it.studio ? studioNotes(it) : null,
+      it.disk ? h("p", { class: "small muted" }, `Disk of ${it.path}: ${fmtBytes(it.disk.used)} used of ${fmtBytes(it.disk.total)}, ${fmtBytes(it.disk.free)} free`,
+        it.backups_bytes ? ` · kept previous versions: ${fmtBytes(it.backups_bytes)}` : "") : null,
+      it.disk && it.behind && it.disk.free < 2e9 ? h("div", { class: "note warn" }, "Less than 2 GB are free here: an update downloads and installs packages, make some room first.") : null,
+      it.repo_url ? h("p", { class: "small" }, h("a", { href: it.repo_url, target: "_blank", rel: "noopener noreferrer" }, "GitHub page"),
+        it.behind && it.release_url ? [" · ", h("a", { href: it.release_url, target: "_blank", rel: "noopener noreferrer" }, `Release ${it.latest}`)] : null) : null,
+      it.behind && it.notes ? h("details", { class: "small", open: true }, h("summary", {}, `What's new in ${it.latest}`),
+        h("pre", { class: "mono", style: { whiteSpace: "pre-wrap", maxHeight: "260px", overflow: "auto", margin: "6px 0 10px" } }, it.notes)) : null,
       it.ok ? [
         h("p", { class: "small" }, `Installed ${it.current}`, `, latest release ${it.latest}`, h("span", { class: "muted mono" }, "  " + it.path)),
         it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, then update, then git stash pop), or the update refuses.") : null,
