@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Users**: deleting a user also hands their jobs, picks, projects and upload, pick and recolour folders to the user who takes over (the folders become `from_<name>` in theirs). A new user created later with the same name starts with nothing and inherits no sharing.
+- **Pages**: a page that was still loading when you moved to another one could draw under it (the Train page under Results). Every page now draws into its own container, so a late page is dropped.
 - **Train**: training stops with a clear message when ComfyUI is still running 30 seconds after it was asked to stop, instead of starting on a busy GPU.
 - **Speed**: pages no longer wait on the logs of every past job; the measured speeds are kept until a job starts or ends (the Overview, Generate and Train pages were slow with many jobs).
 - **Spinners**: the corner spinner hides while a control or the page already shows its own.

@@ -844,9 +844,12 @@ async function route() {
   const parts = path.split("/").filter(Boolean);
   const name = parts[0] || "";
   document.querySelectorAll(".rail a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
-  const main = $("#main");
-  main.innerHTML = "";
+  // A fresh element for every page: a page still loading when the user moves on keeps drawing into the one that
+  // was dropped, instead of appending (Train under Results) to the new page.
+  const old = $("#main");
+  const main = old.cloneNode(false);
   main.classList.remove("is-loading");
+  old.replaceWith(main);
   const params = new URLSearchParams(query || "");
   const loading = h("div", { class: "page-loading", role: "status" }, h("span", { class: "spinner" }), " Loading…");
   const slow = setTimeout(() => main.append(loading), 300);
