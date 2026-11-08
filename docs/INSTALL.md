@@ -144,6 +144,8 @@ cd sprite-studio
 sudo SG_DATA=/mnt/sprites scripts/install.sh      # SG_DATA optional
 ```
 
+Running it again later keeps the `SG_DATA` the service already uses; pass `SG_DATA=...` to change it.
+
 It checks the GPU devices, installs the packages, creates the user,
 installs ComfyUI with a PyTorch build that supports the card (and stops
 with a clear message if it does not), copies Sprite Studio to the
@@ -171,10 +173,29 @@ results and settings are not touched.
 - Scripts: `~spritegen/spritegen/scripts`, in that user's `PATH`
   (`su - spritegen`)
 
-The app has no login by default (it is meant for a private network). To
-require a password, add `Environment=SG_WEB_PASSWORD=...` to
-`/etc/systemd/system/spritegen-web.service`, then
-`systemctl daemon-reload && systemctl restart spritegen-web`.
+Everyone signs in with an account. The first time the app starts with no
+account, it prints a one-time **setup code** in its log
+(`journalctl -u spritegen-web`; also the file `setup_code` in the state
+folder). Open the page, enter the code and choose the administrator's name and
+password. What existed before (models, results, palettes, projects, jobs)
+becomes the administrator's. The administrator adds the other users on the
+**Users** page: each user has a space of their own, and can share what they
+own with chosen users or with everyone (see [GUIDE.md](GUIDE.md)).
+
+- The service listens on every address (`SG_WEB_HOST=0.0.0.0`); give it
+  `SG_WEB_HOST=127.0.0.1` in its unit to keep it behind a reverse proxy.
+- Passwords travel as typed: on anything but a network you fully trust, put a
+  reverse proxy with HTTPS in front (the session cookie is then marked
+  `Secure` from the proxy's `X-Forwarded-Proto: https`; if the proxy changes
+  the `Host`, list the public name in `SG_ALLOWED_ORIGINS`).
+- Lost the administrator's password: on the machine, as the service's user,
+  `python3 ~/spritegen/webapp/users_cli.py reset <name>` (it also lists, adds,
+  disables users, and prints the setup code).
+- `SG_WEB_PASSWORD` and `SG_WEB_ALLOW_OPEN` are gone: the app ignores the
+  first (it says so at start) and `install.sh` removes both from the unit.
+- The accounts are `users.json`, `sessions.json` and `acl.json` in the state
+  folder, readable by the service's user only; `auth.log` records sign-ins,
+  refusals and changes to accounts.
 
 **SDXL** is optional: the Train page downloads it (about 7 GB) when you
 choose it, or `MODEL=sdxl train_lora.sh setup` as the user.
@@ -187,14 +208,22 @@ variables give the defaults (the service sets the data folders):
 | Variable | Default | Meaning |
 |---|---|---|
 | `SG_DATA` | `~/sprites` | base of the three folders below |
-| `PX_INPUT`, `PX_GAME` | `$SG_DATA/input`, `$SG_DATA/game` | named source folders sprites are imported from |
+| `PX_INPUT`, `PX_GAME` | `$SG_DATA/input`, `$SG_DATA/game` | named source folders sprites are imported from (`game` is just the second one's name) |
 | `PX_OUTPUT` | `$SG_DATA/output` | results |
 | `PX_LORA_HOME` | `~/lora` | models, training, palettes |
 | `COMFY` | `~/ComfyUI` | ComfyUI's folder |
 | `PX_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI's API |
-| `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `0.0.0.0` | the app's address |
-| `SG_WEB_PASSWORD` | none | ask for a password |
-| `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: jobs, logs, settings, picks |
+| `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `127.0.0.1` | the app's address (a plain run listens on this machine only; the service made by `install.sh` listens on `0.0.0.0`; a port or host added to its unit is kept) |
+| `SG_ALLOWED_ORIGINS` | none | extra host names allowed to send changes (behind a reverse proxy that changes the `Host`) |
+| `SG_MAX_UPLOAD_MB`, `SG_MAX_ZIP_MB`, `SG_MAX_QUEUED` | `300`, `250`, `100` | the largest request (counted as it is read, whatever its headers say), the most a zip of sprites may hold once unpacked, and how many jobs may wait for the GPU |
+| `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: accounts, jobs, logs, settings, picks |
+| `PX_SOURCES` | none | more source folders, as JSON: `{"tiles": "/mnt/x/tiles"}` (the Settings page has a field for the same purpose) |
+| `SG_SCRIPTS` | `scripts/` next to the app | where the app finds `pxmodel.py` and the other scripts |
+
+The command-line scripts read a few more: `PX_LORA` and `PX_LORA_STRENGTH` (the
+LoRA file and its strength for one `pxmake.sh` run), `PX_CKPT` and `PX_RES`
+(the base model and its size), `PX_HIRES` and `PX_HIRES_DENOISE` (a second
+pass at a larger size). Each script's `-h` says how it uses them.
 
 ## 7. Moving to another machine
 

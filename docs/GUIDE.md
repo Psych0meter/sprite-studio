@@ -7,8 +7,8 @@ page of the app. Installation is in [INSTALL.md](INSTALL.md).
 ## 1. The ideas in five minutes
 
 **The base model.** Stable Diffusion turns a text *prompt* into a picture.
-It knows "a spaceship", "pixel art", "seen from above", but it has never
-seen *your* game. Two versions are supported:
+It knows "a robot", "pixel art", "seen from above", but it has never
+seen *your* sprites. Two versions are supported:
 
 | Base model | Renders at | Training on an 8 GB card | Suits |
 |---|---|---|---|
@@ -23,7 +23,7 @@ whole model. In Sprite Studio, one *model* = one LoRA.
 caption, built from the model:
 
 ```
-pxunit, red faction, large unit, armoured hull, top-down view, facing up,
+pxunit, red team, large unit, armoured body, top-down view, facing up,
 dark red metal hull, near-black shadows, bright glowing red lights,
 pixel art, flat green background
 ```
@@ -47,6 +47,7 @@ ignores the starting image. The render is then cleaned into a sprite.
 3. **Generate** or **Batch**: remaster sprites, invent new ones.
 4. **Palettes**: fix colours and light that come out wrong.
 5. **Results**: compare, star the keepers, export them.
+6. **LoRA files**: install, rename or delete the LoRAs you no longer need.
 
 ## 3. Models
 
@@ -56,7 +57,7 @@ runs; `dataset_xl/` and `output_xl/` for SDXL).
 
 ### 3.1 Projects and starting points
 
-Models belong to a *project*, one per game. The list at the top of the menu
+Models belong to a *project*, one per project. The list at the top of the menu
 shows one project at a time; projects are created, renamed and deleted at
 the bottom of the Models page (deleting one moves its models, it never
 deletes them).
@@ -66,7 +67,7 @@ To start a model (Models page, *Add models*):
 - **New model**: empty, a copy of another model's settings (optionally with
   only some of its groups), or one model of a template set.
 - **Template sets**: ready-made models. *Generic starting points* holds
-  top-down units in three sizes, side-view characters, item icons, props.
+  top-down units in three sizes, side-view characters, item icons, props, tiles (a Tile kind with the edge kept).
   More sets are JSON files in `~/lora/.templates/`.
 - **Import a model file**: a model exported from another installation
   (a model's Settings tab, *Export the model*), optionally kept as a template.
@@ -78,7 +79,7 @@ the app picks a free one when it creates a model.
 
 On a model's **Sprites** tab:
 
-- **Drop PNG files or a zip** (sub-folder names can become name prefixes:
+- **Drop PNG sprites or a zip of them** (sub-folder names can become name prefixes:
   `icons/map/x.png` becomes `map_x.png`), choosing the group and kind they
   go into, or letting their names decide.
 - **Import from a source folder**: the named folders of Settings (`input`,
@@ -89,10 +90,10 @@ On a model's **Sprites** tab:
 
 ### 3.3 Groups and kinds
 
-**Groups** are the main axis: a faction, a family of items. Each has:
+**Groups** are the main axis: a team, a family of items. Each has:
 
-- *words*, put in every caption and prompt of the group ("red faction");
-- *keywords*, an extra description ("organic insect hull, bone plating");
+- *words*, put in every caption and prompt of the group ("red team");
+- *keywords*, an extra description ("organic insect body, bone plating");
 - a *file name pattern* (a regular expression, `_red_` for instance) that
   puts a sprite in the group unless you set it by hand;
 - *own words from*: a pattern whose first bracketed part becomes the
@@ -103,10 +104,10 @@ On a model's **Sprites** tab:
 128 px). Their *size* sets the pixel grid of training and of what is
 generated; *fill* how much of the canvas a new sprite takes; *remaster
 distance* the default denoise; *keywords* and *words to avoid* refine
-the prompt per kind. A model without kinds uses each sprite's own size.
+the prompt per kind; *Tile* and *Keep edge* are for tiles, see 5.7. A model without kinds uses each sprite's own size.
 
-A model for one faction can put each kind's look of that faction in the
-kinds' keywords, and the faction's shared look in the group's keywords.
+A model for one team can put each kind's look of that team in the
+kinds' keywords, and the team's shared look in the group's keywords.
 
 **Caption order**: trigger, group words, kind words, the sprite's own words,
 group keywords, kind keywords, the model's end words, the sprite's colours,
@@ -121,7 +122,8 @@ training run draws at each epoch. One row per prompt:
 - the prompt itself, and *Words to avoid* (optional);
 - a check that the prompt starts with the model's trigger word: without it
   the LoRA is not called, and the preview looks like plain Stable Diffusion.
-  **Fix** puts the trigger first;
+  **Fix** puts the trigger first, and **Auto-fix** at the top does it for every
+  prompt that needs it, after showing each old and new start;
 - the first 2 rows are marked: they are the ones rendered afterwards when a
   card cannot render previews during training (see Train);
 - move up, move down and remove.
@@ -151,6 +153,34 @@ mixes up.
   style itself (the trigger word absorbs it).
 - **One framing**: every image on flat green (`#00ff00`), centred, on the
   same pixel grid. Pick another key colour for a model whose art is green.
+
+### 4.1.1 What good pixel art looks like
+
+The app follows the rules of thumb of Derek Yu's pixel-art tutorial where a
+tool can:
+
+- **A one-pixel outline, no stray pixels.** The clean-up draws a one-pixel
+  outline and *tidies* lone pixels; edges are hard (no anti-aliasing on the
+  outside, so the sprite sits on any background without a halo).
+- **Selective outlining.** *Outline style: Selective* paints each outline
+  pixel in a darker shade of its own colour instead of the palette's darkest
+  colour: softer, and the sprite reads as one form. Dark is better when the
+  sprite must stand out from a busy background.
+- **Few colours, reused.** Fewer, well-chosen colours read better than many
+  close ones. The palette editor warns about near-twin colours (they look
+  blurry and waste the palette) and merges them in one click.
+- **No gradients, no pillow shading.** The negative prompt rejects gradients,
+  pillow shading (shading inward from the outline), anti-aliased edges and
+  jagged lines; shading comes from the training sprites.
+- **One light, from the top.** See 4.3 (*relight*) and the palette's
+  *Light from the top*.
+- **Keep sprites small.** A sprite rarely needs more than about 200 px; the
+  Models page says so for bigger kinds.
+
+By hand (the tool cannot do these for you): keep curves even (steps of 6, 3,
+2, 1 rather than 3, 1, 3), shade the parts farthest from the light first and
+add highlights last, and keep to about two darker and two lighter shades of
+each base colour.
 
 ### 4.2 The pixel grid
 
@@ -264,7 +294,9 @@ On any variant in Results:
     dropped.
   - *Background tolerance*: how close to the green a pixel must be to count
     as background. Higher removes more fringe but may eat green-tinted parts.
-  - *Tidy lone pixels*, *Dark outline*, *Greens of its own*.
+  - *Colours at most*: 2 to 256 (64 by default).
+  - *Tidy lone pixels*, *Outline* and its *style* (dark, or selective: see
+    4.1.1), *Greens of its own*.
 
   Not available for touch-ups (redo them from Generate) or for variants
   whose raw render was deleted.
@@ -290,7 +322,9 @@ with comparison sheets per kind:
 - **Invent new sprites**: N new designs for each group and kind, with an
   optional list of ideas (one per line) used in turn.
 
-A batch with the same name continues where it stopped. *Preview the list*
+A batch with the same name continues where it stopped. Left empty, the name
+is the model, the LoRA and the date (`units-pxunit_e6-20261106`), so batches
+of other models or LoRAs never share a folder. *Preview the list*
 shows what will run and how long it should take on your card.
 
 ### 5.5 Comparing LoRAs
@@ -300,6 +334,50 @@ remaster per group) with each LoRA file and strength you tick, on fixed
 seeds, one sheet per subject: to choose between epochs, or between SD 1.5
 and SDXL.
 
+### 5.6 Managing LoRA files
+
+**LoRA files** lists every LoRA in ComfyUI's `models/loras` folder as a
+table: name, the model it belongs to, base (SD 1.5 or SDXL), epoch, date,
+size, and *Results*, the number of result folders rendered with it. A tag
+shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
+
+- **Use** installs a file as the one its model generates with (same as
+  *Use* on the Train page, for files you added earlier). The SDXL file is
+  kept apart from the SD 1.5 one.
+- **Rename** a file. The one in use keeps its name, because the name is how
+  the app finds it; a name that belongs to a model is refused.
+- **Delete** one file, or tick several and delete them together. The
+  trained checkpoints of the Train page are never touched, so a deleted
+  LoRA can be installed again. Deleting the one in use leaves the model
+  without a LoRA until you install another.
+- **Compare** (with files ticked) opens Compare LoRAs with them selected.
+- Filter by model, find a name, sort by clicking a column header (again to
+  reverse) or with the Sort list. The top
+  right shows the total size and the free disk space.
+
+A file copied into the folder by hand shows its model from its name and its
+epoch only when the name says it (`_e6`); otherwise the epoch reads `?`.
+
+### 5.7 Tiles: floors, walls, anything that must join
+
+Sprites are pixel art with a background to remove and 64 colours by default
+(up to 256).
+A **tile** is the opposite: opaque art in full colour (a floor, a wall) that
+must meet its neighbours. Tick **Tile** on its kind (Models › Groups and
+kinds). Results of a tile kind are the render's tile cut out and scaled to
+the kind's size, with no background removal, no colour limit and no outline.
+
+**Keep edge (px)** makes a remaster keep the outer N pixels of the original,
+blended into the new surface over 4 more pixels. Tiles drawn to join keep
+joining (seams, pipes that cross a side at the same place), while the inside
+is redone. Use about 8 to 16 px for a floor with a seam and a connector. It
+needs the original, so it applies to remasters (Generate from a sprite, and
+Batch), not to new designs. `pxmake.sh --keep-edge PX` overrides it for one
+run. Clean up again is not offered for tiles (nothing to tune).
+
+Make the kind's *final size* the tile's real size (256 for a 256 px floor),
+so the pixel grid is a whole number (2 on SD 1.5, 4 on SDXL).
+
 ## 6. Results
 
 Every run, batch and comparison of the output folder. Zoom (Fit, 1x to 8x),
@@ -308,7 +386,10 @@ keep (*Export picks* copies them to `output/picked/`, named after the sprite
 they replace), compare side by side. **Delete** a result, one sprite of a
 batch, its failed sprites, or every empty result: they go to the output
 folder's `.bin`, where *Undo last delete* puts them back until you *Empty
-bin*.
+bin*. **Train on picks…** copies the starred sprites into a new or existing
+model as training sprites (the originals stay), to train a model on what
+another one made well. **View bin** lists what was deleted, with *Put back* and *Erase* for
+each.
 
 ## 7. Palettes
 
@@ -322,7 +403,7 @@ out dark. A palette fixes colours after rendering, without retraining.
   model, or another model for a one-group model). It can become the group's
   palette at once.
 - **A model's colours** / **a batch's colours**: the colours of a group, a
-  kind or a batch's results, merged down to 2 to 64 colours, each weighted
+  kind or a batch's results, merged down to 2 to 256 colours, each weighted
   by how much of the art it covers.
 - **Import a file**: `.hex` (Lospec, Aseprite), `.gpl` (GIMP, Krita), a
   palette `.json`, or an image.
@@ -353,9 +434,40 @@ a batch. The preview is computed exactly as generation will do it.
 | PyTorch build | CUDA 12.8 for RTX 50 cards, 12.6 for the others (GTX 10 included); `install.sh` stops if the build has no kernels for the card |
 | Training precision | Automatic: bf16 on RTX 30 and newer, fp16 on RTX 20, full precision on older cards; SDXL always in half precision |
 | ComfyUI during training | stopped on cards under 15 GB (Settings: auto, always, never) |
-| Time estimates | measured from your own finished jobs and training runs |
+| Time estimates | measured from your own jobs that finished without error (failed, cancelled and partly failed ones are ignored) |
+| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only). Administrators update from the **Updates** page (*Update now*: `git pull --ff-only`, requirements, ComfyUI restart; it waits for an idle GPU and refuses local changes) |
 
-## 9. Troubleshooting
+## 9. Accounts and sharing
+
+Everyone signs in (the sign-in page; the administrator creates the first
+account with the one-time setup code, see INSTALL.md section 5).
+
+- **Your own space.** Your models, their LoRAs, your results (with the bin and
+  your picks), palettes, projects, jobs and logs are yours: other users do not
+  see them. Shared things (below) and the source folders are the exceptions.
+  The GPU queue shows that it is busy, and whose job waits, but not what
+  somebody else is making.
+- **Your password.** *Password* in the menu on the left changes it (at least
+  10 characters; it signs you out everywhere else). After several wrong
+  attempts the account waits a few minutes before it accepts another.
+- **Sharing.** *Share* (a model's page, a result's row in Results, a palette)
+  lets you choose users, or everyone with an account. Whoever it is shared with
+  can **use** it: generate or run a batch with a shared model (its LoRA comes
+  with it), apply a shared palette, look at a shared result, copy a shared
+  model into one of their own (*New model → A copy of a model*), or make their
+  own copy of a shared palette. They cannot change, train, rename or delete it,
+  and a tag says who owns it. Anything a shared model makes belongs to the one
+  who ran it.
+- **Administrators** see everything, with its owner, can give a resource to
+  another user (the *owner* in the sharing request), and alone use Settings,
+  the ComfyUI controls and the update check on Overview, and the **Users**
+  page: add a user (with a first password and *must change it at the first
+  sign-in*), reset a password (the user is signed out and chooses a new one),
+  require a change, make or unmake an administrator, disable, and remove (their
+  resources go to the user you choose, nothing is deleted). The last
+  administrator cannot be removed, demoted or disabled.
+
+## 10. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -370,8 +482,10 @@ a batch. The preview is computed exactly as generation will do it.
 | highlights at the bottom | sprites painted lit from below | *Light from the top*, *Relight for training* |
 | chunky pixels on big sprites | SD 1.5's 8 px limit | SDXL, or hand finishing |
 | page shows an old layout after an update | browser cache | Ctrl+Shift+R |
+| "sign in" appears again | the session ended (a password change, a disabled account, a week without use) | sign in again |
+| a model, result or palette a colleague talked about is not listed | it is not shared with you | ask them to *Share* it |
 
-## 10. Glossary
+## 11. Glossary
 
 | Term | Meaning |
 |---|---|

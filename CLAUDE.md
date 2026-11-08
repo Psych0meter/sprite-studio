@@ -54,6 +54,16 @@ Co-Authored-By: ...          (the attribution lines the session provides)
 - Commit as `Claude <noreply@anthropic.com>` (author and committer), with
   the attribution lines the session provides.
 
+## Branches
+
+`main` is only what David merges (pull requests) and tags. All work after
+a release goes on the branch `release/next` (cut from `main`, pushed to
+origin; created again from `main` after each merge). Commit and push there,
+never on `main`, never tag. David opens the pull request, then bumps and
+tags (`docs(release)` / `chore(release)` commits are made on request).
+When a task starts, check out `release/next` (after `git pull`, and merge
+`main` into it if it moved).
+
 ## Changelog
 
 `CHANGELOG.md` follows [Keep a Changelog

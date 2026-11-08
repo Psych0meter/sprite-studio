@@ -28,7 +28,9 @@ set -euo pipefail
 SG_USER="${SG_USER:-spritegen}"
 HOME_DIR="/home/$SG_USER"
 SG_APP="${SG_APP:-$HOME_DIR/spritegen}"
-SG_DATA="${SG_DATA:-$HOME_DIR/sprites}"
+# A reinstall keeps the data folder the service already uses (SG_DATA given to this script wins).
+OLD_DATA="$(grep -hoE 'SG_DATA=[^ ]+' /etc/systemd/system/spritegen-web.service 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+SG_DATA="${SG_DATA:-${OLD_DATA:-$HOME_DIR/sprites}}"
 TORCH_INDEX="${TORCH_INDEX:-}"
 TORCH_VERSION="${TORCH_VERSION:-}"
 NVIDIA_RUN="${NVIDIA_RUN:-}"
@@ -171,6 +173,20 @@ EOF
 chmod 440 /etc/sudoers.d/spritegen-comfyui
 command -v sudo >/dev/null || apt-get install -y -q sudo
 visudo -cf /etc/sudoers.d/spritegen-comfyui
+# Settings added by hand to the unit (a port, a host, allowed origins) survive a reinstall.
+UNIT=/etc/systemd/system/spritegen-web.service
+KEPT=""
+[ -f "$UNIT" ] && KEPT="$(grep -E '^Environment="?SG_WEB_(PORT|HOST|ALLOWED_ORIGINS)=' "$UNIT" || true)"
+# Everyone signs in with an account (the first start asks for a one-time setup code, printed in the service's log),
+# so the service listens on the network. SG_WEB_HOST=127.0.0.1 keeps it on this machine (behind a reverse proxy).
+# The old single password (SG_WEB_PASSWORD) and the open mode (SG_WEB_ALLOW_OPEN) are gone: they are dropped here.
+if [ -f "$UNIT" ] && grep -qE 'SG_WEB_(PASSWORD|ALLOW_OPEN)=' "$UNIT"; then
+	echo "  note: SG_WEB_PASSWORD / SG_WEB_ALLOW_OPEN are no longer used: sign in with an account (see docs/INSTALL.md)."
+fi
+HOST_LINE="Environment=SG_WEB_HOST=0.0.0.0"
+EXTRA=""
+KEPT="$(printf '%s\n' "$KEPT" | grep -vE 'SG_WEB_HOST=' || true)"
+[ -z "${SG_WEB_HOST:-}" ] || HOST_LINE="Environment=SG_WEB_HOST=$SG_WEB_HOST"  # an address given to this script wins
 cat >/etc/systemd/system/spritegen-web.service <<EOF
 [Unit]
 Description=Sprite Studio (web app)
@@ -180,6 +196,9 @@ After=network-online.target comfyui.service
 User=$SG_USER
 WorkingDirectory=$SG_APP/webapp
 Environment=SG_DATA=$SG_DATA PX_INPUT=$SG_DATA/input PX_GAME=$SG_DATA/game PX_OUTPUT=$SG_DATA/output
+$HOST_LINE
+$EXTRA
+$KEPT
 ExecStart=$SG_APP/webapp/run.sh
 Restart=on-failure
 

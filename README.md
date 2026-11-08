@@ -10,7 +10,7 @@ web app and a set of command-line tools.
 ## Features
 
 - **Models**: one LoRA per model, organised in projects (one per game). A
-  model has *groups* (factions, item families...) and *kinds* (size
+  model has *groups* (teams, item families...) and *kinds* (size
   classes), each with the words that describe it; sprites are sorted into
   them by file name pattern or by hand. Template sets give ready-made
   starting points; models export and import as files.
@@ -25,6 +25,8 @@ web app and a set of command-line tools.
   model's grid, colours limited to 64, outline, optional symmetry and fill.
 - **Batches**: remaster every sprite of a model, or invent N new ones per
   group and kind, resumable, with comparison sheets.
+- **LoRA files**: every installed LoRA in a table (model, epoch, date, size,
+  results made with it); install, rename or delete them.
 - **Palettes**: colours and a tuning (brightness, contrast, saturation, hue,
   light from the top) put on what is generated; taken from sprites or a batch,
   imported from `.hex` / `.gpl` / images, computed automatically to match
@@ -33,6 +35,9 @@ web app and a set of command-line tools.
   export them, recolour, clean up again from the raw render with live
   settings (colours, edge, outline, symmetry, palette), delete (with a bin
   and undo).
+- **Users**: everyone signs in; each user has their own models, results,
+  palettes and jobs, can share them (read-only use) with chosen users or
+  everyone, and administrators manage the accounts and see everything.
 - **Any NVIDIA card**: PyTorch build, training precision and memory savers
   chosen from the card; time estimates measured on yours.
 
@@ -66,7 +71,8 @@ cd sprite-studio
 sudo scripts/install.sh
 ```
 
-Then open `http://<machine>:8189`, create a model in **Models**, add its
+Then open `http://<machine>:8189`, create the administrator with the setup code
+printed in the service's log (`journalctl -u spritegen-web`), create a model in **Models**, add its
 sprites, and train it on the **Train** page. The full walk-through, with GPU
 passthrough for containers, is in [docs/INSTALL.md](docs/INSTALL.md); how
 to get good sprites out of it is in [docs/GUIDE.md](docs/GUIDE.md).
@@ -96,7 +102,7 @@ Each script prints its options with `-h` (or at the top of the file).
 
 ```
 scripts/        command-line tools (Python 3, Bash)
-webapp/         the web app: app.py (FastAPI), run.sh, static/ (HTML, CSS, app.js, palette.js)
+webapp/         the web app: app.py (FastAPI), accounts.py, auth_routes.py, users_cli.py, run.sh, static/ (HTML, CSS, app.js, accounts.js, palette.js)
 docs/           installation, user guide, architecture
 tests/          pytest suite (no GPU needed)
 VERSION         the current version

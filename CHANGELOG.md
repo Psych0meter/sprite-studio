@@ -7,13 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-08
+
+### Added
+
+- **Accounts**: the app asks everyone to sign in. The first start prints a one-time setup code that creates the administrator on the sign-in page; what existed before (models, results, palettes, projects, jobs, picks) becomes theirs. Passwords are hashed (scrypt, 10 characters or more), sessions are a `HttpOnly` cookie, wrong passwords lock the account for a few minutes, and `auth.log` records sign-ins and changes.
+- **Users**: administrators add, disable, remove and make administrators of users on a new Users page, reset a password or require a change at the next sign-in, and give the resources of a removed user to someone else. Users change their own password from the menu on the left. `webapp/users_cli.py` does the same from the machine (and recovers a lost administrator password).
+- **Own space**: each user's models (with their LoRAs), results (with bin and picks), palettes, projects, jobs and logs are private; administrators see everything, with who owns it.
+- **Sharing**: a *Share* button on models, results and palettes gives chosen users, or everyone, read-only use: generate with a shared model, apply a shared palette, look at a shared result, copy a shared model or palette. Only the owner (or an administrator) changes or deletes it.
+
+- **Results**: *Train on picks…* copies the starred sprites into a new model, or an existing one, as training sprites (all in one group and kind if you choose, named after their pick name, never overwriting a sprite the model has), and opens the model.
+- **Updates**: *Check for updates* on the Overview's ComfyUI card looks at the upstream repositories of ComfyUI and kohya sd-scripts (a git fetch, nothing is changed) and lists the newer commits and how to update.
+- **Preview prompts**: *Auto-fix* proposes to put the trigger word first in every prompt that does not start with it (a stale or mistyped first word is replaced), showing each old and new start before changing anything.
+- **Results**: *View bin* lists the deleted results (cover, name, date, size) with *Put back* and *Erase* for each.
+- **Colours**: palettes and the clean-up can hold up to 256 colours (was 64): taking colours from sprites, *Colours at most* in Clean up again, `--max-colours`. The default stays 64.
+- **Outline style**: *Selective* outlining paints the outline in a darker shade of the sprite's own colours instead of the darkest one (Generate › More settings, Clean up again, `pxmake.sh --outline-style`).
+- **Palettes**: a warning and a *Merge them* button for near-twin colours.
+- **Models**: a hint when a kind is larger than about 200 px.
+
+- **Templates**: a built-in "Tiles (floors, walls)" model, a Tile kind that keeps the original's edge.
+- **Tiles**: a kind can be a **Tile** (floors, walls: opaque, full colour, no
+  background removal, colour limit or outline) and have **Keep edge (px)**:
+  a remaster keeps the original's outer pixels, so tiles that were made to
+  join still join. Their captions say "game tile, full colour" instead of
+  "pixel art, flat green background". `pxmake.sh --keep-edge` overrides it for a run.
+- **Results**: each image shows its seed next to the render time (click to copy it).
+- **LoRA files**: a new page lists every LoRA in ComfyUI's loras folder (name,
+  model, base, epoch, date, size, number of results made with it, and which
+  one each model generates with). **Use** installs a file as the model's own,
+  **Rename** and **Delete** manage them (several at once), **Compare** opens
+  Compare LoRAs with the ticked files.
+- **Menu**: the version of the app is shown at the bottom of the left menu.
+- **Updates**: an administrator page (*Updates* in the menu, also linked from the Overview) shows what is new upstream for ComfyUI and kohya sd-scripts and has an *Update now* button: a fast-forward `git pull`, the Python requirements, and a ComfyUI restart, as a job with a log. It waits for an idle GPU and refuses a checkout with local changes (`scripts/pxupdate.sh`).
+- **Spinners**: a small spinner appears while the app waits for the server (after 0.4 s), pages show a loading note, and the thing you changed (a model chip in Generate, a select in Train or Compare) is dimmed until its data arrives.
+
 ### Changed
 
+- **Settings, ComfyUI controls, updates**: reserved for administrators; the source folders stay shared and read-only. The Results folder's `picked/`, `uploads/` and recoloured sprites are kept in a folder per user.
+- **Install** (**breaking**: nobody can use the app until the administrator is created with the setup code; the old password is not carried over): the service listens on the network (an account is needed for everything); `SG_WEB_PASSWORD` and `SG_WEB_ALLOW_OPEN` are no longer used (the app says so at start, `install.sh` drops them). Passwords travel in clear text over plain HTTP: put an HTTPS reverse proxy in front outside a trusted network.
+- **Live updates**: the status bar, job panels, Jobs, a job's log, Results and Train now share one refresh mechanism. Each one asks the server only while something can change, rebuilds only what changed, pauses while the tab is hidden, never sends overlapping requests and retries after an error. The Jobs list also notices jobs started from elsewhere (every 15 s when idle).
+- **Train page**: it no longer rebuilds itself every few seconds while a job runs. Progress bars update in place, from the status the app already polls; the server is asked again every 20 s while training (4 s while previews render) and the page is rebuilt only when something it shows changed: a new checkpoint or preview image, a job starting or ending. Nothing is polled while the tab is hidden.
+- **LoRA files**: click a column header to sort by it (click again to reverse).
+- **Jobs**: *Clear successful* removes only the jobs that succeeded, so failed ones stay readable; *Clear all finished* (with a confirmation) removes every finished job.
+- **Time estimates**: the measured speed (seconds per image, minutes per training) uses only jobs that finished without error, no longer failed, cancelled or partly failed ones.
+- **Long lists**: Jobs and LoRA files show 25, 50 or 100 rows per page with the same page controls (the choice is remembered), and the Overview's LoRA list scrolls instead of stretching the page.
+- **Results**: the list on the left now updates by itself (new results, running batches, sprite counts) every 30 seconds, and a result a job is still writing is patched in place: only the sprites that changed are redrawn, so the page no longer reloads completely and keeps its scroll position and open images. When the job finishes, the page settles once.
+- **Security**: found by an outside audit. A plain run now listens on this machine only (`SG_WEB_HOST`); the service made by `install.sh` still listens on every address and keeps a password, port or host added to its unit, and the installer says when no password is set. Changes sent from another website are refused. Requests, uploaded images (checked as real images, at most 64 million pixels) and zips (5000 files, 1 GB unpacked) have size limits. `/api/file` serves only images and small text files, no longer model weights or code. A password with accents no longer crashes the login.
+- **Jobs**: at most 100 jobs may wait for the GPU and 8 CPU jobs run at once (the app says so instead of piling up); the logs of old jobs are deleted.
+- **Prompts**: the negative prompt also rejects pillow shading, anti-aliased edges and jagged lines (the training captions are unchanged).
+- **Wording**: the app, guide and examples no longer speak of ships, factions or hulls: groups are "teams or families", examples use neutral units, projects are not "games". Stored names (`game` source folder, `PX_GAME`) and the hard-surface colour words are unchanged, so saved models and trained LoRAs keep working.
+
+- **Results**: the render time of each image is on its own line under the name; a
+  long name hid it.
+- **Batch**: a batch with no name is now called after its model, LoRA and date
+  (it used to be the date alone, so every unnamed batch of the day landed in
+  the same folder). Running the same batch again still continues it.
 - **Train**: the list of checkpoint files shows an epoch for each file; the
   last one (which the trainer saves without a number) reads *epoch 8 (last)*.
   *Add* names it with that epoch (`<trigger>_e8`) instead of `_final`.
 - **Status line**: reads *memory 6.5 of 8 GB, GPU busy 100 %*. The percentage
   was always the share of time the card computes, not its memory.
+
+### Fixed
+
+- **Install**: running `install.sh` again keeps the data folder (`SG_DATA`) the service already uses, instead of going back to `~/sprites` when it is not given again (results, sources and picks seemed to vanish).
+- **Projects**: the delete menu on a project always offers *No project*, so it is no longer empty when there is only one project.
+- **Results**: a result folder that cannot be read (an empty `job.txt`, for one) no longer empties the whole Results page; it is skipped and named in the service log.
+- **Users**: you can no longer remove or disable your own account (the buttons are hidden on your row and the server refuses).
+- **Results**: the list of results is faster with many shared items (the access list is read once per change, not once per request).
+- **Train on picks**: a refused request (an unknown group or kind, an invalid model) no longer leaves a new model behind, and only the picks that really became sprites lose their star.
+- **Updates**: the check is kept for 15 minutes, only one runs at a time, and a checkout with no upstream branch says so. *Check again* looks again at once.
+
+### Security
+
+- **Models**: resetting a model to its template checks that you may use it before anything else, so someone else's model answers "not found".
+- **Sign-in**: the single shared password (HTTP Basic) is replaced by accounts with per-user sessions, hashed passwords, lockout after wrong attempts, an administrator role, and ownership checks on every model, result, palette, LoRA file, pick and job (404 for what is not yours, 403 for what is only shared with you).
+- **Request size**: the limit on a request body is enforced on the bytes really read, so a missing or false `Content-Length` no longer gets round it; an uploaded file's size is also checked before its base64 is decoded.
+- **Zip import**: at most 250 MB unpacked by default (was 1 GB), `SG_MAX_ZIP_MB` changes it.
+- **Image analysis**: `/api/info` reads an image's size first and refuses more than 16 million pixels, and counts colours with far less memory; `/api/file` refuses text files over 10 MB.
 
 ## [0.2.0] - 2026-11-03
 
@@ -134,6 +205,7 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Psych0meter/sprite-studio/releases/tag/v0.1.0

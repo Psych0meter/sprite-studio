@@ -34,7 +34,7 @@ PALETTE = ["#1b1020", "#4a1f2e", "#7c2d3b", "#b84a4a", "#e0795a", "#f2b27a", "#f
 
 
 def draw_unit(size: int, hue: float, seed: int, detail: int = 1) -> Image.Image:
-    """A symmetric top-down ship, nose up, lit from the top, on transparency."""
+    """A symmetric top-down unit, nose up, lit from the top, on transparency."""
     rng = random.Random(seed)
     n = size * detail
     half = n // 2
@@ -85,7 +85,7 @@ def build(tmp: Path) -> dict:
     m = pxmodel.from_template("generic", "topdown_units", "units", "Demo project")
     m["label"] = "Units"
     m["groups"] = [
-        {"id": g, "label": g.title(), "words": f"{g} faction", "pattern": f"^{g}_", "enabled": True} for g, _ in GROUPS
+        {"id": g, "label": g.title(), "words": f"{g} team", "pattern": f"^{g}_", "enabled": True} for g, _ in GROUPS
     ]
     for k in m["kinds"]:
         k["pattern"] = rf"_{k['id']}_"
@@ -127,7 +127,7 @@ def build(tmp: Path) -> dict:
             draw_unit(size, hue + 0.04 * s, 7 * s + len(name)).save(f / f"{name}_s{s}.png")
         (f / "job.txt").write_text(
             f"name={name} model=units group={g} kind={k} lora=units.safetensors res=512 size={size} init=x palette=warm\n"
-            f"prompt: pxunit, {g} faction, {k} unit, top-down view, facing up, pixel art, flat green background\n"
+            f"prompt: pxunit, {g} team, {k} unit, top-down view, facing up, pixel art, flat green background\n"
         )
         (f / ".done").touch()
     return d
@@ -150,11 +150,15 @@ def main() -> None:
             SG_WEB_HOST="127.0.0.1",
             SG_WEB_PORT=str(PORT),
         )
+        sys.path.insert(0, str(ROOT / "webapp"))
+        import accounts
+
+        accounts.Accounts(Path(d["state"])).create("demo", "sample screenshots pass", role="admin", must_change=False)
         srv = subprocess.Popen([sys.executable, str(ROOT / "webapp" / "app.py")], env=env, cwd=ROOT / "webapp")
         try:
             for _ in range(60):
                 try:
-                    urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/status", timeout=1)
+                    urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/auth/state", timeout=1)
                     break
                 except OSError:
                     time.sleep(0.5)
@@ -167,6 +171,12 @@ def main() -> None:
             with sync_playwright() as p:
                 b = p.chromium.launch()
                 pg = b.new_page(viewport=VIEW, device_scale_factor=1)
+                pg.goto(f"http://127.0.0.1:{PORT}/")
+                pg.fill("#username", "demo")
+                pg.fill("#password", "sample screenshots pass")
+                pg.click("#go")
+                pg.wait_for_url(f"http://127.0.0.1:{PORT}/")
+                pg.wait_for_selector("#account strong")
                 for name, route in pages.items():
                     pg.goto(f"http://127.0.0.1:{PORT}/{route}")
                     pg.wait_for_timeout(1200)

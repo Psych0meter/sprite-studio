@@ -13,8 +13,8 @@ A model lives in $PX_LORA_HOME/<id>/ (default ~/lora/<id>/):
 model.json:
 
   id, label, trigger        the LoRA's trigger word (pxunit...)
-  project                   the project (game) it belongs to
-  colour_words              "hard" (metal hull, armour plating) or
+  project                   the project it belongs to
+  colour_words              "hard" (metal, armour plating) or
                             "neutral" (body, highlights)
   colours_from              where a remaster's colour words come from:
                             "group" (the other sprites of its group: one
@@ -33,14 +33,14 @@ model.json:
                             ones ("lit from below, shadows on top")
   groups   [ {id, label, words, keywords, pattern, name_pattern,
               name_format, enabled, palette} ]
-            the main axis: a faction, a family of items... words go in
-            every caption of the group ("red faction"), keywords too
-            (extra description: "organic insect hull"). pattern: regex on
+            the main axis: a team, a family of items... words go in
+            every caption of the group ("red team"), keywords too
+            (extra description: "organic insect body"). pattern: regex on
             the file name that puts a sprite in the group (when not set by
             hand); name_pattern: its first capture is the sprite's own
             words ("acid spitter"), formatted by name_format ("{} state");
             palette: a palette id put on what is generated for the group
-  kinds    [ {id, label, words, keywords, negative, size, fill, pattern, denoise} ]
+  kinds    [ {id, label, words, keywords, negative, size, fill, tile, edge, pattern, denoise} ]
             the second, optional axis: a size class (small 32 px, large
             128 px...). size sets the pixel grid and the final size;
             denoise, how far a remaster goes (default 0.7); keywords: extra
@@ -142,6 +142,28 @@ GENERIC_MODELS = {
         "repeats": 0,
         "groups": [{"id": "main", "label": "Items", "words": "", "pattern": ".", "name_pattern": r"^(.+?)(?:_\d+)?$"}],
     },
+    "tiles": {
+        "label": "Tiles (floors, walls)",
+        "trigger": "pxtile",
+        "colour_words": "neutral",
+        "colours_from": "self",
+        "tail": "seamless top-down tile",
+        "size": 64,
+        "repeats": 0,
+        "groups": [{"id": "main", "label": "Main", "words": "", "pattern": "."}],
+        "kinds": [
+            {
+                "id": "tile",
+                "label": "Tile",
+                "words": "",
+                "size": 64,
+                "pattern": ".",
+                "tile": True,
+                "edge": 4,
+                "denoise": 0.45,
+            }
+        ],
+    },
     "props": {
         "label": "Props and obstacles",
         "trigger": "pxprop",
@@ -157,8 +179,8 @@ GENERIC_MODELS = {
 TEMPLATE_SETS = {
     "generic": {
         "label": "Generic starting points",
-        "description": "Empty models to fill with any game's sprites: top-down units in three sizes, "
-        "side-view characters, item icons, props.",
+        "description": "Empty models to fill with any sprites: top-down units in three sizes, "
+        "side-view characters, item icons, props, tiles.",
         "models": GENERIC_MODELS,
     },
 }
@@ -202,6 +224,14 @@ def model_dir(mid):
 
 def sprites_dir(mid):
     return os.path.join(model_dir(mid), "sprites")
+
+
+def _edge(v):
+    """Pixels of the original's edge kept: 0 (none) to 64."""
+    try:
+        return max(0, min(64, int(float(v or 0))))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _fill(v):
@@ -256,6 +286,8 @@ def normalise(m, mid):
         k.setdefault("size", m["size"])
         k.setdefault("fill", 0)  # 0: the model's
         k["fill"] = _fill(k["fill"])
+        k["tile"] = bool(k.get("tile", False))  # opaque tiles in full colour (floors, walls), not pixel art
+        k["edge"] = _edge(k.get("edge", 0))  # px of the original's edge a remaster keeps
         k.setdefault("pattern", "")
         k.setdefault("denoise", 0.7)
         k.setdefault("keywords", "")
@@ -371,7 +403,8 @@ def caption(m, group, kind, own_words, colours, extra=""):
         parts.append(m["tail"])
     if colours:
         parts.append(colours)
-    parts += ["pixel art", "flat green background"]
+    # a tile fills its whole image: neither pixel art nor a green background to describe
+    parts += ["game tile, full colour"] if kind and kind.get("tile") else ["pixel art", "flat green background"]
     return ", ".join(p.strip(", ") for p in parts if p.strip(", "))
 
 
@@ -379,7 +412,7 @@ def describe(m, paths):
     return pxtool.describe(paths, neutral=is_neutral(m)) if paths else ""
 
 
-def target_size(m, kind, w, h):
+def target_size(kind, w, h):
     if kind and kind.get("size"):
         return int(kind["size"])
     return max(w, h)
@@ -413,7 +446,7 @@ def dataset(m, dst, res=512, repeats=0):
             continue
         g = next(g for g in m["groups"] if g["id"] == s["group"])
         k = next((k for k in m["kinds"] if k["id"] == s["kind"]), None)
-        rows.append((s, caption(m, g, k, s["words"], describe(m, [s["path"]])), target_size(m, k, s["w"], s["h"])))
+        rows.append((s, caption(m, g, k, s["words"], describe(m, [s["path"]])), target_size(k, s["w"], s["h"])))
     if not rows:
         raise SystemExit(f"model {m['id']}: no sprite to learn from (add sprites, and put them in an enabled group)")
     if not repeats:
@@ -499,6 +532,8 @@ def prompt(m, group_id, kind_id=None, extra="", colours="", refs_kind=None, excl
     return {
         "palette": pal_file or "",
         "fill": int((k.get("fill") if k else 0) or m.get("fill") or 0),
+        "tile": int(bool(k and k.get("tile"))),
+        "edge": int((k.get("edge") if k else 0) or 0),
         "prompt": caption(m, g, k, "", colours, extra),
         "refs": refs,
         "size": int(k["size"]) if k and k.get("size") else int(m["size"]),
@@ -509,7 +544,10 @@ def prompt(m, group_id, kind_id=None, extra="", colours="", refs_kind=None, excl
     }
 
 
-BASE_NEGATIVE = "blurry, 3d render, perspective, side view, text, watermark, soft shadow, gradient"
+BASE_NEGATIVE = (
+    "blurry, 3d render, perspective, side view, text, watermark, soft shadow, gradient, "
+    "pillow shading, anti-aliased edges, jagged uneven lines"
+)
 
 
 def negative(m, kind=None):
@@ -547,7 +585,7 @@ def preview_plan(m, out_dir, name, res=512, epochs=None, prompts=2, final_epoch=
     for i, ln in enumerate(x for x in text.splitlines() if x.strip()):
         g = PREVIEW_LINE.match(ln)
         if g:
-            p, n, w, _h, steps, cfg, seed = g.groups()
+            p, n, _w, _h, steps, cfg, seed = g.groups()
             lines.append((i, p, n, int(steps), float(cfg), int(seed)))
         else:  # a hand-edited line: its text, with the usual settings
             lines.append((i, ln.split(" --")[0], negative(m), 28, 7.0, i + 1))

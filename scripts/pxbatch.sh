@@ -9,11 +9,11 @@
 #   pxbatch.sh --model units --groups red,blue  some groups
 #   pxbatch.sh --model units --dry-run          list what would run
 #   pxbatch.sh --model units --invent 6 --groups red   6 new red sprites of each kind
-#   pxbatch.sh --model units --invent 4 --ideas "crescent hull|long lance|twin pods"
+#   pxbatch.sh --model units --invent 4 --ideas "crescent body|long handle|twin pods"
 #
 # Each sprite starts from itself, takes its colours from its own group, and
 # keeps its kind's size and pixel grid. Sprites the model's batch_skip
-# matches (two-state art) are left out: a pair must stay the same ship, so
+# matches (two-state art) are left out: a pair must stay the same sprite, so
 # it is made from the variant you pick.
 #
 # Options: --model M (required), --groups a,b, --kinds a,b, -n N (variants, default 2), --tag NAME (batch folder,

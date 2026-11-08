@@ -4,7 +4,7 @@
   pxtool.py describe <sprite>... [--glows] [--neutral]   colour words for the prompt
   pxtool.py init     <sprite> <out.png> [--size 64] [--mask MASK] [--canvas 512]
   pxtool.py post     <render.png> <out.png> [--size 128] [--grid INIT.json] [--mirror auto --orig SPRITE]
-                     [--max-colours 64] [--edge 0.5] [--no-outline] [--min-part 0.004] [--key-tol 70]
+                     [--max-colours 64] [--outline-style dark|selective] [--edge 0.5] [--no-outline] [--min-part 0.004] [--key-tol 70]
                      [--keep-green] [--no-tidy] [--keep-mask MASK --base SPRITE] [--legacy --margin 2]
   pxtool.py sheet    <out.png> <folder>... [--cell 160]
   pxtool.py palette-extract | palette-apply | palette-autotune | palette-words | palette-export
@@ -13,10 +13,10 @@
 scaled up by a whole factor (512 // size: 8 for 64 px, 4 for 128 px), to
 start a generation from; it writes the pixel grid next to it.
 
-`post` turns a render into a game sprite: the green background removed by
-flood fill from the border (so light hull pixels stay), green shadows and
-edge blends removed, holes inside the hull filled, small loose specks
-dropped (real side parts kept), the render's own colours kept (64 at most),
+`post` turns a render into a sprite: the green background removed by
+flood fill from the border (so light pixels of the sprite stay), green shadows and
+edge blends removed, holes inside the sprite filled, small loose specks
+dropped (real side parts kept), the render's own colours kept (256 at most, 64 by default),
 one sprite pixel per block of the pixel grid (majority vote, the grid's
 phase matched to the render), lone pixels tidied, a dark outline, an optional mirror. It also writes
 a 4x preview and prints the sprite-standard checks.
@@ -73,7 +73,7 @@ def _quantize(cnt, k):
     data = []
     for c, n in cnt.items():
         data += [c] * max(1, int(math.sqrt(n)))
-    w = int(math.ceil(math.sqrt(len(data))))
+    w = math.ceil(math.sqrt(len(data)))
     data += [data[0]] * (w * w - len(data))
     img = Image.new("RGB", (w, w))
     img.putdata(data)
@@ -87,11 +87,15 @@ def _is_glow(c):
     return _sat(c) > 0.45 and _val(c) > 0.45
 
 
+MAX_COLOURS = 256  # the most colours a palette or a clean-up can hold
+STANDARD_COLOURS = 64  # the usual sprite limit (the default; the standard check is relaxed above it)
+
+
 def palette_of(cnt, max_colours=64):
     """Up to `max_colours` colours. The glows (bright saturated colours) get
     slots of their own (6 to 20, by how much of the art they are) so cores
     and lights keep their brightest shades instead of being merged into the
-    hull's mid-tones."""
+    body's mid-tones."""
     if len(cnt) <= max_colours:
         cols = list(cnt)
     else:
@@ -204,7 +208,7 @@ def sheet(dst, rows, cell=160):
 
 def describe(paths, neutral=False):
     """Colour words for the prompt, from colour families (summed over every
-    shade): the hull (the most used family that is not near black), light
+    shade): the body (the most used family that is not near black), light
     plating if a lot of it is near white, and the glow (the most used
     saturated bright family). neutral: words for things that are not vehicles
     (items, rocks, icons): "body" and "highlights" instead of "metal hull"
@@ -215,18 +219,18 @@ def describe(paths, neutral=False):
 def describe_counts(cnt, neutral=False):
     """describe() for a {colour: count} set (a sprite's pixels, a palette's weights)."""
     total = sum(cnt.values())
-    hull, light, glow = Counter(), 0, Counter()
+    body, light, glow = Counter(), 0, Counter()
     for c, n in cnt.items():
-        h, s, v = _hsv(c)
+        _h, s, v = _hsv(c)
         if v > 0.7 and s < 0.2:
             light += n
         elif v > 0.45 and s > 0.45:
             glow[_family(c)] += n
         elif v > 0.1:
-            hull[_family(c)] += n
+            body[_family(c)] += n
     parts = []
-    if hull:
-        parts.append("dark " + hull.most_common(1)[0][0] + (" body" if neutral else " metal hull"))
+    if body:
+        parts.append("dark " + body.most_common(1)[0][0] + (" body" if neutral else " metal hull"))
     if light > 0.12 * total:
         parts.append("white highlights" if neutral else "white armour plating")
     parts.append("near-black shadows")
@@ -254,7 +258,7 @@ TUNE_KEYS = ("hue", "saturation", "brightness", "contrast")
 
 def load_palette(path):
     """A palette from .json, .hex (one colour per line, Lospec), .gpl (GIMP) or
-    an image (its colours, 64 at most)."""
+    an image (its colours, 256 at most)."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".json":
         with open(path) as fh:
@@ -272,7 +276,7 @@ def load_palette(path):
                     cols.append(rgb_to_hex([int(m.group(i)) for i in (1, 2, 3)]))
         pal = {"colours": cols}
     else:
-        pal = extract_palette([path], 64)
+        pal = extract_palette([path], MAX_COLOURS)
     pal.setdefault("id", re.sub(r"[^a-z0-9_]+", "_", os.path.splitext(os.path.basename(path))[0].lower()).strip("_"))
     pal.setdefault("label", pal["id"])
     pal.setdefault("colours", [])
@@ -481,7 +485,7 @@ def palette_words(pal, neutral=False):
 
 
 def recolour(src, dst, pal):
-    """The palette on an existing sprite file (a result, a game sprite)."""
+    """The palette on an existing sprite file (a result, a source sprite)."""
     a = np.array(Image.open(src).convert("RGBA"))
     a[..., 3] = np.where(a[..., 3] > 127, 255, 0)
     img = Image.fromarray(apply_palette(a, pal), "RGBA")
@@ -527,7 +531,7 @@ def pixel_scale(size, canvas=512):
 def fit_sprite(im, size):
     """The sprite on a size x size canvas: kept as it is when it already has
     that size, otherwise its content scaled (nearest) to fill about 88 % of
-    it, like the game's own sprites."""
+    it, like the project's own sprites."""
     if max(im.size) == size:
         return im
     box = im.getbbox() or (0, 0, im.width, im.height)
@@ -632,11 +636,13 @@ def _symmetric(path, threshold=0.9):
     return (a & m).sum() / max(1, (a | m).sum()) >= threshold
 
 
-def _tidy(canvas, pal, outline=True):
+def _tidy(canvas, pal, outline=True, style="dark"):
     """Pixel-art tidying at the final size: lone pixels that match none of
     their 8 neighbours take the neighbourhood's colour (the speckle the
     model leaves), and the edge of the silhouette gets a dark outline, as in
-    the hand-drawn sprites (glows on the edge are kept)."""
+    the hand-drawn sprites (glows on the edge are kept). style "selective":
+    each outline pixel takes a darker shade of its own colour (selective
+    outlining) instead of the palette's darkest colour."""
     h, w = canvas.shape[:2]
     alpha = canvas[..., 3] > 0
     rgb = canvas[..., :3].astype(np.int64)
@@ -660,16 +666,25 @@ def _tidy(canvas, pal, outline=True):
     darkest = pal[np.argmin(_luma(pal))]
     inner = ndimage.binary_erosion(alpha)
     edge = alpha & ~inner
+    luma = _luma(pal)
     for y, x in zip(*np.nonzero(edge), strict=False):
-        if not _is_glow(tuple(int(v) for v in out[y, x, :3])):
-            out[y, x, :3] = darkest
+        own = tuple(int(v) for v in out[y, x, :3])
+        if _is_glow(own):
+            continue
+        if style == "selective":
+            darker = pal[luma < _luma(np.array([own]))[0] * 0.75]
+            if len(darker):
+                target = np.array(own) * 0.55
+                out[y, x, :3] = darker[(((darker - target) ** 2) * np.array([3, 4, 2])).sum(1).argmin()]
+                continue
+        out[y, x, :3] = darkest
     return out
 
 
 def _grid_sample(rgb, fg, pal, g, search=True, edge=0.5):
     """One sprite pixel per k x k block of the render, on the grid of the
     init image (or of the training images): opaque when most of the block
-    is hull (edge: the share, 0.5 by default), coloured by the block's most
+    is body (edge: the share, 0.5 by default), coloured by the block's most
     common (palette-snapped) colour.
     The model may draw its pixels a little off that grid, so the phase that
     makes the blocks the most uniform is used."""
@@ -714,7 +729,7 @@ def _grid_sample(rgb, fg, pal, g, search=True, edge=0.5):
 
 
 def _legacy_fit(rgb, fg, pal, size, margin, mirror):
-    """The first clean-up: crop the hull, fit it into size - 2*margin px
+    """The first clean-up: crop the body, fit it into size - 2*margin px
     with a majority vote per block (blocks of any size, off the model's
     pixel grid: noisier than the grid sampling)."""
     ys, xs = np.nonzero(fg)
@@ -725,7 +740,7 @@ def _legacy_fit(rgb, fg, pal, size, margin, mirror):
     oh, ow = max(1, round(h * s)), max(1, round(w * s))
 
     # 5. Majority vote per output pixel (snapped colours), opaque if most of
-    #    its block is hull.
+    #    its block is body.
     snapped = _snap(rgb, pal)
     codes = (snapped[..., 0].astype(np.int64) << 16) | (snapped[..., 1].astype(np.int64) << 8) | snapped[..., 2]
     out = np.zeros((oh, ow, 4), np.uint8)
@@ -768,6 +783,40 @@ def flatten_background(src, dst, key=KEY, tol=70):
     Image.fromarray(a).save(dst)
 
 
+def tile_post(src, dst, size, orig=None, grid=None, keep_edge=0, feather=4):
+    """A render of a tile (a floor, a wall: opaque art that is not pixel art) made into the tile: the sprite's
+    rectangle cut out of the render and scaled down to its size, in full colour (no background removal, no colour
+    limit, no outline). With the original (the remaster's start) the outer `keep_edge` px stay the original's, so
+    tiles that were made to join still join, blended into the new surface over `feather` px; its alpha is kept."""
+    img = Image.open(src).convert("RGB")
+    if grid:
+        with open(grid) as fh:
+            g = json.load(fh)
+    else:
+        g = grid_for(size, size, img.width)
+    w, h, k = g["w"], g["h"], g["k"]
+    rgb = np.asarray(
+        img.crop((g["ox"], g["oy"], g["ox"] + w * k, g["oy"] + h * k)).resize((w, h), Image.Resampling.LANCZOS),
+        dtype=np.float64,
+    )
+    alpha = np.full((h, w), 255, dtype=np.uint8)
+    if orig and os.path.isfile(orig):
+        o = np.asarray(Image.open(orig).convert("RGBA"))
+        if o.shape[:2] == (h, w):
+            alpha = o[..., 3].copy()
+            if keep_edge > 0:
+                yy, xx = np.mgrid[0:h, 0:w]
+                dist = np.minimum.reduce([xx, yy, w - 1 - xx, h - 1 - yy])
+                keep = np.clip((keep_edge + feather - dist) / feather, 0, 1)[..., None]
+                rgb = o[..., :3] * keep + rgb * (1 - keep)
+        else:
+            print(f"warning: the original is {o.shape[1]}x{o.shape[0]}, not {w}x{h}: its edge is not kept")
+    out = Image.fromarray(np.dstack([np.clip(np.rint(rgb), 0, 255).astype(np.uint8), alpha]), "RGBA")
+    out.save(dst)
+    out.resize((w * 4, h * 4), Image.Resampling.NEAREST).save(dst.rsplit(".", 1)[0] + "_x4.png")
+    print(f"{dst}: {w}x{h} tile" + (f", the original's outer {keep_edge} px kept" if keep_edge and orig else ""))
+
+
 def post(
     src,
     dst,
@@ -788,25 +837,31 @@ def post(
     fill=0,
     colours=64,
     outline=True,
+    outline_style="dark",
     edge=0.5,
+    tile=False,
+    keep_edge=0,
 ):
-    """keep_green: the sprite has green parts of its own (an acid weapon...):
+    """tile: the render is a tile in full colour (see tile_post), keep_edge: px of the original's edge it keeps.
+    keep_green: the sprite has green parts of its own (an acid pool...):
     only the green reached from the border is background, green inside the
     silhouette is kept. margin: empty pixels around the sprite (icons fill
     their whole canvas: 0; legacy fitting only). grid: the init's grid file
     (pxtool.py init writes it); without it the grid of a size x size sprite
     centred in the render is used, as in the training images. legacy: the
-    old fitting (crop the hull, scale it to the size). keep_mask + base: a
+    old fitting (crop the body, scale it to the size). keep_mask + base: a
     touch-up, only the mask's white pixels come from the render, the rest
     stays the base sprite. fill: 50 to 100, the share of the size x size
     canvas the sprite's longest side takes (100: edge to edge); the drawing
     is cropped from the render and pixelated at that size, so it is neither
     cut by the canvas nor lost in empty space. 0: the render's own scale.
-    Fine-tuning: min_part (loose parts dropped, share of the hull), key_tol
+    Fine-tuning: min_part (loose parts dropped, share of the body), key_tol
     (how far from the key green a pixel is still background), colours (the
-    most the sprite keeps, 2 to 64), edge (0.2 to 0.8: the share of a block
-    that must be hull to draw its pixel; lower = a fuller silhouette),
-    outline (the dark edge line; tidy=False drops it too)."""
+    most the sprite keeps, 2 to 256), edge (0.2 to 0.8: the share of a block
+    that must be body to draw its pixel; lower = a fuller silhouette),
+    outline (the dark edge line; tidy=False drops it too), outline_style ("dark" or "selective")."""
+    if tile:
+        return tile_post(src, dst, size, orig=orig, grid=grid, keep_edge=int(keep_edge or 0))
     a = np.array(Image.open(src).convert("RGBA"))
     rgb = a[..., :3]
     if mirror == "auto":
@@ -814,7 +869,7 @@ def post(
 
     # 1. Background: transparent pixels, plus everything green reached from
     #    the border (the key colour and its darker or paler shadows and
-    #    blends). Light hull pixels inside the silhouette are never touched.
+    #    blends). Light body pixels inside the silhouette are never touched.
     bg = a[..., 3] < 128
     if keep_green:
         # Only colours very close to the pure key: the sprite's own greens,
@@ -834,11 +889,11 @@ def post(
         keep = [i + 1 for i, s in enumerate(sizes) if s >= min_part * sizes.max()]
         fg = np.isin(lab, keep)
 
-    # 3. Holes inside the hull: filled, coloured from the nearest hull pixel.
+    # 3. Holes inside the body: filled, coloured from the nearest body pixel.
     filled = ndimage.binary_fill_holes(fg)
     holes = filled & ~fg
-    # Inside the silhouette, even faintly green pixels (the blend of hull
-    # and background at the edges) are repainted from the hull.
+    # Inside the silhouette, even faintly green pixels (the blend of body
+    # and background at the edges) are repainted from the body.
     if not keep_green:
         holes |= filled & _key_like(rgb, key, key_tol, min_sat=0.12)
     if holes.any():
@@ -847,11 +902,11 @@ def post(
         rgb = rgb.copy()
         rgb[holes] = rgb[iy[holes], ix[holes]]
     fg = filled
-    # The render's own colours (64 at most): the LoRA already draws the
+    # The render's own colours (256 at most, 64 by default): the LoRA already draws the
     # group's colours and contrast, the clean-up only keeps them.
     cols, counts = np.unique(rgb[fg], axis=0, return_counts=True)
     cnt = Counter({tuple(int(v) for v in c): int(n) for c, n in zip(cols, counts, strict=False)})
-    colours = max(2, min(64, int(colours or 64)))
+    colours = max(2, min(MAX_COLOURS, int(colours or STANDARD_COLOURS)))
     pal = np.array(palette_of(cnt, colours)) if cnt else np.array([[0, 0, 0]])
 
     if fg.sum() < 64:
@@ -890,10 +945,10 @@ def post(
         canvas = _legacy_fit(rgb, fg, pal, size, margin, mirror)
         ow = size
     if tidy:
-        canvas = _tidy(canvas, pal, outline)
+        canvas = _tidy(canvas, pal, outline, outline_style)
     # Last pass at the final size: any pixel still green is background
     # fringe; on the edge it goes, inside it takes the colour of the nearest
-    # clean hull pixel.
+    # clean body pixel.
     alpha = canvas[..., 3] > 0
     tint = alpha & _key_like(canvas[..., :3], key, key_tol, min_sat=0.12)
     if keep_green:
@@ -919,9 +974,9 @@ def post(
             canvas[..., 3] = np.where(canvas[..., 3] > 127, 255, 0)
             op = canvas[..., 3] > 0
             cols, counts = np.unique(canvas[op][:, :3], axis=0, return_counts=True)
-            if len(cols) > 64:  # back within the sprite standard
+            if len(cols) > colours:  # back within the colour limit
                 cnt = Counter({tuple(int(v) for v in c): int(n) for c, n in zip(cols, counts, strict=False)})
-                canvas[op, :3] = _snap(canvas[op][:, :3][None], np.array(palette_of(cnt, 64)))[0]
+                canvas[op, :3] = _snap(canvas[op][:, :3][None], np.array(palette_of(cnt, colours)))[0]
     img = Image.fromarray(canvas, "RGBA")
     img.save(dst)
     img.resize((img.width * 4, img.height * 4), Image.Resampling.NEAREST).save(dst.rsplit(".", 1)[0] + "_x4.png")
@@ -931,8 +986,9 @@ def post(
     lab, parts = ndimage.label(canvas[..., 3] > 0)
     print(f"{dst}: {img.width}x{img.height}, {ncol} colours, {parts} separate part(s)")
     problems = []
-    if ncol > 64:
-        problems.append("more than 64 colours")
+    limit = max(STANDARD_COLOURS, colours)
+    if ncol > limit:
+        problems.append(f"more than {limit} colours")
     if img.width % 8 or img.height % 8:
         problems.append("size not a multiple of 8")
     print("sprite standard:", "ok" if not problems else "; ".join(problems))
@@ -962,7 +1018,7 @@ def main():
     o.add_argument("dst")
     o.add_argument("--size", type=int, default=128)
     o.add_argument(
-        "--min-part", type=float, default=0.004, help="loose parts smaller than this share of the hull are dropped"
+        "--min-part", type=float, default=0.004, help="loose parts smaller than this share of the body are dropped"
     )
     o.add_argument(
         "--mirror",
@@ -972,10 +1028,16 @@ def main():
     )
     o.add_argument("--orig", default=None, help="the sprite being redone (for --mirror auto)")
     o.add_argument("--no-tidy", action="store_true", help="no lone-pixel clean-up and no outline")
+    o.add_argument(
+        "--outline-style",
+        choices=("dark", "selective"),
+        default="dark",
+        help="dark: the darkest colour; selective: a darker shade of the sprite's own colour",
+    )
     o.add_argument("--no-outline", action="store_true", help="keep the lone-pixel clean-up, no dark outline")
     o.add_argument("--key-tol", type=int, default=70, help="how far from the key green a pixel is still background")
-    o.add_argument("--max-colours", type=int, default=64, help="the most colours the sprite keeps (2 to 64)")
-    o.add_argument("--edge", type=float, default=0.5, help="share of a block that must be hull to draw its pixel")
+    o.add_argument("--max-colours", type=int, default=64, help="the most colours the sprite keeps (2 to 256)")
+    o.add_argument("--edge", type=float, default=0.5, help="share of a block that must be body to draw its pixel")
     o.add_argument("--margin", type=int, default=2, help="empty pixels around the sprite (icons: 0)")
     o.add_argument(
         "--keep-green", action="store_true", help="keep green inside the sprite (only the border green is background)"
@@ -991,6 +1053,8 @@ def main():
         default=0,
         help="50 to 100: the share of the canvas the sprite's longest side takes (0: the render's scale)",
     )
+    o.add_argument("--tile", action="store_true", help="a tile: full colour, no background removal, no outline")
+    o.add_argument("--keep-edge", type=int, default=0, help="with --tile and --orig: px of the original's edge kept")
     fb = sub.add_parser("flatten-background", help="a render with its key-colour background made uniform")
     fb.add_argument("src")
     fb.add_argument("dst")
@@ -1056,6 +1120,7 @@ def main():
             key_tol=a.key_tol,
             colours=a.max_colours,
             outline=not a.no_outline,
+            outline_style=a.outline_style,
             edge=a.edge,
             mirror=a.mirror,
             orig=a.orig,
@@ -1068,6 +1133,8 @@ def main():
             base=a.base,
             palette=a.palette,
             fill=a.fill,
+            tile=a.tile,
+            keep_edge=a.keep_edge,
         )
     return 0
 

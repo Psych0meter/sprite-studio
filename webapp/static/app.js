@@ -29,7 +29,31 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+// A request still running after a moment turns the corner spinner on (quick ones, like the status polls, never show it).
+let pendingCalls = 0, pendingTimer = 0;
+function pendingChange(n) {
+  pendingCalls += n;
+  clearTimeout(pendingTimer);
+  const busy = $("#busy");
+  if (!busy) return;
+  if (pendingCalls > 0) pendingTimer = setTimeout(() => { busy.hidden = false; }, 400);
+  else busy.hidden = true;
+}
+
+/** Marks elements as loading (dimmed, with a spinner over them) while `work` runs, and returns its result. */
+async function busyWhile(els, work) {
+  const list = [].concat(els).filter(Boolean);
+  list.forEach((el) => el.classList.add("is-loading"));
+  try { return await work(); } finally { list.forEach((el) => el.classList.remove("is-loading")); }
+}
+
 async function api(path, opts = {}) {
+  if (opts.quiet) return apiCall(path, opts); // (background looks never turn the spinner on)
+  pendingChange(1);
+  try { return await apiCall(path, opts); } finally { pendingChange(-1); }
+}
+
+async function apiCall(path, opts) {
   const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
   if (opts.body !== undefined) {
     init.body = JSON.stringify(opts.body);
@@ -39,6 +63,7 @@ async function api(path, opts = {}) {
   const text = await r.text();
   let data = text;
   try { data = JSON.parse(text); } catch (_) { /* plain text */ }
+  if (data && typeof data === "object" && (data.login || data.must_change)) { location.reload(); return new Promise(() => {}); } // signed out, or must change the password: the sign-in page
   if (!r.ok) {
     const msg = (data && data.error) || (data && data.detail) || r.statusText;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
@@ -140,6 +165,29 @@ const ICONS = {
 const iconBtn = (name, title, onclick, on = false) =>
   h("button", { class: "icon-btn" + (on ? " on" : ""), title, "aria-label": title, type: "button", onclick, html: ICONS[name] });
 
+/** Paging shared by the long tables (Jobs, LoRA files): the rows of the current page, with the page kept in range. */
+const PAGE_SIZES = [25, 50, 100];
+function pageOf(rows, state) {
+  const size = PAGE_SIZES.includes(state.size) ? state.size : PAGE_SIZES[0];
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  state.page = Math.min(Math.max(0, state.page || 0), pages - 1);
+  return { rows: rows.slice(state.page * size, (state.page + 1) * size), pages, size };
+}
+
+/** The page controls under a table; nothing while everything fits on one page. */
+function pager(total, state, onChange) {
+  if (total <= PAGE_SIZES[0]) return null;
+  const { pages, size } = pageOf(new Array(total), state);
+  const go = (n) => { state.page = n; onChange(); };
+  return h("div", { class: "pager" },
+    h("span", { class: "muted small" }, `${state.page * size + 1} to ${Math.min(total, (state.page + 1) * size)} of ${total}`),
+    h("button", { class: "btn sm ghost", type: "button", disabled: state.page === 0, "aria-label": "Previous page", onclick: () => go(state.page - 1) }, "‹"),
+    h("span", { class: "small" }, `Page ${state.page + 1} of ${pages}`),
+    h("button", { class: "btn sm ghost", type: "button", disabled: state.page >= pages - 1, "aria-label": "Next page", onclick: () => go(state.page + 1) }, "›"),
+    h("select", { "aria-label": "Rows per page", style: { width: "auto" }, onchange: (e) => { state.size = Number(e.target.value); state.page = 0; onChange(); } },
+      PAGE_SIZES.map((n) => h("option", { value: n, selected: n === size }, `${n} per page`))));
+}
+
 // ---------------------------------------------------------------- shared state
 
 const S = {
@@ -155,7 +203,7 @@ function setTray(t) { S.tray = t; store.set("tray", t); $("#tray-count").textCon
 
 async function loadCatalog() { S.catalog = await api("/catalog"); drawProjectPicker(); return S.catalog; }
 
-/** The project (game) shown: every page lists only its models. */
+/** The project shown: every page lists only its models. */
 S.project = store.get("project", "");
 const projectsOf = () => [...new Set([...(S.catalog.projects || []), ...S.catalog.models.map((m) => m.project || "No project")])]
   .sort((a, b) => (a === "No project") - (b === "No project") || a.localeCompare(b));
@@ -166,7 +214,7 @@ function projectSelect(value, onchange, opts = {}) {
   if (value && !value.startsWith("__") && !names.includes(value)) names.push(value);
   const sel = h("select", { id: opts.id, onchange: async (e) => {
     if (e.target.value === "__new__") {
-      const name = await askText("New project", { input: "Name (a game)", placeholder: "My game", ok: "Create" });
+      const name = await askText("New project", { input: "Name", placeholder: "My project", ok: "Create" });
       if (!name) { e.target.value = value; return; }
       if (!(S.catalog.projects || []).includes(name)) await attempt(() => api("/projects", { body: { name } }));
       await loadCatalog();
@@ -205,23 +253,24 @@ async function loadPicks() { S.picks = await api("/picks"); return S.picks; }
 
 // ---------------------------------------------------------------- status bar
 
-let statusTimer = null;
-async function pollStatus() {
-  try {
-    S.status = await api("/status");
-    renderStatus();
-  } catch (e) {
+// The status bar and what depends on it (job lists, the Train page...) hear "status" events from this one loop.
+const statusLoop = autoRefresh({
+  fetch: () => api("/status"),
+  rebuild: (st) => { S.status = st; renderStatus(); },
+  every: (st) => (st.running.length ? 2500 : 5000),
+  onError: () => {
     $("#gpu-line").innerHTML = "";
     $("#gpu-line").append(h("span", {}, h("i", { class: "dot down" }), "The app is not answering"));
-  }
-  clearTimeout(statusTimer);
-  statusTimer = setTimeout(pollStatus, S.status && S.status.running.length ? 2500 : 5000);
-}
+  },
+  first: false,
+  global: true,
+});
 
 function renderStatus() {
   const st = S.status;
   const c = st.comfy;
   const line = $("#gpu-line");
+  if (st.version) $("#app-version").textContent = "Version " + st.version;
   line.innerHTML = "";
   line.append(h("span", {}, h("i", { class: "dot " + (c.up ? "up" : "down") }), c.up ? "ComfyUI running" : "ComfyUI stopped"));
   if (st.gpu) {
@@ -471,8 +520,11 @@ function tile(v, opts = {}) {
   if (opts.cleanup && v.raw) tools.append(iconBtn("tune", "Clean up again: colours, edge, outline, symmetry, palette", () => opts.cleanup(v)));
   if (opts.recolour) tools.append(iconBtn("palette", "Recolour with a palette", () => opts.recolour(v)));
   if (opts.remaster) tools.append(iconBtn("redo", "Generate again from this one", () => opts.remaster(v)));
-  el.append(stage, h("div", { class: "cap" }, h("span", { class: "name", title: v.label || v.name }, v.label || v.name,
-    v.seconds ? h("span", { class: "secs muted", title: "Render time", style: { marginLeft: "6px", fontSize: "11px" } }, fmtDur(v.seconds)) : null), tools));
+  el.append(stage, h("div", { class: "cap" },
+    h("div", { class: "cap-text" }, h("div", { class: "name", title: v.label || v.name }, v.label || v.name),
+      v.seed || v.seconds ? h("div", { class: "secs" },
+        v.seed ? h("span", { class: "seed", title: "Seed (click to copy)", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(v.seed); toast("Seed " + v.seed + " copied"); } }, "seed " + v.seed) : null,
+        v.seed && v.seconds ? " · " : "", v.seconds ? h("span", { title: "Render time" }, fmtDur(v.seconds)) : null) : null), tools));
   return el;
 }
 
@@ -548,7 +600,21 @@ async function recolourDialog(v, done) {
 
 /** Clean up one variant again from its saved raw render: the raw render next to the result, the clean-up's
  *  settings as sliders, a live preview (nothing is written until "Keep it"). */
-const CLEAN_DEFAULTS = { palette: "job", mirror: "auto", colours: 64, edge: 50, outline: true, tidy: true, min_part: 0.4, key_tol: 70, keep_green: "auto" };
+/** Colours that are almost the same as an earlier (or heavier) one: [{drop, keep}] indexes, for the palette editor's merge. */
+function nearDuplicates(cols, limit = 18) {
+  const rgb = cols.map((c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)));
+  const dist = (a, b) => Math.sqrt(2 * (a[0] - b[0]) ** 2 + 4 * (a[1] - b[1]) ** 2 + 3 * (a[2] - b[2]) ** 2);
+  const out = [], dropped = new Set();
+  for (let i = 0; i < rgb.length; i++) {
+    if (dropped.has(i)) continue;
+    for (let j = i + 1; j < rgb.length; j++) {
+      if (!dropped.has(j) && dist(rgb[i], rgb[j]) < limit) { dropped.add(j); out.push({ drop: j, keep: i }); }
+    }
+  }
+  return out;
+}
+
+const CLEAN_DEFAULTS = { palette: "job", mirror: "auto", colours: 64, edge: 50, outline: true, outline_style: "dark", tidy: true, min_part: 0.4, key_tol: 70, keep_green: "auto" };
 
 async function cleanupDialog(v, set, done) {
   await loadPalettes();
@@ -558,7 +624,7 @@ async function cleanupDialog(v, set, done) {
   const preview = h("div", { class: "pal-stage " + ltClass(), style: { minHeight: "120px", display: "inline-block" } }, h("span", { class: "muted small" }, "Working…"));
   const note = h("div", { class: "small muted", style: { marginTop: "8px", minHeight: "1.2em" } });
   const keepBtn = h("button", { class: "btn primary", disabled: true }, "Keep it as a new variant");
-  const body = () => ({ path: v.path, palette: f.palette, mirror: f.mirror, colours: f.colours, edge: f.edge / 100, outline: f.outline,
+  const body = () => ({ path: v.path, palette: f.palette, mirror: f.mirror, colours: f.colours, edge: f.edge / 100, outline: f.outline, outline_style: f.outline_style,
     tidy: f.tidy, min_part: f.min_part / 100, key_tol: f.key_tol, keep_green: f.keep_green === "on" ? true : f.keep_green === "off" ? false : "auto" });
   const run = async () => {
     const mine = ++ticket;
@@ -600,12 +666,14 @@ async function cleanupDialog(v, set, done) {
         ...S.palettes.map((p) => [p.id, p.label])], "The palette maps every pixel onto its colours: it is the biggest change from the raw render."),
       select("mirror", "Symmetry", [["auto", "Like the original"], ["none", "None"], ["left", "Left half mirrored"], ["right", "Right half mirrored"]],
         "Mirroring copies one half onto the other and drops what differs left and right."),
-      slider("colours", "Colours at most", 2, 64, 1, "", "Fewer colours: flatter, more graphic. 64 is the standard's limit."),
-      slider("edge", "Edge", 20, 80, 5, " %", "How much of a pixel's block must be hull to draw it. Lower: a fuller silhouette; higher: a thinner one."),
-      slider("min_part", "Loose specks", 0, 5, 0.1, " %", "Separate bits smaller than this share of the hull are dropped."),
-      slider("key_tol", "Background tolerance", 20, 140, 5, "", "How close to the green a pixel must be to count as background. Higher removes more fringe, and may eat green-tinted hull."),
+      slider("colours", "Colours at most", 2, 256, 1, "", "Fewer colours: flatter, more graphic. 64 is the usual limit for a sprite; a few colours well chosen read better than many close ones."),
+      slider("edge", "Edge", 20, 80, 5, " %", "How much of a pixel's block must be part of the sprite to draw it. Lower: a fuller silhouette; higher: a thinner one."),
+      slider("min_part", "Loose specks", 0, 5, 0.1, " %", "Separate bits smaller than this share of the sprite are dropped."),
+      slider("key_tol", "Background tolerance", 20, 140, 5, "", "How close to the green a pixel must be to count as background. Higher removes more fringe, and may eat green-tinted parts of the sprite."),
       check("tidy", "Tidy lone pixels", "A pixel that matches none of its neighbours takes theirs."),
-      check("outline", "Dark outline", "A dark line around the silhouette (glowing edges are kept)."),
+      check("outline", "Outline", "A one-pixel line around the silhouette (glowing edges are kept)."),
+      select("outline_style", "Outline style", [["dark", "Dark: the darkest colour"], ["selective", "Selective: a darker shade of the sprite's own colour"]],
+        "Selective outlining softens the silhouette and makes the sprite read as one form; a dark outline separates it more from any background."),
       select("keep_green", "Greens of its own", [["auto", "Detect"], ["on", "Keep them"], ["off", "Treat as background"]]),
       h("button", { class: "btn sm ghost", style: { marginTop: "6px" }, onclick: () => { Object.assign(f, CLEAN_DEFAULTS); drawControls(); later(); } }, "Reset the settings"));
   };
@@ -647,12 +715,11 @@ function progressBar(j) {
  *  opts.detail: on the job's own page (no Details link, the page shows the log). */
 function jobPanel(jobId, onDone, opts = {}) {
   const el = h("div", { class: "panel" });
-  let timer = null, finished = false, showLog = false;
+  let finished = false, showLog = false;
   const logBox = h("pre", { class: "log" });
-  const draw = async () => {
-    let j;
-    try { j = await api("/jobs/" + jobId); } catch (e) { el.textContent = e.message; return; }
-    const ended = ["done", "failed", "cancelled", "interrupted"].includes(j.status);
+  const isEnded = (j) => ["done", "failed", "cancelled", "interrupted"].includes(j.status);
+  const draw = async ({ j, log }) => {
+    const ended = isEnded(j);
     el.innerHTML = "";
     el.append(
       h("div", { class: "panel-head" },
@@ -660,22 +727,33 @@ function jobPanel(jobId, onDone, opts = {}) {
           h("span", { class: "muted" }, "  ", j.started ? (ended ? fmtDur(j.ended - j.started) : fmtDur(Date.now() / 1000 - j.started)) : ""))),
         h("div", { class: "row" },
           !ended ? h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled") }, "Cancel") : null,
-          opts.detail ? null : h("button", { class: "btn sm ghost", onclick: () => { showLog = !showLog; draw(); } }, showLog ? "Hide log" : "Show log"),
+          opts.detail ? null : h("button", { class: "btn sm ghost", onclick: () => { showLog = !showLog; loop.poll({ force: true }); } }, showLog ? "Hide log" : "Show log"),
           opts.detail ? null : h("a", { class: "btn sm ghost", href: "#/jobs/" + j.id }, "Full log and details"))),
       progressBar(j),
       h("p", { class: "small muted", style: { marginTop: "6px" } }, (j.progress && j.progress.text) || ""),
       j.error ? h("div", { class: "note bad" }, j.error) : null,
     );
-    if (!opts.detail && showLog) {
-      logBox.textContent = await api(`/jobs/${j.id}/log?tail=20000`).catch(() => "");
+    if (log !== null) {
+      logBox.textContent = log;
       el.append(logBox);
       logBox.scrollTop = logBox.scrollHeight;
     }
     if (ended && !finished) { finished = true; onDone && onDone(j); }
-    if (!ended && el.isConnected !== false) timer = setTimeout(draw, 2000);
   };
-  draw();
-  el.stop = () => clearTimeout(timer);
+  const loop = autoRefresh({
+    host: el,
+    fetch: async () => {
+      const j = await api("/jobs/" + jobId);
+      const log = !opts.detail && showLog ? await api(`/jobs/${j.id}/log?tail=20000`).catch(() => "") : null;
+      return { j, log };
+    },
+    // the running time is part of what is shown: it moves every 10 s
+    signature: ({ j, log }) => [j.status, j.error, j.position, j.progress && j.progress.text, j.progress && j.progress.fraction, log && log.length, !isEnded(j) && Math.floor(Date.now() / 10000)].join("|"),
+    rebuild: draw,
+    every: ({ j }) => (isEnded(j) ? null : 2000),
+    onError: (e) => { el.textContent = e.message; },
+  });
+  el.stop = loop.stop;
   return el;
 }
 
@@ -684,6 +762,64 @@ function jobPanel(jobId, onDone, opts = {}) {
 const routes = {};
 let cleanup = [];
 function onLeave(fn) { cleanup.push(fn); }
+
+/** The one way a view keeps itself up to date (the status bar, job panels, Jobs, Results, Train...).
+ *  - fetch(): asks the server and returns the data;
+ *  - every(data): milliseconds until the next look, or null to stop (nothing is running, nothing can change);
+ *  - signature(data): what the view shows, as a string; rebuild(data) runs only when it changed (or when
+ *    there is no signature), patch(data), if given, is the cheap in-place update when it did not;
+ *  - host: the element the view lives in, the loop ends when it leaves the page (else it ends with the route);
+ *  - global: true for a loop that lives as long as the app (the status bar);
+ *  - onError(err): the server did not answer; the loop tries again after 10 s.
+ *  Nothing is asked while the tab is hidden (it looks at once when the tab is shown again), two requests never
+ *  overlap, and the first look is made now unless `first: false`.
+ *  The controller: poll({ force }) looks now (force: rebuild even if nothing changed), soon(ms, force) does it
+ *  later (after an action), adopt(data) records data drawn by other means, stop(). */
+function autoRefresh({ fetch, every, signature, rebuild, patch, host, onError, first = true, global = false }) {
+  let timer = null, last = null, busy = false, dead = false, again = null;
+  const ctl = {};
+  const arm = (data) => {
+    clearTimeout(timer);
+    timer = null;
+    let ms = null;
+    try { ms = every(data); } catch (_) { /* a view that is gone */ }
+    if (ms != null && !dead) timer = setTimeout(() => ctl.poll(), ms);
+  };
+  ctl.poll = async ({ force = false } = {}) => {
+    if (dead) return;
+    if (busy) { again = { force: force || !!(again && again.force) }; return; }
+    clearTimeout(timer);
+    timer = null;
+    if (document.hidden && !force) return;  // looks again when the tab is shown
+    busy = true;
+    let data;
+    try {
+      data = await fetch();
+      if (dead) return;
+      if (!signature) await rebuild(data);
+      else {
+        const sig = signature(data);
+        if (force || sig !== last) { last = sig; await rebuild(data); }
+        else if (patch) await patch(data);
+      }
+    } catch (e) {
+      if (onError) onError(e);
+      if (!dead) timer = setTimeout(() => ctl.poll(), 10000);
+      return;
+    } finally { busy = false; }
+    if (host && !host.isConnected) { ctl.stop(); return; }
+    arm(data);
+    if (again) { const a = again; again = null; ctl.poll(a); }
+  };
+  ctl.soon = (ms, force = false) => { clearTimeout(timer); timer = setTimeout(() => ctl.poll({ force }), ms); };
+  ctl.adopt = (data) => { if (signature) last = signature(data); arm(data); };
+  ctl.stop = () => { dead = true; clearTimeout(timer); document.removeEventListener("visibilitychange", onVis); };
+  const onVis = () => { if (!document.hidden && !dead && !busy) ctl.poll(); };
+  document.addEventListener("visibilitychange", onVis);
+  if (!host && !global) onLeave(ctl.stop);
+  if (first) ctl.poll({ force: true });
+  return ctl;
+}
 
 async function route() {
   cleanup.forEach((f) => { try { f(); } catch (_) { /* ignore */ } });
@@ -695,7 +831,10 @@ async function route() {
   document.querySelectorAll(".rail a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
   const main = $("#main");
   main.innerHTML = "";
+  main.classList.remove("is-loading");
   const params = new URLSearchParams(query || "");
+  const loading = h("div", { class: "page-loading", role: "status" }, h("span", { class: "spinner" }), " Loading…");
+  const slow = setTimeout(() => main.append(loading), 300);
   try {
     if (!S.catalog) await loadCatalog();
     if (NEEDS_MODEL.includes(name) && !S.catalog.models.length) {
@@ -708,6 +847,9 @@ async function route() {
   } catch (e) {
     main.append(h("div", { class: "note bad" }, e.message));
   }
+  clearTimeout(slow);
+  loading.remove();
+  main.classList.remove("is-loading");
   main.focus({ preventScroll: true });
 }
 window.addEventListener("hashchange", route);
@@ -734,7 +876,7 @@ routes[""] = async (main) => {
     main.append(h("div", { class: "panel", style: { marginBottom: "16px" } }, h("h2", {}, "Getting started"),
       h("ol", { class: "small", style: { lineHeight: 1.8, margin: 0 } },
         h("li", {}, h("a", { href: "#/models" }, "Models"), ": create a model (empty, or from the Generic template set) and add its sprites: a folder, a zip or a few PNG files."),
-        h("li", {}, "Give it groups (families, factions...) and kinds (sizes), with the words that describe them."),
+        h("li", {}, "Give it groups (families, teams...) and kinds (sizes), with the words that describe them."),
         h("li", {}, h("a", { href: "#/train" }, "Train"), ": build the training set, train the LoRA, then pick the best epoch and click Use."),
         h("li", {}, h("a", { href: "#/generate" }, "Generate"), " or ", h("a", { href: "#/batch" }, "Batch"), ": remaster your sprites or invent new ones; tune the colours with ",
           h("a", { href: "#/palettes" }, "Palettes"), "."))));
@@ -742,6 +884,16 @@ routes[""] = async (main) => {
   const cards = h("div", { class: "cards" });
   const recent = h("div", { class: "panel" });
   main.append(cards, h("div", { style: { height: "16px" } }), recent);
+
+  // Are ComfyUI and kohya sd-scripts behind their upstream? The Updates page has the details and the buttons.
+  let behind = null;
+  const updatesBox = () => h("div", { class: "row", style: { gap: "8px", margin: "8px 0 10px" } },
+    h("a", { class: "btn sm ghost", href: "#/updates" }, "Updates"),
+    behind ? h("span", { class: "tag amber" }, `update available: ${behind.join(", ")}`) : null);
+  api("/updates", { quiet: true }).then((u) => {
+    const names = u.items.filter((it) => it.ok && it.behind).map((it) => it.name);
+    if (names.length) { behind = names; drawCards(); }
+  }).catch(() => {});
 
   const drawCards = () => {
     const st = S.status;
@@ -751,10 +903,11 @@ routes[""] = async (main) => {
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "ComfyUI"), h("span", { class: "status " + (c.up ? "done" : "failed") }, c.up ? "running" : "stopped")),
       h("p", { class: "muted small" }, c.up ? `${c.device || "GPU"}, ComfyUI ${c.version || ""}` : "Generation needs it running. Training stops it on its own and starts it again afterwards."),
-      h("div", { class: "row" },
+      isAdmin() ? updatesBox() : null,
+      isAdmin() ? h("div", { class: "row" },
         c.up ? h("button", { class: "btn sm", onclick: () => attempt(() => api("/comfy/restart", { body: {} }), "Restarting ComfyUI") }, "Restart")
           : h("button", { class: "btn sm primary", onclick: () => attempt(() => api("/comfy/start", { body: {} }), "Starting ComfyUI") }, "Start"),
-        c.up ? h("button", { class: "btn sm ghost", onclick: () => attempt(() => api("/comfy/stop", { body: {} }), "Stopping ComfyUI") }, "Stop") : null)));
+        c.up ? h("button", { class: "btn sm ghost", onclick: () => attempt(() => api("/comfy/stop", { body: {} }), "Stopping ComfyUI") }, "Stop") : null) : null));
     const run = st.running;
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "Working on"), h("a", { href: "#/jobs", class: "small" }, "All jobs")),
@@ -766,7 +919,7 @@ routes[""] = async (main) => {
     const loras = S.catalog.loras;
     cards.append(h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "LoRAs"), h("a", { href: "#/train", class: "small" }, "Train")),
-      loras.length ? h("table", {}, h("tbody", {}, loras.map((l) => h("tr", {}, h("td", { class: "mono" }, l.name), h("td", { class: "muted small nowrap" }, ago(l.mtime))))))
+      loras.length ? h("div", { class: "scroll-box" }, h("table", {}, h("tbody", {}, loras.map((l) => h("tr", {}, h("td", { class: "mono" }, l.name), h("td", { class: "muted small nowrap" }, ago(l.mtime)))))))
         : h("p", { class: "muted" }, "No LoRA installed yet. Train one, or copy your .safetensors files to ComfyUI's models/loras.")));
   };
   document.addEventListener("status", drawCards);
@@ -793,7 +946,7 @@ routes.generate = async (main, _parts, params) => {
   const saved = store.get("gen2", {});
   const f = Object.assign({
     model: "", group: "", kind: "", refs_kind: "", extra: "", colours: "", start: "none", init: "", sketch: "",
-    denoise: "", count: 4, seed: "", size: "", mirror: "auto", lora: "", strength: 1.0, name: "", keep_green: "auto", no_tidy: false, palette: "", fill: "",
+    denoise: "", count: 4, seed: "", size: "", mirror: "auto", lora: "", strength: 1.0, name: "", keep_green: "auto", no_tidy: false, outline_style: "dark", palette: "", fill: "",
   }, saved, { init: "", sketch: "" });
   for (const k of ["model", "group", "kind"]) if (params.get(k)) f[k] = params.get(k);
   const asked = S.catalog.models.find((x) => x.id === params.get("model"));
@@ -833,7 +986,7 @@ routes.generate = async (main, _parts, params) => {
 
     form.append(h("div", { class: "field" }, h("span", { class: "label" }, "Model"),
       h("div", { class: "chips" }, visibleModels().map((x) => h("button", { type: "button", class: "chip" + (x.id === f.model ? " on" : ""),
-        onclick: async () => { f.model = x.id; f.init = ""; f.lora = ""; fixChoices(); remember(); await loadSprites(); draw(); drawSide(); } }, x.label)))),
+        onclick: async () => { f.model = x.id; f.init = ""; f.lora = ""; fixChoices(); remember(); await busyWhile([form, side], loadSprites); draw(); drawSide(); } }, x.label)))),
       loraNote(m, f.lora));
     form.append(h("div", { class: "inline-fields", style: { marginTop: "14px" } },
       h("div", { class: "field" }, h("label", { for: "f-group" }, "Group"),
@@ -911,7 +1064,11 @@ routes.generate = async (main, _parts, params) => {
     adv.append(h("div", { class: "field", style: { marginTop: "14px" } }, h("label", { for: "f-pal" }, "Palette"),
       h("select", { id: "f-pal", onchange: (e) => { f.palette = e.target.value; remember(); draw(); } }, paletteOptions(f.palette, g && g.palette)),
       h("div", { class: "hint" }, "Colours and tuning put on the results. ", h("a", { href: "#/palettes" }, "Palettes"))));
-    adv.append(h("label", { class: "check small", style: { marginTop: "12px" } }, h("input", { type: "checkbox", checked: f.no_tidy, onchange: (e) => { f.no_tidy = e.target.checked; remember(); } }), "No dark outline"));
+    adv.append(h("label", { class: "check small", style: { marginTop: "12px" } }, h("input", { type: "checkbox", checked: f.no_tidy, onchange: (e) => { f.no_tidy = e.target.checked; remember(); } }), "No outline"));
+    adv.append(h("div", { class: "field" }, h("label", { for: "f-outline" }, "Outline style"),
+      h("select", { id: "f-outline", onchange: (e) => { f.outline_style = e.target.value; remember(); } },
+        [["dark", "Dark: the darkest colour"], ["selective", "Selective: a darker shade of the sprite's own colour"]].map(([v, l]) => h("option", { value: v, selected: v === f.outline_style }, l))),
+      h("div", { class: "hint" }, "Selective outlining softens the silhouette; a dark outline separates the sprite more from any background.")));
     adv.append(h("div", { class: "field" }, h("label", { for: "f-name" }, "Name of the results"),
       h("input", { id: "f-name", type: "text", value: f.name, placeholder: `${f.kind || f.model}_${f.group}`, oninput: (e) => { f.name = e.target.value; remember(); } })));
     form.append(adv);
@@ -993,7 +1150,9 @@ function readFile(file) {
 
 routes.results = async (main, _parts, params) => {
   main.append(head("Results", "Every generation, batch and LoRA comparison in the output folder. Star the variant to keep, then export the picks.",
-    h("button", { class: "btn", onclick: exportPicks }, "Export picks")));
+    h("div", { class: "row", style: { gap: "8px" } },
+      h("button", { class: "btn", title: "Copy the starred sprites into a new or existing model as training sprites", onclick: () => picksToModel() }, "Train on picks…"),
+      h("button", { class: "btn", onclick: exportPicks }, "Export picks"))));
   const layout = h("div", { class: "split" });
   const listPanel = h("div", { class: "panel" });
   const view = h("div", {});
@@ -1022,12 +1181,47 @@ routes.results = async (main, _parts, params) => {
     drawView();
   };
 
+  // What is in the bin: put back or erase single results.
+  const viewBin = async () => {
+    const layer = h("div", { class: "modal dialog-layer" });
+    const close = async () => {
+      layer.remove(); document.removeEventListener("keydown", onKey, true);
+      bin = await api("/results/bin"); items = await api("/results"); drawList(); drawView();
+    };
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); } };
+    const box = h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true", style: { maxWidth: "640px", width: "100%" } });
+    layer.append(box);
+    layer.addEventListener("click", (e) => { if (e.target === layer) close(); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(layer);
+    const draw = async () => {
+      const info = await api("/results/bin?items=1");
+      bin = info;
+      box.innerHTML = "";
+      box.append(h("h2", {}, "Bin"), h("p", { class: "dialog-text" }, info.count ? `${info.count} deleted result${info.count === 1 ? "" : "s"}, ${(info.bytes / 1048576).toFixed(1)} MB, newest first.` : "The bin is empty."));
+      const list = h("div", { class: "bin-list" });
+      for (const it of info.items || []) {
+        list.append(h("div", { class: "bin-row" },
+          h("img", { src: fileUrl(it.cover), alt: "", loading: "lazy" }),
+          h("div", { style: { flex: "1", minWidth: "0" } }, h("div", { class: "mono small", style: { overflowWrap: "anywhere" } }, it.name),
+            h("div", { class: "muted small" }, `deleted ${fmtTime(it.deleted)}, ${(it.bytes / 1048576).toFixed(1)} MB`)),
+          h("button", { class: "btn sm", disabled: !it.restorable, title: it.restorable ? "Put it back in the results" : "A result with this name exists again",
+            onclick: async () => { const r = await attempt(() => api("/results/bin/restore", { body: { ids: [it.id] } })); if (r) { toast(r.restored.length ? "Put back: " + r.restored.join(", ") : "Nothing put back", !r.restored.length); draw(); } } }, "Put back"),
+          h("button", { class: "btn sm ghost danger", title: "Erase it for good",
+            onclick: async () => { if (await askConfirm(`Erase ${it.name} for good?`, { danger: true, ok: "Erase", title: "Erase from the bin" })) { if (await attempt(() => api("/results/bin/empty", { body: { ids: [it.id] } }))) draw(); } } }, "Erase")));
+      }
+      box.append(list, h("div", { class: "row", style: { marginTop: "16px", justifyContent: "flex-end" } }, h("button", { class: "btn primary", onclick: close }, "Close")));
+    };
+    draw();
+  };
+
   const binBar = () => {
     const nEmpty = items.filter((i) => i.empty).length;
     return h("div", { class: "results-tools" },
       nEmpty ? h("button", { class: "btn sm", title: "Results with nothing rendered in them (every sprite failed, or a stopped job)",
         onclick: () => removeResults({ empty: true }, `the ${nEmpty} empty result${nEmpty === 1 ? "" : "s"}`) }, `Delete empty (${nEmpty})`) : null,
       bin.count ? h("span", { class: "muted small" }, `In the bin: ${bin.count} (${(bin.bytes / 1048576).toFixed(1)} MB)`) : null,
+      bin.count ? h("button", { class: "btn sm ghost", onclick: viewBin }, "View bin") : null,
       bin.count ? h("button", { class: "btn sm ghost", onclick: async () => {
         const r = await attempt(() => api("/results/bin/restore", { body: { count: 1 } }));
         if (!r) return;
@@ -1049,6 +1243,7 @@ routes.results = async (main, _parts, params) => {
     const box = h("div", { class: "list" });
     listPanel.append(box);
     const drawItems = () => {
+      const keep = box.scrollTop;
       box.innerHTML = "";
       const shown = items.filter((i) => (typeFilter === "all" || i.type === typeFilter) && i.title.toLowerCase().includes(filter.toLowerCase()));
       if (!shown.length) box.append(h("p", { class: "muted small" }, "Nothing here."));
@@ -1061,11 +1256,16 @@ routes.results = async (main, _parts, params) => {
             h("div", { class: "s" }, i.type === "batch" ? h("span", { class: "tag amber" }, "batch") : i.type === "matrix" ? h("span", { class: "tag" }, "LoRA test") : null,
               i.empty ? [" ", h("span", { class: "tag bad", title: "Nothing was rendered: see the job's log on the Jobs page" }, "empty")] : null,
               i.busy ? [" ", h("span", { class: "tag" }, "running")] : null,
-              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)))));
+              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
+            ownerBadge(i) || i.access === "write" ? h("div", { class: "row", style: { gap: "6px", marginTop: "3px" } }, ownerBadge(i),
+              i.access === "write" ? h("button", { class: "btn sm ghost", type: "button", style: { padding: "0 6px", minHeight: "20px" },
+                onclick: (e) => { e.stopPropagation(); shareDialog("result", i.path.split("/").pop(), i.title, async () => { items = await api("/results"); drawItems(); }); } }, "Share") : null) : null)));
       }
     };
     drawItems();
+    redrawItems = drawItems;
   };
+  let redrawItems = () => {};
 
   const drawView = async () => {
     view.innerHTML = "";
@@ -1074,7 +1274,8 @@ routes.results = async (main, _parts, params) => {
       return;
     }
     let d;
-    try { d = await api("/results/detail?path=" + encodeURIComponent(current)); } catch (e) { view.append(h("div", { class: "note bad" }, e.message)); return; }
+    const detailUrl = "/results/detail?path=" + encodeURIComponent(current);
+    try { d = await api(detailUrl); } catch (e) { view.append(h("div", { class: "note bad" }, e.message)); return; }
     const body = h("div", {});
     const item = items.find((i) => i.path === d.path) || {};
     const delBtn = (path, label, small) => item.busy ? null : h("button", { class: "btn sm ghost danger", title: "Move to the bin",
@@ -1090,7 +1291,14 @@ routes.results = async (main, _parts, params) => {
       if (p.kind && p.kind !== "none") q.set("kind", p.kind);
       location.hash = "#/generate?" + q;
     };
-    const setRow = (s, pickAs, title, deletable) => h("div", { class: "set" },
+    liveRows = new Map();  // the rows on screen, so a live refresh replaces only the ones that changed
+    const setRow = (s, pickAs, title, deletable) => {
+      const el = makeRow(s, pickAs, title, deletable);
+      liveRows.set(rowKey(s), { el, sig: rowSig(s), args: [pickAs, title, deletable] });
+      return el;
+    };
+    makeRowFn = (...a) => makeRow(...a);
+    const makeRow = (s, pickAs, title, deletable) => h("div", { class: "set" },
       h("div", { class: "set-head" }, h("h3", {}, title || s.name), s.done ? null : item.busy ? h("span", { class: "tag amber" }, "rendering…")
           : h("span", { class: s.variants.length ? "tag" : "tag bad" }, s.variants.length ? "unfinished" : "failed"),
         h("span", { class: "muted small", title: s.prompt }, [s.params.denoise && s.params.denoise !== "n/a" ? `denoise ${s.params.denoise}` : "", s.params.lora || "",
@@ -1115,12 +1323,12 @@ routes.results = async (main, _parts, params) => {
         const pickedCount = d.sets.filter((s) => s.variants.some((v) => S.picks[v.path])).length;
         const failedSets = d.sets.filter((s) => !s.variants.length && !item.busy);
         body.append(h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Batch " + d.title),
-          h("div", { class: "row" }, h("span", { class: "muted small" }, `${d.sets.length - failedSets.length} sprites made, ${pickedCount} picked` + (failedSets.length ? `, ${failedSets.length} failed` : "")),
+          h("div", { class: "row" }, h("span", { class: "muted small", "data-count": "1" }, `${d.sets.length - failedSets.length} sprites made, ${pickedCount} picked` + (failedSets.length ? `, ${failedSets.length} failed` : "")),
             failedSets.length && failedSets.length < d.sets.length ? h("button", { class: "btn sm ghost", onclick: () => removeResults({ paths: failedSets.map((s) => s.path) }, `the ${failedSets.length} failed sprite(s) of this batch`) }, "Delete failed") : null,
             delBtn(d.path, `the whole batch ${d.title}`))),
           d.sheets.length ? h("div", { class: "row small" }, "Sheets: ", d.sheets.map((sh) => h("a", { href: "#", onclick: (e) => { e.preventDefault(); openSprite(sh); } }, base(sh)))) : null));
         for (const cls of classes) {
-          const p = h("div", { class: "panel" }, h("h2", {}, cls.replace("_", " ")));
+          const p = h("div", { class: "panel", "data-class": cls }, h("h2", {}, cls.replace("_", " ")));
           for (const s of d.sets.filter((x) => x.class === cls)) p.append(setRow(s, s.target, null, true));
           body.append(p);
         }
@@ -1136,26 +1344,129 @@ routes.results = async (main, _parts, params) => {
     };
     drawBody();
     view.append(bar, body);
-    // A job is still writing here: refresh every 15 s, so new sprites show and the tags settle.
-    clearTimeout(liveTimer);
-    if (item.busy) {
-      const shown = current;
-      liveTimer = setTimeout(async () => {
-        if (current !== shown || !document.body.contains(view)) return;
-        const y = window.scrollY;
-        items = await api("/results");
-        drawList();
-        await drawView();
-        window.scrollTo(0, y);
-      }, 15000);
+    shownBusy = !!item.busy;
+    shownMtime = item.mtime;
+    rowShown = current;
+  };
+
+  // Live updates, every 30 s while the page is open: the list on the left picks up new and changing results, and a
+  // result a job is still writing is patched in place (only the sprites that changed are redrawn, nothing else flickers).
+  const itemsSig = (list) => list.map((i) => [i.path, i.count, i.tried, i.busy, i.empty, i.cover].join()).join("|");
+  const patchView = async () => {
+    const shown = current;
+    let d2;
+    try { d2 = await api("/results/detail?path=" + encodeURIComponent(shown)); } catch { return; }
+    if (current !== shown || !document.body.contains(view)) return;
+    const sets = d2.type === "batch" ? d2.sets : d2.type === "single" ? [d2] : d2.subjects.flatMap((x) => x.cells);
+    let rebuild = false;
+    for (const x of sets) {
+      const old = liveRows.get(rowKey(x));
+      if (!old) {  // a new sprite of a batch: its row goes in its class's panel, in order
+        const panel = d2.type === "batch" ? view.querySelector(`[data-class="${CSS.escape(x.class)}"]`) : null;
+        if (!panel) { rebuild = true; continue; }
+        const args = [x.target, null, true];
+        const el = makeRowFn(x, ...args);
+        const next = sets.slice(sets.indexOf(x) + 1).map((y) => liveRows.get(rowKey(y))).find((e) => e && e.el.parentNode === panel);
+        panel.insertBefore(el, next ? next.el : null);
+        liveRows.set(rowKey(x), { el, sig: rowSig(x), args });
+        continue;
+      }
+      const sig = rowSig(x);
+      if (sig === old.sig) continue;
+      const el = makeRowFn(x, ...old.args);
+      old.el.replaceWith(el);
+      liveRows.set(rowKey(x), { el, sig, args: old.args });
+    }
+    if (rebuild) { await drawView(); return; }  // a sprite appeared that has no row yet: draw the whole result once
+    const count = view.querySelector("[data-count]");
+    if (count && d2.type === "batch") {
+      const picked = d2.sets.filter((x) => x.variants.some((v) => S.picks[v.path])).length;
+      count.textContent = `${d2.sets.length} sprites made, ${picked} picked`;
     }
   };
-  let liveTimer = null;
-  onLeave(() => clearTimeout(liveTimer));
+  let shownBusy = false, shownMtime = 0, rowShown = null, liveRows = new Map(), makeRowFn = null;
+  const rowKey = (x) => x.path || x.target || x.name;
+  const rowSig = (x) => (x.done ? "d" : "r") + "|" + (x.orig || "") + "|" + x.variants.map((v) => v.path).join(",");
+  // The list changes rarely: one look every 30 s, and a running result is patched row by row (no signature: the
+  // list and the view each compare themselves with what they show).
+  const liveLoop = autoRefresh({
+    host: view,
+    first: false,
+    fetch: () => api("/results"),
+    every: () => 30000,
+    rebuild: async (fresh) => {
+      const listChanged = itemsSig(fresh) !== itemsSig(items);
+      items = fresh;
+      if (listChanged) redrawItems();
+      const it = current && items.find((i) => i.path === current);
+      if (it && it.busy && shownBusy) await patchView();
+      else if (it && (shownBusy !== !!it.busy || (!it.busy && it.mtime !== shownMtime))) await drawView();  // finished (or changed): settle the tags and buttons
+    },
+  });
+  liveLoop.adopt(items);
+  onLeave(liveLoop.stop);
 
   drawList();
   drawView();
 };
+
+// The starred sprites become training sprites of a new model, or are added to an existing one.
+async function picksToModel() {
+  const n = Object.keys(S.picks || {}).length;
+  if (!n) { toast("Nothing picked yet: star the variants you want first.", true); return; }
+  await loadCatalog();
+  const models = S.catalog.models;
+  const f = { mode: models.length ? "existing" : "new", model: (models[0] || {}).id || "", label: "", trigger: "", group: "", kind: "", unpick: false };
+  let detail = null;
+  const layer = h("div", { class: "modal dialog-layer" });
+  const box = h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true", style: { maxWidth: "520px", width: "100%" } });
+  layer.append(box);
+  const close = () => { layer.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); close(); } };
+  layer.addEventListener("click", (e) => { if (e.target === layer) close(); });
+  document.addEventListener("keydown", onKey, true);
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+  const loadDetail = async () => {
+    detail = f.mode === "existing" && f.model ? (await api("/models/" + f.model)).model : null;
+    if (!detail || !detail.groups.some((g) => g.id === f.group)) f.group = "";
+    if (!detail || !detail.kinds.some((k) => k.id === f.kind)) f.kind = "";
+  };
+  const draw = () => {
+    box.innerHTML = "";
+    const opt = (v, l, cur) => h("option", { value: v, selected: v === cur }, l);
+    box.append(h("h2", {}, "Train on picks"),
+      h("p", { class: "dialog-text" }, `${n === 1 ? "The starred sprite is" : `The ${n} starred sprites are`} copied (the originals stay in Results) into a model's sprites, named after their pick name. Then train that model on the Train page.`),
+      h("div", { class: "field", style: { marginTop: "14px" } }, seg([{ id: "existing", label: "Existing model" }, { id: "new", label: "New model" }].filter((o) => o.id === "new" || models.length), f.mode,
+        async (v) => { f.mode = v; await loadDetail(); draw(); })),
+      f.mode === "existing"
+        ? h("div", { class: "field" }, h("label", {}, "Model"), h("select", { onchange: async (e) => { f.model = e.target.value; await busyWhile(box, loadDetail); draw(); } }, models.map((x) => opt(x.id, x.label || x.id, f.model))))
+        : [h("div", { class: "field" }, h("label", {}, "Name"), h("input", { type: "text", value: f.label, placeholder: "e.g. Boss ships", oninput: (e) => { f.label = e.target.value; } })),
+          h("div", { class: "field" }, h("label", {}, "Trigger word (optional)"), h("input", { type: "text", value: f.trigger, class: "mono", placeholder: "made from the name", oninput: (e) => { f.trigger = e.target.value; } }),
+            h("div", { class: "hint" }, "One group, \"Main\", holds the sprites; describe it in the model afterwards."))],
+      detail ? h("div", { class: "inline-fields" },
+        h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { f.group = e.target.value; } }, opt("", "Automatic (by file name)", f.group), detail.groups.map((g) => opt(g.id, g.label, f.group)))),
+        detail.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { f.kind = e.target.value; } }, opt("", "Automatic (by file name)", f.kind), detail.kinds.map((k) => opt(k.id, k.label, f.kind)))) : null) : null,
+      h("label", { class: "row", style: { gap: "8px", margin: "10px 0" } }, h("input", { type: "checkbox", checked: f.unpick, onchange: (e) => { f.unpick = e.target.checked; } }), h("span", { class: "small" }, "Remove the stars afterwards")),
+      h("div", { class: "row", style: { marginTop: "18px", justifyContent: "flex-end" } },
+        h("button", { class: "btn ghost", onclick: close }, "Cancel"),
+        h("button", { class: "btn primary", onclick: async () => {
+          const body = { group: f.group || null, kind: f.kind || null, unpick: f.unpick };
+          if (f.mode === "new") {
+            if (!f.label.trim()) { toast("Give the new model a name", true); return; }
+            body.new = { id: slug(f.label), label: f.label.trim(), trigger: f.trigger.trim() };
+          } else body.model = f.model;
+          const r = await attempt(() => api("/picks/to-model", { body }));
+          if (!r) return;
+          close();
+          if (f.unpick) S.picks = await api("/picks");
+          toast(`${r.saved.length} sprite${r.saved.length === 1 ? "" : "s"} added to ${r.model}` + (r.skipped.length ? `, ${r.skipped.length} skipped` : ""), !r.saved.length);
+          location.hash = "#/models/" + r.model;
+        } }, "Add to the model")));
+  };
+  document.body.append(layer);
+  await loadDetail();
+  draw();
+}
 
 async function exportPicks() {
   const r = await attempt(() => api("/picks/export", { body: {} }));
@@ -1201,8 +1512,6 @@ routes.train = async (main, parts) => {
     onclick: () => { location.hash = "#/train/" + m.id; } }, m.label))));
   const box = h("div", { class: "stack" });
   main.append(box);
-  let timer = null;
-  onLeave(() => clearTimeout(timer));
   const opts = Object.assign({ model: "sd15", epochs: "", dim: "", lr: "0.0001", precision: "auto", repeats: "", src: "" }, store.get("train." + cat, {}));
   if (opts.precision === "no" && !store.get("precisionChosen", false)) opts.precision = "auto"; // the old default, not a choice
   if (opts.epochs === 12) opts.epochs = "";
@@ -1211,8 +1520,42 @@ routes.train = async (main, parts) => {
   let captionFilter = "";
   let showCaptions = false;
 
-  const draw = async () => {
-    const info = await api(`/train/${cat}?model=${opts.model}`);
+  // The page shows the same thing until the server's answer changes (see autoRefresh): the progress of a running
+  // job is painted in place, from the status bar's own loop, and only a new checkpoint or preview image, a job
+  // starting or ending... rebuilds it.
+  const live = { train: null, pv: null };
+  let lastKinds = [];
+  const sigOf = (info) => JSON.stringify([info.jobs.map((j) => [j.id, j.status]), info.checkpoints.map((k) => k.name), info.samples, info.installed.map((i) => i.name),
+    info.dataset.mtime, info.dataset.count, info.sdxl_ready, info.final_epoch]);
+  const paintLive = (jobs) => {
+    const find = (l) => l && jobs.find((j) => j.id === l.id && ["running", "queued"].includes(j.status));
+    const t = find(live.train);
+    if (t) live.train.el.replaceChildren(trainProgress(t));
+    const v = find(live.pv);
+    if (v) live.pv.paint(v);
+  };
+  const loop = autoRefresh({
+    first: false,
+    fetch: () => api(`/train/${cat}?model=${opts.model}`),
+    signature: sigOf,
+    rebuild: (info) => draw(info),
+    patch: (info) => paintLive(info.jobs),
+    // slow while training (checkpoints and previews appear every 2 epochs), faster while previews render one by one,
+    // none when idle: the status bar's loop wakes this one up when a job of this model starts
+    every: () => (!lastKinds.length ? null : lastKinds.includes("train") ? 20000 : lastKinds.includes("setup") ? 8000 : 4000),
+  });
+  const redraw = () => loop.poll({ force: true });
+  const schedule = (ms) => loop.soon(ms, true);
+  const onStatus = () => {
+    if (!S.status || !box.isConnected) return;
+    paintLive(S.status.running);
+    if (!lastKinds.length && S.status.running.some((j) => ["train", "previews", "dataset", "setup"].includes(j.kind))) loop.poll();
+  };
+  document.addEventListener("status", onStatus);
+  onLeave(() => document.removeEventListener("status", onStatus));
+  const draw = async (info) => {
+    live.train = null;
+    live.pv = null;
     const c = models.find((m) => m.id === cat);
     const xl = opts.model === "sdxl";
     const running = info.jobs.find((j) => j.kind !== "setup" && ["running", "queued"].includes(j.status));
@@ -1229,7 +1572,7 @@ routes.train = async (main, parts) => {
           h("p", { class: "small muted", style: { margin: 0, maxWidth: "80ch" } }, xl
             ? "SDXL renders at 1024 px: twice as many render pixels per sprite pixel as SD 1.5, so finer detail and cleaner pixels, but several times slower to train and to render. Its LoRA is " + info.name + "."
             : "SD 1.5 renders at 512 px: quick to train and to render. Its LoRA is " + info.name + ".")),
-        seg([{ id: "sd15", label: "SD 1.5" }, { id: "sdxl", label: "SDXL" }], opts.model, (v) => { opts.model = v; keep(); draw(); })),
+        seg([{ id: "sd15", label: "SD 1.5" }, { id: "sdxl", label: "SDXL" }], opts.model, (v) => { opts.model = v; keep(); redraw(); })),
       xl && S.catalog.gpu_mb && S.catalog.gpu_mb < 12000 ? h("div", { class: "note warn", style: { marginTop: "12px" } },
         `This card has ${(S.catalog.gpu_mb / 1024).toFixed(0)} GB: SDXL only fits with its weights kept in half precision (done automatically), with almost nothing to spare, `
         + "so close anything else using the GPU first. On GTX 10 cards (no fast half precision) expect many hours; SD 1.5 is the practical choice on such a card.") : null,
@@ -1262,7 +1605,7 @@ routes.train = async (main, parts) => {
     if (ds.exists) {
       s1.append(h("div", { style: { marginTop: "14px" } }, h("img", { src: fileUrl(ds.sheet), class: "px", alt: "every training image", title: "Open full size",
         style: { maxWidth: "100%", maxHeight: "220px", borderRadius: "6px", cursor: "zoom-in" }, onclick: () => openSprite(ds.sheet, "Training set") })));
-      s1.append(h("button", { class: "btn sm ghost", style: { marginTop: "8px" }, onclick: () => { showCaptions = !showCaptions; draw(); } }, showCaptions ? "Hide the captions" : `Review the ${ds.count} captions`));
+      s1.append(h("button", { class: "btn sm ghost", style: { marginTop: "8px" }, onclick: () => { showCaptions = !showCaptions; redraw(); } }, showCaptions ? "Hide the captions" : `Review the ${ds.count} captions`));
       if (showCaptions) {
         const tbody = h("tbody");
         const drawRows = () => {
@@ -1291,7 +1634,9 @@ routes.train = async (main, parts) => {
       h("div", { class: "panel-head" }, h("div", { class: "step-head" }, h("span", { class: "n" + (info.checkpoints.length ? " done" : "") }, "2"), h("h2", {}, "Train")),
         h("span", { class: "muted small" }, trainEstimate(xl))));
     if (trainJob && ["running", "queued"].includes(trainJob.status)) {
-      s2.append(trainProgress(trainJob));
+      const holder = h("div", {}, trainProgress(trainJob));
+      live.train = { id: trainJob.id, el: holder };
+      s2.append(holder);
     } else {
       if (trainJob && trainJob.status === "failed" && trainJob.error) s2.append(h("div", { class: "note bad", style: { marginBottom: "12px" } }, trainJob.error));
       if (trainJob) s2.append(h("p", { class: "small" }, "Last run: ", statusLabel(trainJob), h("span", { class: "muted" }, " ", fmtTime(trainJob.ended), trainJob.started && trainJob.ended ? `, ${fmtDur(trainJob.ended - trainJob.started)}` : ""),
@@ -1330,7 +1675,7 @@ routes.train = async (main, parts) => {
     if (!info.checkpoints.length) {
       s3.append(h("p", { class: "muted" }, "Checkpoints and their previews appear here during training, every 2 epochs. SDXL on a card under 12 GB saves the checkpoints without previews: try them on Compare LoRAs."));
     } else {
-      s3.append(h("p", { class: "small muted" }, "Each column is one checkpoint, each row one test prompt (things the game does not have, to see the style rather than copies). Pick the earliest column that looks right: later ones tend to copy the training set."));
+      s3.append(h("p", { class: "small muted" }, "Each column is one checkpoint, each row one test prompt (things your sprites do not show, to see the style rather than copies). Pick the earliest column that looks right: later ones tend to copy the training set."));
       s3.append(previewsBox(info, pvJob, running, smallCard));
       const grid = info.samples.grid;
       const epochs = [...new Set(Object.values(grid).flatMap((row) => Object.keys(row)))].map(Number).filter((e) => e > 0).sort((a, b) => a - b);
@@ -1362,8 +1707,7 @@ routes.train = async (main, parts) => {
               : h("button", { class: "btn sm", title: "Install under its own name, to compare", onclick: () => install(k.path, addName(k)) }, "Add"))))))))));
     }
     box.append(s3);
-    if (running) schedule(running.kind === "train" ? 5000 : 1500);
-    else if (downloading) schedule(5000);
+    lastKinds = [running, downloading].filter(Boolean).map((j) => j.kind);
   };
   // Previews the training did not render (SDXL on a small card, or a stopped run): rendered afterwards through ComfyUI.
   const pvOff = new Set();
@@ -1371,12 +1715,16 @@ routes.train = async (main, parts) => {
     const el = h("div", { class: "note", style: { margin: "0 0 14px" } });
     const spi = S.catalog.speed && S.catalog.speed.sec_per_image;
     if (pvJob && ["running", "queued"].includes(pvJob.status)) {
-      const p = pvJob.progress || {};
-      el.append(h("div", { class: "row between", style: { marginBottom: "8px" } }, h("span", {}, statusLabel(pvJob), h("span", { class: "muted small" }, "  Rendering previews: ", p.text || "")),
-        h("div", { class: "row" }, h("a", { class: "btn sm ghost", href: "#/jobs/" + pvJob.id }, "Log"),
-          h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${pvJob.id}/cancel`, { body: {} }), "Previews cancelled") }, "Cancel"))));
-      el.append(progressBar(pvJob));
-      el.append(h("div", { class: "hint" }, "Each one appears in the grid below when it is done; a cancelled run keeps what is finished."));
+      const paint = (j) => {
+        const p = j.progress || {};
+        el.replaceChildren(h("div", { class: "row between", style: { marginBottom: "8px" } }, h("span", {}, statusLabel(j), h("span", { class: "muted small" }, "  Rendering previews: ", p.text || "")),
+          h("div", { class: "row" }, h("a", { class: "btn sm ghost", href: "#/jobs/" + j.id }, "Log"),
+            h("button", { class: "btn sm danger", onclick: () => attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Previews cancelled") }, "Cancel"))),
+        progressBar(j),
+        h("div", { class: "hint" }, "Each one appears in the grid below when it is done; a cancelled run keeps what is finished."));
+      };
+      paint(pvJob);
+      live.pv = { id: pvJob.id, paint };
       return el;
     }
     const by = info.previews_by_epoch || {};
@@ -1414,10 +1762,9 @@ routes.train = async (main, parts) => {
     h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); } }), h("div", { class: "hint" }, hint));
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
-    if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); draw(); }
+    if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); redraw(); }
   };
-  const schedule = (ms) => { clearTimeout(timer); timer = setTimeout(draw, ms); };
-  await draw();
+  await redraw();
 };
 
 /** How long a training run takes here: the last run's time when there is one. */
@@ -1501,14 +1848,14 @@ routes.batch = async (main) => {
         h("div", { class: "field" }, h("label", { for: "b-inv" }, "New sprites per group and kind"),
           h("input", { id: "b-inv", type: "number", min: 1, max: 50, value: b.invent, oninput: (e) => { b.invent = e.target.value; keep(); } }))) : null,
       b.mode === "invent" ? h("div", { class: "field", style: { marginTop: "14px" } }, h("label", { for: "b-ideas" }, "Ideas (optional, one per line)"),
-        h("textarea", { id: "b-ideas", rows: 4, placeholder: "wide crescent hull\nlong lance, twin engine pods\nround carapace, six legs", oninput: (e) => { b.ideas = e.target.value; keep(); } }, b.ideas),
+        h("textarea", { id: "b-ideas", rows: 4, placeholder: "wide crescent body\nlong handle, twin side pods\nround shell, six legs", oninput: (e) => { b.ideas = e.target.value; keep(); } }, b.ideas),
         h("div", { class: "hint" }, "What each new sprite is or looks like, used in turn (new sprite 1 takes line 1...). Empty: the group's and kind's words only, a random design in their style.")) : null,
       h("div", { class: "field", style: { marginTop: "14px" } }, h("span", { class: "label" }, "Groups"), chipSet(m.groups, "groups"),
         h("div", { class: "hint" }, "None selected: all of them.")),
       m.kinds.length ? h("div", { class: "field" }, h("span", { class: "label" }, "Kinds"), chipSet(m.kinds, "kinds"),
         h("div", { class: "hint" }, "None selected: all of them.")) : null,
       h("div", { class: "field" }, h("label", { for: "b-tag" }, "Batch name"),
-        h("input", { id: "b-tag", type: "text", value: b.tag, placeholder: "today's date", oninput: (e) => { b.tag = e.target.value; keep(); } }),
+        h("input", { id: "b-tag", type: "text", value: b.tag, placeholder: "model, LoRA and date", oninput: (e) => { b.tag = e.target.value; keep(); } }),
         h("div", { class: "hint" }, "Same name as an earlier batch: it continues that one.")),
       h("div", { class: "inline-fields", style: { marginTop: "14px" } },
         h("div", { class: "field" }, h("label", { for: "b-n" }, "Variants each"), h("input", { id: "b-n", type: "number", min: 1, max: 8, value: b.count, oninput: (e) => { b.count = e.target.value; keep(); } })),
@@ -1517,7 +1864,7 @@ routes.batch = async (main) => {
         h("input", { id: "b-fill", type: "number", min: 0, max: 100, step: 5, value: b.fill || "", placeholder: b.mode === "invent" ? "each kind's setting" : "like the originals",
           oninput: (e) => { b.fill = e.target.value; keep(); } }),
         h("div", { class: "hint" }, b.mode === "invent" ? "How much of the canvas each new sprite's longest side takes (50 to 100). Empty: each kind's Fill (Models)."
-          : "Empty: every remaster keeps its original's size. A value refits every remaster to it (their size in the game changes).")),
+          : "Empty: every remaster keeps its original's size. A value refits every remaster to it (their drawn size changes).")),
       h("div", { class: "field", style: { marginTop: "14px" } }, h("label", { for: "b-pal" }, "Palette"),
         h("select", { id: "b-pal", onchange: (e) => { b.palette = e.target.value; keep(); } },
           h("option", { value: "", selected: !b.palette }, "Each group's own" + (m.groups.some((x) => x.palette) ? ` (${m.groups.filter((x) => x.palette).map((x) => x.label + ": " + x.palette).join(", ")})` : " (none set)")),
@@ -1568,7 +1915,7 @@ routes.loras = async (main) => {
   form.append(
     h("div", { class: "field" }, h("span", { class: "label" }, "Model"),
       h("div", { class: "chips" }, visibleModels().map((x) => h("button", { type: "button", class: "chip" + (x.id === m.model ? " on" : ""),
-        onclick: () => { m.model = x.id; m.loras = []; keep(); route(); } }, x.label)))),
+        onclick: () => { m.model = x.id; m.loras = []; keep(); $("#main").classList.add("is-loading"); route(); } }, x.label)))),
     h("div", { class: "field" }, h("span", { class: "label" }, `Its LoRA files (${model.trigger}…)`),
       loras.length ? loras.map((l) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: m.loras.includes(l.name),
         onchange: (e) => { m.loras = e.target.checked ? [...m.loras, l.name] : m.loras.filter((x) => x !== l.name); keep(); } }), h("span", { class: "mono" }, l.name)))
@@ -1594,13 +1941,117 @@ routes.loras = async (main) => {
       : h("p", { class: "muted" }, "None yet.")));
 };
 
+// ---------------------------------------------------------------- LoRA files
+
+routes.lorafiles = async (main) => {
+  await loadCatalog();
+  const state = Object.assign({ model: "", find: "", sort: "date", dir: 1 }, store.get("lorafiles", {}));
+  const keep = () => store.set("lorafiles", state);
+  const picked = new Set();
+  const paging = { page: 0, size: store.get("lorafiles_size", 25) };
+  let lastFilter = "";
+  main.append(head("LoRA files", "Every LoRA in ComfyUI's models/loras: where it comes from, which one a model generates with, and what it was used for. Install, rename or delete them here."));
+  const body = h("div", {});
+  main.append(body);
+  const load = async () => {
+    const data = await api("/loras");
+    body.innerHTML = "";
+    const files = data.files;
+    if (!data.dir_ok) {
+      body.append(h("div", { class: "note warn" }, "ComfyUI's models/loras folder is not visible from here (Settings, ComfyUI folder)."));
+      return;
+    }
+    const models = [...new Map(files.filter((f) => f.model).map((f) => [f.model, f.model_label])).entries()];
+    const q = state.find.trim().toLowerCase();
+    const shown = files.filter((f) => (!state.model || f.model === state.model || (state.model === "-" && !f.model)) && (!q || f.name.toLowerCase().includes(q)));
+    const sorts = {
+      // each sort is the natural order of its column: newest, A to Z, smallest epoch first, largest
+      date: (a, b) => b.mtime - a.mtime,
+      name: (a, b) => a.name.localeCompare(b.name),
+      model: (a, b) => (a.model_label || "~").localeCompare(b.model_label || "~") || (a.epoch || 0) - (b.epoch || 0),
+      base: (a, b) => String(a.base).localeCompare(String(b.base)) || a.name.localeCompare(b.name),
+      epoch: (a, b) => (a.epoch ?? 1e9) - (b.epoch ?? 1e9) || a.name.localeCompare(b.name),
+      size: (a, b) => b.size - a.size,
+      results: (a, b) => (b.results || 0) - (a.results || 0),
+    };
+    const sortBy = (k) => { if (state.sort === k) state.dir = -(state.dir || 1); else { state.sort = k; state.dir = 1; } keep(); load(); };
+    const th = (k, label, title) => h("th", { class: "sortable", title: (title ? title + ". " : "") + "Click to sort", "aria-sort": state.sort === k ? ((state.dir || 1) > 0 ? "ascending" : "descending") : "none", onclick: () => sortBy(k) },
+      label + (state.sort === k ? ((state.dir || 1) > 0 ? " ▲" : " ▼") : ""));
+    shown.sort((a, b) => (state.dir || 1) * (sorts[state.sort] || sorts.date)(a, b));
+    const filterKey = [state.model, state.find, state.sort, state.dir].join("|");
+    if (filterKey !== lastFilter) { paging.page = 0; lastFilter = filterKey; }
+    const pg = pageOf(shown, paging);
+    const total = files.reduce((n, f) => n + f.size, 0);
+    const act = async (fn, msg) => { if (await attempt(fn, msg)) { await loadCatalog(); load(); } };
+    body.append(h("div", { class: "row", style: { marginBottom: "12px", gap: "10px", flexWrap: "wrap" } },
+      h("select", { "aria-label": "Model", style: { width: "auto" }, onchange: (e) => { state.model = e.target.value; keep(); busyWhile($("#main"), load); } },
+        h("option", { value: "" }, "All models"),
+        models.map(([id, label]) => h("option", { value: id, selected: id === state.model }, label)),
+        files.some((f) => !f.model) ? h("option", { value: "-", selected: state.model === "-" }, "No model") : null),
+      h("input", { type: "search", placeholder: "Find a name", style: { width: "220px" }, value: state.find, "aria-label": "Find", oninput: (e) => { state.find = e.target.value; keep(); }, onchange: () => load() }),
+      h("select", { "aria-label": "Sort", style: { width: "auto" }, onchange: (e) => { state.sort = e.target.value; state.dir = 1; keep(); load(); } },
+        [["date", "Date"], ["name", "Name"], ["model", "Model, then epoch"], ["base", "Base"], ["epoch", "Epoch"], ["size", "Size"], ["results", "Results"]].map(([v, t]) => h("option", { value: v, selected: v === state.sort }, t))),
+      h("span", { class: "muted small", style: { marginLeft: "auto" } }, `${files.length} files, ${fmtMB(total)}` + (data.disk_free != null ? `, ${(data.disk_free / 1073741824).toFixed(0)} GB free on the disk` : ""))));
+    if (!shown.length) {
+      body.append(h("p", { class: "muted" }, files.length ? "No file matches." : "No LoRA installed yet: train a model, then Use an epoch on the Train page."));
+      return;
+    }
+    for (const n of [...picked]) if (!files.some((f) => f.name === n)) picked.delete(n);
+    const sel = files.filter((f) => picked.has(f.name));
+    const modelsPicked = [...new Set(sel.map((f) => f.model))];
+    body.append(h("div", { class: "row", style: { marginBottom: "8px", gap: "8px", minHeight: "30px" } },
+      sel.length ? [
+        h("span", { class: "small" }, `${sel.length} selected`),
+        h("button", { class: "btn sm", disabled: modelsPicked.length !== 1 || !modelsPicked[0], title: "Open Compare LoRAs with these files ticked (files of one model)",
+          onclick: () => { store.set("matrix", Object.assign({ strengths: "0.8 1.0", seed: 1000, tag: "" }, store.get("matrix", {}), { model: modelsPicked[0], loras: sel.map((f) => f.name) })); location.hash = "#/loras"; } }, "Compare"),
+        h("button", { class: "btn sm danger", onclick: async () => {
+          const inUse = sel.filter((f) => f.in_use);
+          const msg = `Delete ${sel.length} LoRA file(s) from ComfyUI? ${fmtMB(sel.reduce((n, f) => n + f.size, 0))} are freed. The trained checkpoints of the Train page are kept.` +
+            (inUse.length ? ` ${inUse.map((f) => f.name).join(", ")} is what a model generates with: it will have no LoRA until you install another one.` : "");
+          if (await askConfirm(msg, { danger: true, ok: "Delete", title: "Delete LoRA files" })) { const names = sel.map((f) => f.name); picked.clear(); act(() => api("/loras/delete", { body: { names } }), "Deleted"); }
+        } }, "Delete"),
+        h("button", { class: "btn sm ghost", onclick: () => { picked.clear(); load(); } }, "Clear")] : null));
+    const allBox = h("input", { type: "checkbox", "aria-label": "Select all", checked: shown.every((f) => picked.has(f.name)), onchange: (e) => { shown.forEach((f) => (e.target.checked ? picked.add(f.name) : picked.delete(f.name))); load(); } });
+    body.append(h("div", { class: "panel", style: { padding: 0, overflowX: "auto" } }, h("table", { class: "lora-table" },
+      h("thead", {}, h("tr", {}, h("th", {}, allBox), th("name", "Name"), th("model", "Model"), th("base", "Base"), th("epoch", "Epoch"), th("date", "Date"), th("size", "Size"),
+        th("results", "Results", "Result folders rendered with this file"), h("th", {}, ""))),
+      h("tbody", {}, pg.rows.map((f) => h("tr", {},
+        h("td", {}, h("input", { type: "checkbox", "aria-label": "Select " + f.name, checked: picked.has(f.name), onchange: (e) => { if (e.target.checked) picked.add(f.name); else picked.delete(f.name); load(); } })),
+        h("td", {}, h("div", { class: "mono small" }, f.name), f.in_use ? h("span", { class: "tag ok", title: `The ${f.in_use} LoRA that ${f.model_label} generates with` }, `in use, ${f.in_use}`) : null),
+        h("td", {}, f.model_label ? h("a", { href: "#/train/" + f.model }, f.model_label) : h("span", { class: "muted" }, "unknown")),
+        h("td", {}, f.base),
+        h("td", {}, f.epoch != null ? "epoch " + f.epoch : f.final ? "last epoch" : h("span", { class: "muted", title: "Copied outside the app, and the name has no epoch" }, "?")),
+        h("td", {}, h("span", { class: "small", title: f.known ? `Trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)}` : "File date" }, fmtTime(f.known && f.trained ? f.trained : f.mtime))),
+        h("td", {}, h("span", { class: "muted small" }, fmtMB(f.size))),
+        h("td", {}, f.results ? h("span", { class: "small" }, String(f.results)) : h("span", { class: "muted" }, "0")),
+        h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end", flexWrap: "nowrap" } },
+          f.model && !f.in_use ? h("button", { class: "btn sm primary", title: `Install as the ${f.base} LoRA that ${f.model_label} generates with`,
+            onclick: () => act(() => api("/loras/use", { body: { name: f.name } }), "Installed as the one in use") }, "Use") : null,
+          h("button", { class: "btn sm", disabled: !!f.in_use, title: f.in_use ? "The LoRA a model generates with keeps its name" : "Rename",
+            onclick: async () => {
+              const cur = f.name.replace(/\.safetensors$/, "");
+              const to = await askText("Rename the LoRA", { input: "New name", value: cur, ok: "Rename" });
+              if (to && to !== cur) act(() => api("/loras/rename", { body: { name: f.name, to } }), "Renamed");
+            } }, "Rename"),
+          h("button", { class: "btn sm danger", title: "Delete this file",
+            onclick: async () => {
+              const msg = `Delete ${f.name} from ComfyUI? ${fmtMB(f.size)} are freed.` + (f.in_use ? ` It is what ${f.model_label} generates with: install another one afterwards.` : "");
+              if (await askConfirm(msg, { danger: true, ok: "Delete", title: "Delete a LoRA file" })) { picked.delete(f.name); act(() => api("/loras/delete", { body: { names: [f.name] } }), "Deleted"); }
+            } }, "Delete")))))))));
+    const pgr = pager(shown.length, paging, () => { store.set("lorafiles_size", paging.size); load(); });
+    if (pgr) body.append(pgr);
+    body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes: renaming a file does not change old ones."));
+  };
+  await load();
+};
+
 // ---------------------------------------------------------------- Models
 
 routes.models = async (main, parts) => {
   await loadPalettes();
   await loadCatalog();
   if (parts[0]) return modelEditor(main, parts[0], parts[1] || "sprites");
-  main.append(head("Models", "A model is one LoRA: its trigger word, its groups (factions, families...), its kinds (size classes), the words of each, and the sprites it learns from. Models belong to a project, one per game; the menu's project list shows one project at a time."));
+  main.append(head("Models", "A model is one LoRA: its trigger word, its groups (teams, families...), its kinds (size classes), the words of each, and the sprites it learns from. Models belong to a project, one per game; the menu's project list shows one project at a time."));
   const templates = await api("/templates");
   const byProject = {};
   for (const m of visibleModels()) (byProject[m.project || "No project"] ||= []).push(m);
@@ -1613,7 +2064,8 @@ routes.models = async (main, parts) => {
       h("div", { class: "row between" }, h("h2", { style: { margin: 0 } }, m.label), h("span", { class: "tag mono" }, m.trigger)),
       h("p", { class: "small muted", style: { margin: "8px 0 0" } }, `${m.sprites} sprites, ${m.groups.length} group${m.groups.length === 1 ? "" : "s"}`,
         m.kinds.length ? `, ${m.kinds.length} kinds` : ""),
-      h("p", { class: "small", style: { margin: "6px 0 0", color: "var(--muted)" } }, m.groups.map((g) => g.label).join(", "))))));
+      h("p", { class: "small", style: { margin: "6px 0 0", color: "var(--muted)" } }, m.groups.map((g) => g.label).join(", ")),
+      ownerBadge(m) ? h("p", { style: { margin: "8px 0 0" } }, ownerBadge(m)) : null))));
   }
 
   // new model
@@ -1631,16 +2083,16 @@ routes.models = async (main, parts) => {
       } }, g.label)));
   };
   const newPanel = h("div", { class: "panel" }, h("h2", {}, "New model"),
-    h("div", { class: "field" }, h("label", { for: "nm-label" }, "Name"), h("input", { id: "nm-label", type: "text", placeholder: "Player ships",
+    h("div", { class: "field" }, h("label", { for: "nm-label" }, "Name"), h("input", { id: "nm-label", type: "text", placeholder: "Player units",
       oninput: (e) => {
         form.label = e.target.value;
         const id = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
-        $("#nm-id").placeholder = id || "player_ships"; $("#nm-trigger").placeholder = "px" + id.replace(/_/g, "").slice(0, 12);
+        $("#nm-id").placeholder = id || "player_units"; $("#nm-trigger").placeholder = "px" + id.replace(/_/g, "").slice(0, 22);
       } })),
     h("div", { class: "inline-fields", style: { marginTop: "14px" } },
-      h("div", { class: "field" }, h("label", { for: "nm-id" }, "Id (folder)"), h("input", { id: "nm-id", type: "text", placeholder: "player_ships", oninput: (e) => { form.id = e.target.value; } })),
+      h("div", { class: "field" }, h("label", { for: "nm-id" }, "Id (folder)"), h("input", { id: "nm-id", type: "text", placeholder: "player_units", oninput: (e) => { form.id = e.target.value; } })),
       h("div", { class: "field" }, h("label", { for: "nm-trigger" }, "Trigger word"), h("input", { id: "nm-trigger", type: "text", placeholder: "pxplayer", oninput: (e) => { form.trigger = e.target.value; } }))),
-    h("div", { class: "field" }, h("label", { for: "nm-project" }, "Project (game)"),
+    h("div", { class: "field" }, h("label", { for: "nm-project" }, "Project"),
       projectSelect(form.project, (v) => { form.project = v; }, { id: "nm-project" })),
     h("div", { class: "field" }, h("label", { for: "nm-from" }, "Start from"),
       h("select", { id: "nm-from", onchange: (e) => { form.from = e.target.value; form.groups = []; drawGroupChips(); } },
@@ -1664,7 +2116,7 @@ routes.models = async (main, parts) => {
       const missing = t.models.filter((m) => !m.exists);
       return h("div", { class: "set" }, h("div", { class: "row between" }, h("strong", {}, t.label),
         missing.length ? h("button", { class: "btn sm", onclick: async () => {
-          const project = await askText(`Add ${t.label}`, { input: "Project (game) for these models", value: S.project && S.project !== "No project" ? S.project : "My game", ok: "Add the models" });
+          const project = await askText(`Add ${t.label}`, { input: "Project for these models", value: S.project && S.project !== "No project" ? S.project : "My game", ok: "Add the models" });
           if (project === null) return;
           const r = await attempt(() => api(`/templates/${t.id}/add`, { body: { project } }));
           if (r) { toast(`${r.created.length} models added`); await loadCatalog(); route(); }
@@ -1695,14 +2147,15 @@ routes.models = async (main, parts) => {
   const plist = await api("/projects");
   const projPanel = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Projects"),
     h("button", { class: "btn sm", onclick: async () => {
-      const name = await askText("New project", { input: "Name (a game)", placeholder: "My game", ok: "Create" });
+      const name = await askText("New project", { input: "Name", placeholder: "My project", ok: "Create" });
       if (name && await attempt(() => api("/projects", { body: { name } }), "Project created")) { await loadCatalog(); route(); }
     } }, "New project")),
-    h("p", { class: "small muted" }, "A project groups the models of one game; the list at the top of the menu shows one at a time. Renaming moves its models with it; deleting one moves its models to another project (they are never deleted)."),
+    h("p", { class: "small muted" }, "A project groups the models of one project; the list at the top of the menu shows one at a time. Renaming moves its models with it; deleting one moves its models to another project (they are never deleted)."),
     h("table", {}, h("thead", {}, h("tr", {}, ["Project", "Models", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, plist.map((p) => {
         let dest = "";
         const others = plist.filter((x) => x.name !== p.name);
+        if (!others.some((x) => x.name === "")) others.push({ name: "" });  // "No project" is always a place to move to
         return h("tr", {},
           h("td", {}, p.name ? h("b", {}, p.name) : h("span", { class: "muted" }, "No project")),
           h("td", { class: "small" }, p.models.length ? p.models.map((id) => (S.catalog.models.find((m) => m.id === id) || { label: id }).label).join(", ") : h("span", { class: "muted" }, "none yet")),
@@ -1739,8 +2192,10 @@ async function modelEditor(main, mid, tab) {
   main.append(headEl, body);
   const drawHead = () => {
     headEl.innerHTML = "";
-    headEl.append(head(m.label, null, h("a", { class: "btn ghost", href: "#/models" }, "All models"),
-      h("a", { class: "btn", href: "#/train/" + mid }, "Train it"), h("a", { class: "btn", href: "#/generate?model=" + mid }, "Generate")));
+    headEl.append(head(m.label, null, ownerBadge(d), shareButton("model", mid, d, m.label, async () => { await reload(); draw(); }),
+      h("a", { class: "btn ghost", href: "#/models" }, "All models"),
+      d.access === "read" ? null : h("a", { class: "btn", href: "#/train/" + mid }, "Train it"), h("a", { class: "btn", href: "#/generate?model=" + mid }, "Generate")));
+    if (d.access === "read") headEl.append(h("div", { class: "note warn", style: { marginBottom: "12px" } }, `${d.owner} shares this model with you to use: generate with it and look at its sprites. To change it, ask ${d.owner}, or make your own copy from Models → New model → A copy of a model.`));
     headEl.append(h("div", { class: "row", style: { marginBottom: "16px" } },
       seg(tabs.map(([id, label]) => ({ id, label })), tab, (t) => { history.replaceState(null, "", `#/models/${mid}/${t}`); tab = t; draw(); }),
       d.saved ? null : h("span", { class: "tag amber" }, "built-in defaults: saved on the first change")));
@@ -1751,7 +2206,7 @@ async function modelEditor(main, mid, tab) {
     if (r) { await reload(); draw(); }
     return r;
   };
-  const saveBar = () => h("div", { class: "row", style: { marginTop: "16px" } },
+  const saveBar = () => d.access === "read" ? null : h("div", { class: "row", style: { marginTop: "16px" } },
     h("button", { class: "btn primary", onclick: () => save() }, "Save"),
     h("button", { class: "btn ghost", onclick: async () => { await reload(); draw(); } }, "Discard changes"),
     h("span", { class: "hint" }, "Saved changes apply to the next training set you build, and to generation at once."));
@@ -1777,11 +2232,11 @@ async function modelEditor(main, mid, tab) {
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
     drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files].filter((f) => /\.(png|zip)$/i.test(f.name))); });
     const imp = { root: "game", glob: "", prefix: "", group: "" };
-    const add = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Add sprites"),
+    const add = h("div", { class: "panel", hidden: d.access === "read" }, h("div", { class: "panel-head" }, h("h2", {}, "Add sprites"),
       m.imports.length ? h("button", { class: "btn", onclick: async () => {
         const r = await attempt(() => api(`/models/${mid}/import`, { body: {} }));
         if (r) { toast(r.imported.length ? `${r.imported.length} sprites imported` : "Nothing new to import"); await reload(); draw(); }
-      } }, "Import from the game folders") : null),
+      } }, "Import from the source folders") : null),
       fileIn, h("div", { class: "row", style: { marginBottom: "10px" } }, h("span", { class: "label" }, "New sprites go into the group"), intoSel,
         intoKind ? [h("span", { class: "label" }, "kind"), intoKind] : null), drop,
       h("label", { class: "check small", style: { marginTop: "8px" } }, h("input", { type: "checkbox", checked: uploadInto.folders, onchange: (e) => { uploadInto.folders = e.target.checked; } }),
@@ -1790,12 +2245,12 @@ async function modelEditor(main, mid, tab) {
         h("div", { class: "inline-fields", style: { marginTop: "10px" } },
           h("div", { class: "field" }, h("label", {}, "Source folder"), h("select", { onchange: (e) => { imp.root = e.target.value; } },
             Object.entries(S.catalog.sources || {}).map(([k, v]) => h("option", { value: k, selected: k === imp.root, title: v }, k)))),
-          h("div", { class: "field" }, h("label", {}, "Files"), h("input", { type: "text", placeholder: "ships/*_128.png", oninput: (e) => { imp.glob = e.target.value; } })),
+          h("div", { class: "field" }, h("label", {}, "Files"), h("input", { type: "text", placeholder: "units/*_128.png", oninput: (e) => { imp.glob = e.target.value; } })),
           h("div", { class: "field" }, h("label", {}, "Name prefix"), h("input", { type: "text", placeholder: "none", oninput: (e) => { imp.prefix = e.target.value; } })),
           h("div", { class: "field" }, h("label", {}, "Into group"), h("select", { onchange: (e) => { imp.group = e.target.value; } },
             h("option", { value: "" }, "By name"), m.groups.map((g) => h("option", { value: g.id }, g.label))))),
         h("button", { class: "btn sm", style: { marginTop: "10px" }, onclick: async () => {
-          if (!imp.glob) return toast("Give the files to import, e.g. ships/*_128.png", true);
+          if (!imp.glob) return toast("Give the files to import, e.g. units/*_128.png", true);
           const r = await attempt(() => api(`/models/${mid}/import`, { body: imp }));
           if (r) { toast(`${r.imported.length} sprites imported`); await reload(); draw(); }
         } }, "Import")));
@@ -1854,7 +2309,7 @@ async function modelEditor(main, mid, tab) {
           } }, "Find sprites lit from below"))),
       bar,
       one ? h("p", { class: "small mono muted", style: { margin: "8px 0" } }, one.caption || "Not learned (no group, its group is off, or left out).") : null,
-      ss.length ? gridEl : h("div", { class: "empty" }, "No sprites yet: drop some above", m.imports.length ? ", or import them from the game folders." : ".")));
+      ss.length ? gridEl : h("div", { class: "empty" }, "No sprites yet: drop some above", m.imports.length ? ", or import them from the source folders." : ".")));
   };
   const upload = async (files) => {
     if (!files.length) return;
@@ -1885,7 +2340,7 @@ async function modelEditor(main, mid, tab) {
       h("tbody", {}, m.groups.map((g, i) => h("tr", {},
         h("td", {}, h("input", { type: "checkbox", checked: g.enabled, title: "Learned, and offered by Generate", onchange: (e) => { g.enabled = e.target.checked; dirty = true; } })),
         h("td", {}, cell(g, "id", { mono: true, w: "110px" })), h("td", {}, cell(g, "label", { w: "120px" })),
-        h("td", {}, cell(g, "words", { w: "170px", ph: "red faction" })), h("td", {}, cell(g, "keywords", { w: "170px", ph: "optional" })),
+        h("td", {}, cell(g, "words", { w: "170px", ph: "red team" })), h("td", {}, cell(g, "keywords", { w: "170px", ph: "optional" })),
         h("td", {}, cell(g, "pattern", { mono: true, w: "150px", ph: "_red_" })), h("td", {}, cell(g, "name_pattern", { mono: true, w: "150px", ph: "^(.+)$" })),
         h("td", {}, cell(g, "name_format", { w: "80px", ph: "{}" })),
         h("td", {}, h("select", { title: "Put on everything generated for this group (Palettes page)", onchange: (e) => { g.palette = e.target.value; dirty = true; } },
@@ -1893,23 +2348,26 @@ async function modelEditor(main, mid, tab) {
           g.palette && !(S.palettes || []).some((p) => p.id === g.palette) ? h("option", { value: g.palette, selected: true }, g.palette + " (missing)") : null)),
         h("td", { class: "muted small" }, String(counts[g.id] || 0)),
         h("td", {}, iconBtn("x", "Remove this group", () => { m.groups.splice(i, 1); dirty = true; drawGroups(); }))))));
-    const kt = h("table", {}, h("thead", {}, h("tr", {}, ["Id", "Label", "Words in every caption", "Keywords", "Words to avoid", "Final size (px)", "Fill (%)", "File name pattern", "Remaster distance", ""].map((t) => h("th", {}, t)))),
+    const kt = h("table", {}, h("thead", {}, h("tr", {}, ["Id", "Label", "Words in every caption", "Keywords", "Words to avoid", "Final size (px)", "Fill (%)", "Tile", "Keep edge (px)", "File name pattern", "Remaster distance", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, m.kinds.map((k, i) => h("tr", {},
         h("td", {}, cell(k, "id", { mono: true, w: "110px" })), h("td", {}, cell(k, "label", { w: "120px" })),
         h("td", {}, cell(k, "words", { w: "170px", ph: "small fighter" })), h("td", {}, cell(k, "keywords", { w: "170px", ph: "optional" })),
         h("td", {}, cell(k, "negative", { w: "150px", ph: "optional" })), h("td", {}, cell(k, "size", { type: "number", w: "70px" })),
         h("td", { title: "New sprites: how much of the canvas the longest side takes, 50 to 100 (0: the model's setting)" }, cell(k, "fill", { type: "number", w: "70px", ph: "0" })),
+        h("td", {}, h("input", { type: "checkbox", checked: !!k.tile, title: "Opaque tiles (floors, walls) in full colour: no background removal, no colour limit, no outline", onchange: (e) => { k.tile = e.target.checked; dirty = true; } })),
+        h("td", { title: "Tiles: a remaster keeps the original's outer pixels, so tiles that join still join (0: none, up to 64)" }, cell(k, "edge", { type: "number", w: "70px", ph: "0" })),
         h("td", {}, cell(k, "pattern", { mono: true, w: "150px", ph: "^small_" })), h("td", {}, cell(k, "denoise", { type: "number", w: "80px" })),
         h("td", {}, iconBtn("x", "Remove this kind", () => { m.kinds.splice(i, 1); dirty = true; drawGroups(); }))))));
     body.append(
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Groups"),
         h("button", { class: "btn sm", onclick: () => { m.groups.push({ id: "group" + (m.groups.length + 1), label: "New group", words: "", keywords: "", pattern: "", name_pattern: "", name_format: "{}", enabled: true }); dirty = true; drawGroups(); } }, "Add a group")),
-        h("p", { class: "small muted" }, "The main axis: a faction, a family of items. Its words and keywords go into every caption of its sprites, and into the prompt when you generate for it. A sprite joins the first group whose pattern (a regular expression on the file name) matches, unless you set it by hand in Sprites. \"Own words from\": a pattern whose first (bracket) part becomes the sprite's own words, e.g. the item's name."),
+        h("p", { class: "small muted" }, "The main axis: a team, a family of items. Its words and keywords go into every caption of its sprites, and into the prompt when you generate for it. A sprite joins the first group whose pattern (a regular expression on the file name) matches, unless you set it by hand in Sprites. \"Own words from\": a pattern whose first (bracket) part becomes the sprite's own words, e.g. the item's name."),
         h("div", { class: "table-wrap" }, gt)),
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Kinds"),
         h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: "", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
         h("p", { class: "small muted" }, "Optional second axis: a size class. Its words go into the captions too; its size sets the pixel grid of training and the size of what is generated. A model without kinds uses each sprite's own size."),
-        m.kinds.length ? h("div", { class: "table-wrap" }, kt) : h("p", { class: "muted" }, "No kinds.")),
+        m.kinds.length ? h("div", { class: "table-wrap" }, kt) : h("p", { class: "muted" }, "No kinds."),
+        m.kinds.some((k) => !k.tile && Number(k.size) > 200) ? h("div", { class: "hint", style: { marginTop: "8px" } }, "A sprite rarely needs more than about 200 px. Smaller sprites keep the pixel-art look, are quicker to train and are easier for the model to get right.") : null),
       saveBar());
   };
 
@@ -1922,7 +2380,33 @@ async function modelEditor(main, mid, tab) {
     const sync = () => { m.previews = rows.map((r) => r.text.trim() + (r.avoid.trim() ? " --n " + r.avoid.trim() : "")).filter((l) => l.trim()); dirty = true; };
     const list = h("div", {});
     const startsRight = (t) => t.trim().split(/[\s,]+/)[0] === m.trigger;
+    // The prompt with the trigger word first: a first word that looks like a stale or mistyped trigger
+    // (one word, repeated or close to the trigger) is replaced; anything else gets the trigger put in front.
+    const fixedStart = (t) => {
+      const parts = t.trim().split(",").map((x) => x.trim()).filter(Boolean);
+      const first = parts[0] || "";
+      const stale = /^[a-z0-9_]+$/i.test(first) && parts.length > 1 &&
+        (parts[1].toLowerCase().startsWith(first.toLowerCase()) || m.trigger.startsWith(first) || first.startsWith(m.trigger.slice(0, 2)));
+      return [m.trigger, ...(stale ? parts.slice(1) : parts)].join(", ");
+    };
+    const wrong = () => rows.filter((r) => r.text.trim() && !startsRight(r.text));
+    const fixBar = h("div", {});
+    const drawFixBar = () => {
+      fixBar.innerHTML = "";
+      const bad = wrong();
+      if (!bad.length) return;
+      fixBar.append(h("div", { class: "note warn", style: { display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "10px" } },
+        h("span", {}, `${bad.length} prompt${bad.length === 1 ? " does" : "s do"} not start with the trigger word ${m.trigger}.`),
+        h("button", { class: "btn sm primary", onclick: async () => {
+          const cut = (s) => (s.length > 70 ? s.slice(0, 70) + "…" : s);
+          const lines = bad.map((r) => `${cut(r.text.trim())}\n  →  ${cut(fixedStart(r.text))}`).join("\n\n");
+          if (!(await askConfirm(`These starts will change (the rest of each prompt is kept):\n\n${lines}`, { ok: `Fix ${bad.length}`, title: "Put the trigger word first" }))) return;
+          bad.forEach((r) => { r.text = fixedStart(r.text); });
+          sync(); drawRows(); toast(`${bad.length} prompt${bad.length === 1 ? "" : "s"} fixed. Save to keep them.`);
+        } }, `Auto-fix ${bad.length}`)));
+    };
     const drawRows = () => {
+      drawFixBar();
       list.innerHTML = "";
       if (!rows.length) list.append(h("p", { class: "muted" }, "No prompt of your own: training uses the automatic ones (see below)."));
       rows.forEach((r, i) => {
@@ -1932,7 +2416,7 @@ async function modelEditor(main, mid, tab) {
           if (!r.text.trim()) return;
           if (startsRight(r.text)) check.append(h("span", { class: "tag ok" }, "starts with " + m.trigger));
           else check.append(h("span", { class: "tag amber", title: "The captions the LoRA learned start with its trigger word" }, "should start with " + m.trigger), " ",
-            h("button", { class: "btn sm", onclick: () => { r.text = m.trigger + ", " + r.text.trim().replace(/^[^,]*,\s*/, ""); sync(); drawRows(); } }, "Fix"));
+            h("button", { class: "btn sm", onclick: () => { r.text = fixedStart(r.text); sync(); drawRows(); } }, "Fix"));
         };
         const ta = h("textarea", { rows: 3, class: "mono", oninput: (e) => { r.text = e.target.value; sync(); paint(); } }, r.text);
         const avoid = h("input", { type: "text", value: r.avoid, placeholder: "e.g. organic, creature, animal",
@@ -1964,7 +2448,7 @@ async function modelEditor(main, mid, tab) {
       h("h2", {}, "Preview prompts"),
       h("p", { class: "small muted", style: { maxWidth: "80ch" } }, "Test prompts for training: each is one row of the checkpoint grid on the Train page, drawn at every saved epoch with the same seed, so the columns can be compared. Write new designs the training set does not contain, to see the style rather than copies."),
       h("p", { class: "small muted", style: { maxWidth: "80ch" } }, "Write them like the training captions: the trigger word " + m.trigger + " first, then the group's and kind's words, then what it looks like. A good set has one prompt per kind. Previews rendered afterwards use the first 2."),
-      list,
+      fixBar, list,
       h("div", { class: "row", style: { gap: "8px", marginTop: "4px" } },
         h("button", { class: "btn", onclick: () => { rows.push({ text: m.trigger + ", ", avoid: "" }); sync(); drawRows(); } }, "Add an empty prompt")),
       h("div", { style: { marginTop: "14px" } }, h("div", { class: "label" }, "Or build one from a group and a kind"), adder),
@@ -1985,14 +2469,14 @@ async function modelEditor(main, mid, tab) {
     body.append(h("div", { class: "grid-2" },
       h("div", { class: "panel" }, h("h2", {}, "Model"),
         field("Name", "label"),
-        h("div", { class: "field" }, h("label", {}, "Project (game)"),
+        h("div", { class: "field" }, h("label", {}, "Project"),
           projectSelect(m.project || "", (v) => { m.project = v; dirty = true; }),
           h("div", { class: "hint" }, "Projects are managed at the bottom of the Models page (new, rename, delete).")),
         field("Trigger word", "trigger", "The LoRA's word, first in every caption and prompt; also its file name (" + m.trigger + ".safetensors). Changing it means training again.", { mono: true }),
         field("Words at the end of every caption", "tail", "e.g. top-down view, facing up"),
         h("div", { class: "inline-fields", style: { marginTop: "14px" } },
           h("div", { class: "field" }, h("label", {}, "Colour words"), h("select", { onchange: (e) => { m.colour_words = e.target.value; dirty = true; } },
-            h("option", { value: "hard", selected: m.colour_words !== "neutral" }, "Hard surface (metal hull, plating)"), h("option", { value: "neutral", selected: m.colour_words === "neutral" }, "Neutral (body, highlights)"))),
+            h("option", { value: "hard", selected: m.colour_words !== "neutral" }, "Hard surface (metal, plating)"), h("option", { value: "neutral", selected: m.colour_words === "neutral" }, "Neutral (body, highlights)"))),
           h("div", { class: "field" }, h("label", {}, "Remaster colours from"), h("select", { onchange: (e) => { m.colours_from = e.target.value; dirty = true; } },
             h("option", { value: "group", selected: m.colours_from === "group" }, "The group (one look per group)"), h("option", { value: "self", selected: m.colours_from === "self" }, "The sprite itself")))),
         h("div", { class: "inline-fields", style: { marginTop: "14px" } },
@@ -2004,17 +2488,17 @@ async function modelEditor(main, mid, tab) {
         saveBar()),
       h("div", { class: "stack" },
         h("div", { class: "panel" }, h("h2", {}, "Import rules"),
-          h("p", { class: "small muted" }, "What \"Import from the game folders\" copies: root (game or input), glob, optional prefix, group and skip (a pattern)."), impTa),
+          h("p", { class: "small muted" }, "What \"Import from the source folders\" copies: root (game or input), glob, optional prefix, group and skip (a pattern)."), impTa),
         d.template ? h("div", { class: "panel" }, h("h2", {}, "Template settings"),
           h("p", { class: "small muted" }, "Puts the groups, kinds, words, previews and other settings back to the ones of the template this model comes from. The sprites and what you set on them by hand stay."),
           h("button", { class: "btn", onclick: async () => {
             if (!(await askConfirm("Replace this model's groups, kinds, words and settings with the template's ones? Its sprites stay.", { title: "Use the template's settings", ok: "Replace" }))) return;
             if (await attempt(() => api(`/models/${mid}/reset`, { body: {} }), "Built-in settings restored")) { await reload(); draw(); }
           } }, "Use the template's settings")) : null,
-        h("div", { class: "panel" }, h("h2", {}, "Share"),
+        h("div", { class: "panel" }, h("h2", {}, "Export"),
           h("p", { class: "small muted" }, "A file with this model's groups, kinds, words and settings (no sprites), to import on another machine or as a template for another game (Models → Import a model file)."),
           h("a", { class: "btn", href: `/api/models/${mid}/export`, download: `${mid}.json` }, "Export the model")),
-        h("div", { class: "panel" }, h("h2", {}, "Folder"), h("p", { class: "small mono muted" }, d.dir),
+        h("div", { class: "panel", hidden: d.access === "read" }, h("h2", {}, "Folder"), d.dir ? h("p", { class: "small mono muted" }, d.dir) : null,
           h("button", { class: "btn danger", onclick: async () => {
             if (!(await askConfirm(`Delete the model ${m.label}? Its folder (sprites, training sets, checkpoints) is moved to .deleted, not erased.`, { danger: true, ok: "Delete", title: "Delete the model" }))) return;
             const r = await attempt(() => api("/models/" + mid, { method: "DELETE" }), "Model deleted");
@@ -2039,7 +2523,7 @@ async function modelEditor(main, mid, tab) {
 routes.palettes = async (main, parts) => {
   await loadCatalog();
   await loadPalettes();
-  main.append(head("Palettes", "Colours, and a tuning, put on what is generated: lighten a faction that comes out too dark, keep a game's colours, reuse another game's. Set a group's palette in Models (Groups) or below, or pick one for a single run on Generate and Batch.",
+  main.append(head("Palettes", "Colours, and a tuning, put on what is generated: lighten a group that comes out too dark, keep a project's colours, reuse another project's. Set a group's palette in Models (Groups) or below, or pick one for a single run on Generate and Batch.",
     h("button", { class: "btn", onclick: () => importInput.click() }, "Import a file"),
     h("button", { class: "btn primary", onclick: () => newFromGroup() }, "New palette")));
   const importInput = h("input", { type: "file", accept: ".hex,.gpl,.json,.txt,.png,.gif,.bmp", hidden: true });
@@ -2074,7 +2558,8 @@ routes.palettes = async (main, parts) => {
     h("div", { style: { minWidth: 0, flex: 1 } }, h("div", { class: "t" }, p.label),
       swatchStrip(p.colours, p.tune),
       h("div", { class: "s" }, `${p.colours.length} colours, ${({ tune: "tuning only", snap: "snap", match: "match light, snap" })[p.mode]}`,
-        p.used_by.length ? `, used by ${p.used_by.length} group${p.used_by.length === 1 ? "" : "s"}` : ""))))),
+        p.used_by.length ? `, used by ${p.used_by.length} group${p.used_by.length === 1 ? "" : "s"}` : ""),
+      ownerBadge(p))))),
     h("button", { class: "btn sm ghost", style: { marginTop: "10px" }, onclick: () => newEmpty() }, "Start an empty one"));
   };
 
@@ -2118,7 +2603,7 @@ routes.palettes = async (main, parts) => {
         h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { gid = e.target.value; } },
           how === "auto" ? null : h("option", { value: "" }, "Every group"), mm.groups.map((g) => h("option", { value: g.id, selected: g.id === gid }, g.label)))),
         how === "model" && mm.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { kid = e.target.value; } }, h("option", { value: "" }, "Every kind"), mm.kinds.map((k) => h("option", { value: k.id, selected: k.id === kid }, k.label)))) : null,
-        how !== "auto" ? h("div", { class: "field" }, h("label", {}, "Colours at most"), h("input", { type: "number", min: 2, max: 64, value: n, oninput: (e) => { n = e.target.value; } })) : null));
+        how !== "auto" ? h("div", { class: "field" }, h("label", {}, "Colours at most"), h("input", { type: "number", min: 2, max: 256, value: n, oninput: (e) => { n = e.target.value; } })) : null));
       if (how === "auto") {
         // what the group is compared with: the other groups of a model that has several
         const several = ms.filter((x) => x.groups.length > 1);
@@ -2126,7 +2611,7 @@ routes.palettes = async (main, parts) => {
         form.append(h("div", { class: "field", style: { marginTop: "12px" } }, h("label", {}, "Make it look like"),
           h("select", { onchange: (e) => { refMid = e.target.value; } }, ms.map((x) => h("option", { value: x.id, selected: x.id === refMid },
             x.groups.length > 1 ? `${x.label}: every group but this one` : `${x.label}: every sprite`))),
-          h("div", { class: "hint" }, "A one-group model (a single faction) has no other group: compare it with the model holding every faction.")));
+          h("div", { class: "hint" }, "A one-group model (a single group) has no other group: compare it with the model holding every group.")));
       }
       if (how === "auto") form.append(h("label", { class: "check small", style: { marginTop: "12px" } },
         h("input", { type: "checkbox", checked: useIt, onchange: (e) => { useIt = e.target.checked; } }), "Make it the group's palette (everything generated for the group gets it)"));
@@ -2183,6 +2668,8 @@ routes.palettes = async (main, parts) => {
     const sw = h("div", {});
     const drawSwatches = () => {
       sw.innerHTML = "";
+      const count = $("#pal-count");
+      if (count) count.textContent = `Colours (${edit.colours.length})`;
       const tuned = tuneColours(edit.colours, edit.tune);
       sw.append(h("div", { class: "swatch-edit" }, edit.colours.map((c, i) => {
         const pick = h("input", { type: "color", value: c, oninput: (e) => { edit.colours[i] = e.target.value; changed(); } });
@@ -2193,6 +2680,18 @@ routes.palettes = async (main, parts) => {
       }), h("label", { class: "swatch add", title: "Add a colour" }, "+", h("input", { type: "color", value: "#808080", onchange: (e) => {
         edit.colours.push(e.target.value); if (edit.weights.length) edit.weights.push(1); changed();
       } }))));
+      const twins = nearDuplicates(edit.colours);
+      if (twins.length) {
+        sw.append(h("div", { class: "note warn", style: { margin: "8px 0" } },
+          `${twins.length} colour${twins.length === 1 ? " is" : "s are"} almost the same as another one: near-twins make a sprite look blurry and waste the palette. `,
+          h("button", { class: "btn sm", style: { marginLeft: "8px" }, onclick: () => {
+            const drop = new Set(twins.map((t) => t.drop));
+            const keep = edit.colours.map((_, i) => i).filter((i) => !drop.has(i));
+            if (edit.weights.length) { for (const t of twins) edit.weights[t.keep] = (edit.weights[t.keep] || 0) + (edit.weights[t.drop] || 0); edit.weights = keep.map((i) => edit.weights[i]); }
+            edit.colours = keep.map((i) => edit.colours[i]);
+            changed();
+          } }, "Merge them")));
+      }
       if (edit.colours.length) sw.append(h("p", { class: "small muted" }, "Top: the colour, click to change it. Bottom strip: after the tuning. Sorted by how they were made; " + (edit.weights.length ? "hover shows how much of the art each covered." : "")));
     };
 
@@ -2294,7 +2793,7 @@ routes.palettes = async (main, parts) => {
       const colSel = h("select", {},
         h("optgroup", { label: "Whole models" }, ms.map((m) => opt({ model: m.id }, `${m.label}: every sprite`))),
         groupOpts((m, g) => `${g.label}: its sprites`, true), batchOpts(true));
-      const nIn = h("input", { type: "number", min: 2, max: 64, value: 32, style: { width: "70px" } });
+      const nIn = h("input", { type: "number", min: 2, max: 256, value: 32, style: { width: "70px" } });
       const colBtn = h("button", { class: "btn sm", onclick: async () => {
         colBtn.disabled = true;
         const r = await attempt(() => api("/palettes/colours", { body: { sprites: JSON.parse(colSel.value), n: Number(nIn.value) } }));
@@ -2333,8 +2832,14 @@ routes.palettes = async (main, parts) => {
         h("div", { class: "panel-head" }, h("div", {},
           h("input", { type: "text", value: edit.label, style: { fontSize: "18px", fontWeight: 600, minWidth: "260px" }, oninput: (e) => { edit.label = e.target.value; dirty = true; saveBtn.disabled = false; } }),
           h("div", { class: "small muted", style: { marginTop: "4px" } }, h("span", { class: "mono" }, edit.id), edit.source ? " · " + edit.source : "")),
-        h("div", { class: "row" }, saveBtn,
-          h("button", { class: "btn ghost danger", onclick: async () => {
+        h("div", { class: "row" }, ownerBadge(p), shareButton("palette", p.id, p, p.label, async () => { await loadPalettes(); drawList(); drawEditor(); }),
+          p.access === "read" ? h("button", { class: "btn", title: "It is shared with you to use. Make a copy of your own to change it.", onclick: async () => {
+            let id = (p.id + "_" + ME.username).replace(/[^a-z0-9_]/g, "_").slice(0, 60), k = 2;
+            while (S.palettes.some((x) => x.id === id)) id = `${p.id}_${ME.username}_${k++}`.replace(/[^a-z0-9_]/g, "_").slice(0, 60);
+            const r = await attempt(() => api("/palettes/" + id, { method: "PUT", body: Object.assign({}, edit, { id }) }), "Copy made");
+            if (r) { current = id; dirty = false; await loadPalettes(); drawList(); drawEditor(); }
+          } }, "Make my own copy") : saveBtn,
+          p.access === "read" ? null : h("button", { class: "btn ghost danger", onclick: async () => {
             if (!(await askConfirm(`Delete the palette ${p.label}?` + (p.used_by.length ? ` The groups using it (${p.used_by.join(", ")}) go back to no palette.` : ""), { danger: true, ok: "Delete", title: "Delete the palette" }))) return;
             if (await attempt(() => api("/palettes/" + p.id, { method: "DELETE" }), "Palette deleted")) { current = ""; dirty = false; await loadPalettes(); await loadCatalog(); current = (S.palettes[0] || {}).id || ""; drawList(); drawEditor(); }
           } }, "Delete"))),
@@ -2347,7 +2852,7 @@ routes.palettes = async (main, parts) => {
           slider("hue", "Hue", -180, 180, "degrees"),
           slider("light", "Light from the top", -100, 100, "for sprites lit from below")),
         autoRow,
-        h("div", { class: "label", style: { marginTop: "14px" } }, `Colours (${edit.colours.length})`), sw, colRow,
+        h("div", { class: "label", id: "pal-count", style: { marginTop: "14px" } }, `Colours (${edit.colours.length})`), sw, colRow,
         h("label", { class: "check small", style: { marginTop: "10px" } }, h("input", { type: "checkbox", checked: edit.words, onchange: (e) => { edit.words = e.target.checked; dirty = true; saveBtn.disabled = false; } }),
           "Also name these colours in the prompt (instead of the colours read from the group's sprites)"),
         h("div", { class: "row", style: { marginTop: "14px" } }, h("span", { class: "label" }, "Export"),
@@ -2369,29 +2874,40 @@ routes.palettes = async (main, parts) => {
 routes.jobs = async (main, parts) => {
   if (parts[0]) return jobDetail(main, parts[0]);
   main.append(head("Jobs", "Everything the app ran. GPU jobs run one at a time, in order; training sets are built at once.",
-    h("button", { class: "btn ghost", onclick: async () => { if (await attempt(() => api("/jobs", { method: "DELETE" }), "Finished jobs cleared")) route(); } }, "Clear finished")));
+    h("div", { class: "row", style: { gap: "8px" } },
+      h("button", { class: "btn ghost", title: "Removes the jobs that succeeded; failed and cancelled ones stay so you can read why", onclick: async () => { if (await attempt(() => api("/jobs?only=done", { method: "DELETE" }), "Successful jobs cleared")) route(); } }, "Clear successful"),
+      h("button", { class: "btn ghost danger", title: "Removes every job that is not running or waiting, failed ones too", onclick: async () => {
+        if (await askConfirm("Remove every finished job, the failed and cancelled ones too, with their logs?", { danger: true, ok: "Clear all", title: "Clear finished jobs" })) { if (await attempt(() => api("/jobs", { method: "DELETE" }), "Finished jobs cleared")) route(); }
+      } }, "Clear all finished"))));
   const box = h("div", { class: "panel" });
   main.append(box);
-  let timer;
-  onLeave(() => clearTimeout(timer));
-  const draw = async () => {
-    const jobs = await api("/jobs");
+  const paging = Object.assign({ page: 0, size: 25 }, store.get("jobs_paging", {}));
+  const draw = (jobs) => {
     box.innerHTML = "";
     if (!jobs.length) { box.append(h("div", { class: "empty" }, "No jobs yet.")); return; }
+    const pg = pageOf(jobs, paging);
     box.append(h("table", {}, h("thead", {}, h("tr", {}, ["Job", "Status", "Progress", "Started", "Took", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, jobs.map((j) => h("tr", { class: "clickable", onclick: () => { location.hash = "#/jobs/" + j.id; } },
-        h("td", {}, j.title, h("div", { class: "faint small" }, j.kind)),
+      h("tbody", {}, pg.rows.map((j) => h("tr", { class: j.foreign ? "" : "clickable", onclick: () => { if (!j.foreign) location.hash = "#/jobs/" + j.id; } },
+        h("td", {}, j.foreign ? h("span", { class: "muted" }, j.title) : j.title, h("div", { class: "faint small" }, j.kind, j.owner && (isAdmin() || j.foreign) ? " · " + j.owner : "")),
         h("td", {}, statusLabel(j)),
         h("td", { style: { width: "220px" } }, j.status === "running" ? [progressBar(j), h("div", { class: "small muted" }, (j.progress && j.progress.text) || "")] : null),
         h("td", { class: "small muted nowrap" }, fmtTime(j.started || j.created)),
         h("td", { class: "small muted nowrap" }, j.started ? fmtDur((j.ended || Date.now() / 1000) - j.started) : ""),
-        h("td", { class: "nowrap" }, ["running", "queued"].includes(j.status)
-          ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(draw); } }, "Cancel")
+        h("td", { class: "nowrap" }, j.foreign ? null : ["running", "queued"].includes(j.status)
+          ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(() => loop.poll({ force: true })); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
-            ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(draw); } }, "Run again") : null))))));
-    if (jobs.some((j) => ["running", "queued"].includes(j.status))) timer = setTimeout(draw, 3000);
+            ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/retry`, { body: {} }), "Queued again").then(() => loop.poll({ force: true })); } }, "Run again") : null))))));
+    const pgr = pager(jobs.length, paging, () => { store.set("jobs_paging", { size: paging.size }); loop.poll({ force: true }); });
+    if (pgr) box.append(pgr);
   };
-  draw();
+  const busy = (jobs) => jobs.some((j) => ["running", "queued"].includes(j.status));
+  const loop = autoRefresh({
+    fetch: () => api("/jobs"),
+    // the page shown: its rows' status and progress (the elapsed time of a running job moves with it)
+    signature: (jobs) => JSON.stringify([jobs.length, paging.page, paging.size, pageOf(jobs, paging).rows.map((j) => [j.id, j.status, j.position, j.progress && j.progress.text, j.progress && j.progress.fraction, j.ended])]),
+    rebuild: draw,
+    every: (jobs) => (busy(jobs) ? 3000 : 15000),  // idle: a slow look, for jobs started from elsewhere
+  });
 };
 
 async function jobDetail(main, id) {
@@ -2420,16 +2936,16 @@ async function jobDetail(main, id) {
   main.append(h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Log"), h("span", { class: "faint small mono" }, j.log)),
     h("p", { class: "small muted mono" }, j.cmd.join(" ")),
     j.out ? h("p", { class: "small" }, "Output: ", h("a", { href: "#/results?path=" + encodeURIComponent(j.out) }, j.out)) : null, logBox));
-  let timer;
-  onLeave(() => clearTimeout(timer));
-  const pull = async () => {
-    const atEnd = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
-    logBox.textContent = await api(`/jobs/${id}/log`).catch(() => "");
-    if (atEnd) logBox.scrollTop = logBox.scrollHeight;
-    const cur = await api("/jobs/" + id).catch(() => null);
-    if (cur && ["running", "queued"].includes(cur.status)) timer = setTimeout(pull, 2500);
-  };
-  pull();
+  autoRefresh({
+    fetch: async () => ({ status: (await api("/jobs/" + id)).status, log: await api(`/jobs/${id}/log`).catch(() => "") }),
+    signature: ({ status, log }) => status + "|" + log.length,
+    rebuild: ({ log }) => {
+      const atEnd = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 30;
+      logBox.textContent = log;
+      if (atEnd) logBox.scrollTop = logBox.scrollHeight;
+    },
+    every: ({ status }) => (["running", "queued"].includes(status) ? 2500 : null),
+  });
 }
 
 // ---------------------------------------------------------------- Settings
@@ -2440,7 +2956,7 @@ routes.settings = async (main) => {
   main.append(head("Settings", "Where the sprites, results and models are. Empty a field to go back to its default."));
   const labels = {
     px_input: ["Source folder \"input\"", "a folder of sprites that models import from (import rules, Import from a folder)"],
-    px_game: ["Source folder \"game\"", "a second source, e.g. a copy of a game's whole sprite folder"],
+    px_game: ["Source folder \"game\"", "a second source, e.g. a copy of a whole sprite folder"],
     sources: ["More source folders", "one per line, name=path, e.g. tiles=/srv/sprites/other_game/tiles"],
     px_output: ["Results", "where every run writes its sprites"],
     comfy_url: ["ComfyUI address", "the API the generator talks to"],
@@ -2469,12 +2985,47 @@ routes.settings = async (main) => {
         h("tr", {}, h("td", {}, "ComfyUI control"), h("td", { class: d.can_control_comfy ? "ok-text" : "err-text" }, d.can_control_comfy ? "the app can stop and start it" : "not allowed: add the sudo rule from run.sh")),
         Object.entries(d.checks).map(([k, v]) => h("tr", {}, h("td", {}, labels[k][0]), h("td", { class: v === "ok" ? "ok-text" : "err-text" }, v === "ok" ? "found" : v)))))),
     h("div", { class: "panel" }, h("h2", {}, "Picked sprites"),
-      h("p", { class: "muted small" }, "Export picks (Results) copies every starred variant to the results folder's picked/, named after the sprite it replaces, ready to copy into the game."),
+      h("p", { class: "muted small" }, "Export picks (Results) copies every starred variant to the results folder's picked/, named after the sprite it replaces, ready to copy back into your project."),
       h("button", { class: "btn", onclick: exportPicks }, "Export picks")))));
 };
 
 // ---------------------------------------------------------------- start
 
+routes.users = (main) => usersPage(main);
+
+routes.updates = async (main) => {
+  if (!isAdmin()) { main.append(h("div", { class: "note bad" }, "Only an administrator updates ComfyUI and kohya sd-scripts.")); return; }
+  const box = h("div", { class: "stack" });
+  const note = h("p", { class: "muted small" });
+  main.append(head("Updates", "ComfyUI and kohya sd-scripts, compared with their upstream repositories. Checking only reads (a git fetch); updating pulls the new code and its Python packages, never touches your models, LoRAs or results."),
+    h("div", { class: "row", style: { marginBottom: "12px" } }, h("button", { class: "btn", type: "button", id: "recheck" }, "Check again"), note), box);
+  const targets = { "ComfyUI": "comfyui", "kohya sd-scripts": "sd-scripts" };
+  let data = null, checking = false;
+  const draw = () => {
+    note.textContent = checking ? "Checking…" : data ? "Checked " + fmtTime(data.checked) : "";
+    box.replaceChildren(...(data ? data.items.map((it) => h("div", { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, it.name),
+        it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.behind} newer commit${it.behind === 1 ? "" : "s"}`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
+      it.ok ? [
+        h("p", { class: "small" }, `Installed ${it.current} on ${it.branch}`, it.behind ? `, latest ${it.latest}` : "", h("span", { class: "muted mono" }, "  " + it.path)),
+        it.behind ? h("ul", { class: "small mono", style: { margin: "6px 0 10px 18px", padding: 0 } }, it.commits.map((c) => h("li", {}, c))) : null,
+        it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, git pull, git stash pop), or the update refuses.") : null,
+        it.behind ? h("button", { class: "btn primary", type: "button", disabled: it.dirty, onclick: async () => {
+          const extra = it.name === "ComfyUI" ? " ComfyUI restarts at the end." : " No training should be running.";
+          if (!(await askConfirm(`Update ${it.name} from ${it.current} to ${it.latest}?${extra} It runs as a job: you can follow it in Jobs.`, { ok: "Update", title: "Update " + it.name }))) return;
+          const job = await attempt(() => api("/updates/apply", { body: { target: targets[it.name] } }), "Update started");
+          if (job) location.hash = "#/jobs/" + job.id;
+        } }, "Update now") : null,
+      ] : h("p", { class: "muted small" }, it.error || "unknown error"))) : []));
+  };
+  const check = async (force) => {
+    checking = true; draw();
+    try { data = await api("/updates" + (force ? "?force=1" : "")); } catch (e) { toast(String(e.message || e), true); }
+    checking = false; draw();
+  };
+  $("#recheck").addEventListener("click", () => check(true));
+  await check(true);
+};
+
 setTray(S.tray);
-pollStatus();
-route();
+loadMe().catch(() => {}).finally(() => { statusLoop.poll(); route(); });

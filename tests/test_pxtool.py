@@ -121,8 +121,8 @@ def test_flatten_background_makes_the_green_uniform(tmp_path):
 
     src = render(tmp_path / "render.png")
     a = np.array(Image.open(src))
-    hull = a[..., 1] != 255
-    a[hull] = np.stack([a[hull][:, 0]] * 3, axis=-1)  # grey hull: no glow, so the outline shows
+    body = a[..., 1] != 255
+    a[body] = np.stack([a[body][:, 0]] * 3, axis=-1)  # grey body: no glow, so the outline shows
     Image.fromarray(a).save(src)
 
     def make(name, **kw):
@@ -135,8 +135,59 @@ def test_flatten_background_makes_the_green_uniform(tmp_path):
 
     assert ncolours(make("few.png", colours=3)) <= 3
     assert ncolours(make("many.png", colours=64)) >= ncolours(make("few2.png", colours=3))
-    # without the outline the edge keeps the hull's own colours: not all of it is the darkest colour
+    # without the outline the edge keeps the body's own colours: not all of it is the darkest colour
     plain, outlined = make("plain.png", outline=False), make("outlined.png", outline=True)
     assert not np.array_equal(plain, outlined)
     # a lower edge threshold draws a fuller silhouette than a higher one
     assert (make("lo.png", edge=0.2)[..., 3] > 0).sum() >= (make("hi.png", edge=0.8)[..., 3] > 0).sum()
+
+
+def test_tile_post_keeps_full_colour_and_the_originals_edge(tmp_path):
+    size, canvas = 32, 128  # 4 render px per tile px
+    gradient = np.dstack(
+        [np.tile(np.arange(size, dtype=np.uint8) * 8, (size, 1))] * 3 + [np.full((size, size), 255, np.uint8)]
+    )
+    gradient[0:3, 5:9, 3] = 0  # a gap in the original
+    orig = tmp_path / "orig.png"
+    Image.fromarray(gradient, "RGBA").save(orig)
+    render = Image.new("RGB", (canvas, canvas), (10, 200, 10))  # the render is flat green: nothing of the original
+    render.save(tmp_path / "raw.png")
+    grid = tmp_path / "grid.json"
+    grid.write_text('{"k": 4, "w": 32, "h": 32, "ox": 0, "oy": 0, "canvas": 128}')
+    out = tmp_path / "tile.png"
+    pxtool.tile_post(str(tmp_path / "raw.png"), str(out), size, orig=str(orig), grid=str(grid), keep_edge=4)
+    a = np.array(Image.open(out))
+    assert a.shape == (32, 32, 4)
+    assert (a[16, 0, :3] == gradient[16, 0, :3]).all() and (a[0, 16, :3] == gradient[0, 16, :3]).all()  # edge: original
+    assert (a[16, 31, :3] == gradient[16, 31, :3]).all() and (a[31, 16, :3] == gradient[31, 16, :3]).all()
+    assert tuple(a[16, 16, :3]) == (10, 200, 10)  # inside: the render, in its own colour (no 64-colour snap)
+    blend = a[16, 6:11, :3].astype(int)  # the band after the kept edge fades into the render
+    assert (np.abs(np.diff(blend[:, 0])) > 0).any() and tuple(blend[-1]) == (10, 200, 10)
+    assert a[1, 6, 3] == 0 and a[16, 16, 3] == 255  # the original's alpha is kept
+    # without keep_edge nothing of the original shows
+    pxtool.tile_post(str(tmp_path / "raw.png"), str(out), size, orig=str(orig), grid=str(grid))
+    assert tuple(np.array(Image.open(out))[16, 0, :3]) == (10, 200, 10)
+
+
+def test_selective_outline_uses_a_darker_shade_of_the_sprites_own_colour():
+    red, dark_red, black = (140, 90, 90), (80, 50, 50), (5, 5, 5)
+    canvas = np.zeros((12, 12, 4), np.uint8)
+    canvas[3:9, 3:9] = (*red, 255)
+    pal = np.array([red, dark_red, black])
+    dark = pxtool._tidy(canvas, pal, True, "dark")
+    selective = pxtool._tidy(canvas, pal, True, "selective")
+    assert tuple(dark[3, 3, :3]) == black  # the darkest colour of the palette
+    assert tuple(selective[3, 3, :3]) == dark_red  # a darker red, not black
+    assert tuple(selective[5, 5, :3]) == red  # the inside is untouched
+
+
+def test_the_colour_limit_goes_up_to_256(tmp_path):
+    assert pxtool.MAX_COLOURS == 256
+    rng = np.random.default_rng(1)
+    a = np.zeros((40, 40, 4), np.uint8)
+    a[..., :3] = rng.integers(0, 256, (40, 40, 3))
+    a[..., 3] = 255
+    path = tmp_path / "noise.png"
+    Image.fromarray(a).save(path)
+    assert len(pxtool.extract_palette([str(path)], 256)["colours"]) > 64
+    assert len(pxtool.extract_palette([str(path)], 64)["colours"]) <= 64
