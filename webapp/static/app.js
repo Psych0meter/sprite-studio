@@ -2375,11 +2375,11 @@ async function modelEditor(main, mid, tab) {
         h("td", {}, iconBtn("x", "Remove this kind", () => { m.kinds.splice(i, 1); dirty = true; drawGroups(); }))))));
     body.append(
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Groups"),
-        h("button", { class: "btn sm", onclick: () => { m.groups.push({ id: "group" + (m.groups.length + 1), label: "New group", words: "", keywords: "", pattern: "", name_pattern: "", name_format: "{}", enabled: true }); dirty = true; drawGroups(); } }, "Add a group")),
+        h("button", { class: "btn sm", onclick: () => { m.groups.push({ id: "group" + (m.groups.length + 1), label: "New group", words: "", keywords: "", pattern: ".", name_pattern: "", name_format: "{}", enabled: true }); dirty = true; drawGroups(); } }, "Add a group")),
         h("p", { class: "small muted" }, "The main axis: a team, a family of items. Its words and keywords go into every caption of its sprites, and into the prompt when you generate for it. A sprite joins the first group whose pattern (a regular expression on the file name) matches, unless you set it by hand in Sprites. \"Own words from\": a pattern whose first (bracket) part becomes the sprite's own words, e.g. the item's name."),
         h("div", { class: "table-wrap" }, gt)),
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", {}, "Kinds"),
-        h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: "", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
+        h("button", { class: "btn sm", onclick: () => { m.kinds.push({ id: "kind" + (m.kinds.length + 1), label: "New kind", words: "", keywords: "", negative: "", size: m.size, pattern: ".", denoise: 0.7 }); dirty = true; drawGroups(); } }, "Add a kind")),
         h("p", { class: "small muted" }, "Optional second axis: a size class. Its words go into the captions too; its size sets the pixel grid of training and the size of what is generated. A model without kinds uses each sprite's own size."),
         m.kinds.length ? h("div", { class: "table-wrap" }, kt) : h("p", { class: "muted" }, "No kinds."),
         m.kinds.some((k) => !k.tile && Number(k.size) > 200) ? h("div", { class: "hint", style: { marginTop: "8px" } }, "A sprite rarely needs more than about 200 px. Smaller sprites keep the pixel-art look, are quicker to train and are easier for the model to get right.") : null),

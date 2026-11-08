@@ -95,9 +95,14 @@ On a model's **Sprites** tab:
 - *words*, put in every caption and prompt of the group ("red team");
 - *keywords*, an extra description ("organic insect body, bone plating");
 - a *file name pattern* (a regular expression, `_red_` for instance) that
-  puts a sprite in the group unless you set it by hand;
+  puts a sprite in the group unless you set it by hand. It is searched in
+  the file name without `.png`, anywhere in it unless you start with `^`;
+  the first group (or kind) in the list that matches wins; `.` matches
+  everything; empty matches nothing (only sprites you sort by hand);
 - *own words from*: a pattern whose first bracketed part becomes the
-  sprite's own words (the item's name from `^weapon_(.+)$`);
+  sprite's own words (the item's name from `^weapon_(.+)$`). It needs a
+  bracketed part: `.*` alone gives no words, so it stays empty until you
+  want own words;
 - an *on* switch (off: not learned, not offered) and an optional *palette*.
 
 **Kinds** are the second, optional axis: a size class (small 32 px, large
