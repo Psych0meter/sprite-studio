@@ -169,7 +169,9 @@ results and settings are not touched.
 ## 5. After installing
 
 - Studio: `http://<address>:8189` (`systemctl status spritegen-web`)
-- ComfyUI: `http://<address>:8188` (`systemctl status comfyui`)
+- ComfyUI: `http://127.0.0.1:8188` (`systemctl status comfyui`), reachable from this machine only. It has no login of its own, so it
+  is not opened to the network by default; to look at it from another machine use an SSH tunnel
+  (`ssh -L 8188:127.0.0.1:8188 <machine>`), or install with `COMFY_LISTEN=0.0.0.0` behind a firewall.
 - Scripts: `~spritegen/spritegen/scripts`, in that user's `PATH`
   (`su - spritegen`)
 
@@ -212,6 +214,7 @@ variables give the defaults (the service sets the data folders):
 | `PX_OUTPUT` | `$SG_DATA/output` | results |
 | `PX_LORA_HOME` | `~/lora` | models, training, palettes |
 | `COMFY` | `~/ComfyUI` | ComfyUI's folder |
+| `COMFY_LISTEN` | `127.0.0.1` | the address ComfyUI listens on (`install.sh`; `0.0.0.0` opens it to the network, without a login) |
 | `PX_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI's API |
 | `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `127.0.0.1` | the app's address (a plain run listens on this machine only; the service made by `install.sh` listens on `0.0.0.0`; a port or host added to its unit is kept) |
 | `SG_ALLOWED_ORIGINS` | none | extra host names allowed to send changes (behind a reverse proxy that changes the `Host`) |
