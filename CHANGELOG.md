@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-08
+
+### Fixed
+
+- **Spinners**: the corner spinner shows above dialogs (it was hidden behind them, so *Train on picks* looked frozen), and any button or select that waits for the server (more than a quarter of a second) is dimmed with its own spinner until it answers, in dialogs and pages alike.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
@@ -205,7 +211,8 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Psych0meter/sprite-studio/releases/tag/v0.1.0
