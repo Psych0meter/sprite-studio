@@ -33,7 +33,7 @@ from typing import Any
 ID_PREFIX = "U-"  # an id starts with a capital: no user name can (names are lowercase)
 USERNAME = re.compile(r"[a-z0-9][a-z0-9_.-]{1,31}")
 ROLES = ("admin", "user")
-KINDS = ("model", "result", "palette")
+KINDS = ("model", "result", "palette", "gallery")
 MIN_PASSWORD = 10
 MAX_PASSWORD = 128
 SESSION_MAX_AGE = 14 * 86400  # however active

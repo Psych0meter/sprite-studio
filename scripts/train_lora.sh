@@ -130,10 +130,27 @@ sample_prompts() {
 	model_py previews "$CATEGORY" --res "$RES"
 }
 
+# A new training never overwrites the checkpoints of the last one: they (and their previews) move to
+# $OUT/previous/<unix time>/ first.
+archive_previous_run() {
+	local old=()
+	shopt -s nullglob
+	old=("$OUT"/*.safetensors)
+	shopt -u nullglob
+	if [ ${#old[@]} -eq 0 ] && [ ! -d "$OUT/sample" ]; then return 0; fi
+	local dest
+	dest="$OUT/previous/$(date +%s)"
+	mkdir -p "$dest"
+	if [ ${#old[@]} -gt 0 ]; then mv "${old[@]}" "$dest/"; fi
+	if [ -d "$OUT/sample" ]; then mv "$OUT/sample" "$dest/sample"; fi
+	echo "the previous run's checkpoints were kept in $dest"
+}
+
 train() {
 	[ -d "$DATA/img" ] || { echo "no training set in $DATA: run CATEGORY=$CATEGORY $0 dataset first" >&2; exit 2; }
 	[ -f "$BASE" ] || { echo "error: the base model $BASE is missing: run MODEL=$MODEL $0 setup first (it downloads it)" >&2; exit 2; }
 	mkdir -p "$OUT"
+	archive_previous_run
 	sample_prompts >"$OUT/sample_prompts.txt"
 	cd "$SD"
 	local prec
@@ -199,9 +216,18 @@ train() {
 
 install() {
 	local f="${1:-$OUT/$NAME.safetensors}"
+	local dst="$COMFY/models/loras/$NAME.safetensors"
 	mkdir -p "$COMFY/models/loras"
-	cp "$f" "$COMFY/models/loras/$NAME.safetensors"
-	echo "installed $f as $COMFY/models/loras/$NAME.safetensors"
+	if [ -e "$dst" ]; then
+		# never overwritten: the file that was there is kept as <name>_<unix time>.safetensors
+		local kept stamp
+		stamp="$(date -r "$dst" +%s)"
+		kept="$COMFY/models/loras/${NAME}_${stamp}.safetensors"
+		mv "$dst" "$kept"
+		echo "the LoRA that was installed was kept as $kept"
+	fi
+	cp "$f" "$dst"
+	echo "installed $f as $dst"
 }
 
 case "${1:-}" in

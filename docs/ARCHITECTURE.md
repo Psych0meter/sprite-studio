@@ -171,9 +171,9 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   control, updates, SDXL download, users) answer 403 to anyone else; the
   last administrator cannot be removed, demoted or disabled. `auth.log` has
   one line for each sign-in, refusal, password change and account change.
-- **Ownership and sharing** (`acl.json`): three kinds of resource, `model`
+- **Ownership and sharing** (`acl.json`): four kinds of resource, `model`
   (its id; its LoRA files follow it), `result` (the top folder of
-  `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id),
+  `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id) and `gallery` (an item's id),
   each with an `owner`, `users` and `all`. **Accounts are identified by an id**
   (`U-` and 32 hex digits, made when the account is created, in `users.json`;
   a name starts with a lowercase letter or digit, so it can never be mistaken for
@@ -249,6 +249,28 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
     records `last_update.json` (`rolled back`). Limit: the guard is the new
     version's own `run.sh`, so a release whose `run.sh` is broken is only
     caught by systemd restarting it into the 25 s probe, not by the guard.
+- **Gallery**: `<PX_OUTPUT>/.gallery/<id>/` (`id` = 16 hex digits) holds
+  `image.png` (a copy of a variant) and `meta.json`: owner, name, folder, tags,
+  note, `source` (the result path, informational), `seed`, `model`, `group`,
+  `kind`, `lora`, `lora_sha` (SHA-256 of the LoRA file when it was kept),
+  `lora_info` (epoch, checkpoint, trained...), the whole `job.txt` head as
+  `params`, `prompt`, `what`, size. The folder is hidden, so no result list,
+  bin or share sees it, and images are served only by the API with the `gallery`
+  ACL (shared items read-only). Routes: `GET/POST /api/gallery` (POST takes a
+  result variant's `path`; the same sprite twice answers the first item),
+  `GET/PATCH /api/gallery/{id}` (only name, folder, tags, note change),
+  `/image`, `POST /api/gallery/bulk` (folder, `add_tags`, `remove_tags`),
+  `/delete`, `/export` (a zip of PNGs named after the sprites plus
+  `manifest.json`; `folders` keeps the gallery folders). Folders and tags are
+  labels on the item, not directories. Items outlive their results (they are
+  copies). `lora_references(file)` counts the result folders using a LoRA name
+  (every user's, by `lora=` in `job.txt`) and the gallery items made with it
+  (by name, and by content hash when recorded); while either is non-zero
+  `/api/loras/delete` and `/rename` answer 409. `install_lora` never
+  overwrites: an existing file is first renamed `<stem>_<mtime>.safetensors`
+  with its install record (`archive_lora`); `train_lora.sh` does the same for
+  `install`, and moves the last run's checkpoints and previews to
+  `<output>/previous/<time>/` when a new training starts.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.

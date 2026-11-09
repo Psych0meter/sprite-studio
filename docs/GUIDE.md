@@ -351,6 +351,15 @@ shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
   kept apart from the SD 1.5 one.
 - **Rename** a file. The one in use keeps its name, because the name is how
   the app finds it; a name that belongs to a model is refused.
+- **Nothing is overwritten.** Installing a LoRA over a name that exists
+  (*Use*, or *Install* on the Train page) first renames the old file to
+  `<name>_<time>.safetensors` (the time is a unix time), so a result or a
+  gallery image made with it can still be explained, and you can *Use* the old
+  file again. The same goes for training: a new run moves the checkpoints and
+  previews of the last one to `previous/<time>/` in the model's output folder.
+- A LoRA that **results or gallery images still use cannot be renamed or
+  deleted** (the buttons are off, with the reason in their tooltip). Delete
+  those results (and the gallery images made with it) first.
 - **Delete** one file, or tick several and delete them together. The
   trained checkpoints of the Train page are never touched, so a deleted
   LoRA can be installed again. Deleting the one in use leaves the model
@@ -395,6 +404,34 @@ bin*. **Train on picks…** copies the starred sprites into a new or existing
 model as training sprites (the originals stay), to train a model on what
 another one made well. **View bin** lists what was deleted, with *Put back* and *Erase* for
 each.
+
+### 6.1 The gallery
+
+Results are working files: you delete them. The **Gallery** keeps what you
+want to keep. The bookmark button on a sprite in Results copies the image to
+your gallery together with its recipe: the LoRA (file, epoch, checkpoint),
+the seed, model, group, kind, settings, prompt and extras. Then:
+
+- It **stays even when its result is deleted**, and the recipe cannot be
+  edited; only the name, folder, tags and note can. While an image is in the
+  gallery, **its LoRA cannot be deleted or renamed**; remove the image from
+  the gallery and the LoRA is free again.
+- **Share** an image (button in its dialog) with chosen people or everyone;
+  they can look at it and export it, not change or remove it. Each person has
+  their own gallery.
+- **Folders and tags**: give an image one folder (an album) and any tags (up to 12), then filter
+  by folder, tag, owner (*Mine* / *Shared with me*) or text (name, LoRA, seed,
+  model...). *Move to folder*, *Add tags* and *Remove tags* work on a
+  selection. A folder is just a label: type a new name to create one.
+- **Export zip** of the selection (or *with folders*, which keeps the gallery
+  folders as folders in the zip): the PNG files named after the sprites, and a
+  `manifest.json` with each recipe.
+
+Same recipe, same picture? Generating again with the **same LoRA file, seed,
+prompt, settings, starting sprite and base model** gives the same image on the
+same graphics card, driver and ComfyUI/PyTorch versions. Another card or newer
+software can change a few pixels, and a LoRA installed again under the same
+name is a different file (which is why old files are kept).
 
 ## 7. Palettes
 
@@ -448,7 +485,7 @@ Everyone signs in (the sign-in page; the administrator creates the first
 account with the one-time setup code, see INSTALL.md section 5).
 
 - **Your own space.** Your models, their LoRAs, your results (with the bin and
-  your picks), palettes, projects, jobs and logs are yours: other users do not
+  your picks and gallery), palettes, projects, jobs and logs are yours: other users do not
   see them. Shared things (below) and the source folders are the exceptions.
   The GPU queue shows that it is busy, and whose job waits, but not what
   somebody else is making.

@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Gallery**: a page per user for the sprites you keep. The bookmark button on a result copies the image with its recipe (LoRA file and epoch, seed, model, group, kind, settings, prompt). A gallery image stays when its result is deleted, its recipe cannot be edited, and the LoRA it was made with cannot be deleted or renamed while it is there. Share an image with chosen users or everyone (read-only), organise with folders and tags, search and filter, move or tag a selection, and export a selection as a zip (PNG files plus `manifest.json`, optionally keeping the folders).
+
 ### Changed
+
+- **LoRA files**: nothing is overwritten any more. Installing a LoRA over an existing name (*Use*, *Install*) keeps the old file as `<name>_<unix time>.safetensors`; a new training moves the last run's checkpoints and previews to `previous/<unix time>/` in the model's output folder.
+- **LoRA files**: a LoRA that results or gallery images still use cannot be renamed or deleted (the buttons are off, the server answers 409). The table shows the gallery count next to the results.
 
 - **Install**: Python 3.11 or newer is required (the project already needed it). `install.sh` stops with a clear message on an older system before changing anything; the supported systems are Debian 12/13 and Ubuntu 24.04+ (Ubuntu 22.04 has Python 3.10). The tests run on Python 3.11, 3.12 and 3.13.
 - **Jobs**: one user can have at most 20 jobs waiting for the GPU and 4 CPU jobs running (`SG_MAX_QUEUED_PER_USER`, `SG_MAX_CPU_JOBS_PER_USER`), so one person cannot fill the queue for everyone.
