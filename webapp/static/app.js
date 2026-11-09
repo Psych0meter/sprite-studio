@@ -1323,8 +1323,22 @@ routes.results = async (main, _parts, params) => {
     try { d = await api(detailUrl); } catch (e) { view.append(h("div", { class: "note bad" }, e.message)); return; }
     const body = h("div", {});
     const item = items.find((i) => i.path === d.path) || {};
-    const delBtn = (path, label, small) => item.busy ? null : h("button", { class: "btn sm ghost danger", title: "Move to the bin",
-      onclick: () => removeResults({ paths: [path] }, label) }, small ? "Delete" : "Delete " + (d.type === "batch" ? "batch" : d.type === "matrix" ? "test" : "result"));
+    const renameBtn = (path) => item.busy || item.path !== path || item.access === "read" ? null : h("button", { class: "btn sm ghost", title: "Give this result folder another name (its stars and gallery images follow)",
+      onclick: async () => {
+        const cur = path.split("/").pop();
+        const to = await askText("Rename the result", { input: "New name", value: cur, ok: "Rename" });
+        if (!to || to === cur) return;
+        const r = await attempt(() => api("/results/rename", { body: { name: cur, to } }), "Renamed");
+        if (!r) return;
+        current = path.slice(0, path.length - cur.length) + r.renamed;
+        history.replaceState(null, "", "#/results?path=" + encodeURIComponent(current));
+        await loadPicks();
+        items = await api("/results");
+        drawList();
+        drawView();
+      } }, "Rename");
+    const delBtn = (path, label, small) => item.busy ? null : h("span", { class: "row", style: { gap: "6px" } }, small ? null : renameBtn(path), h("button", { class: "btn sm ghost danger", title: "Move to the bin",
+      onclick: () => removeResults({ paths: [path] }, label) }, small ? "Delete" : "Delete " + (d.type === "batch" ? "batch" : d.type === "matrix" ? "test" : "result")));
     const redraw = () => { body.innerHTML = ""; drawBody(); bar.replaceWith(bar = makeBar()); };
     const makeBar = () => viewBar(redraw, [h("label", { class: "check small" }, h("input", { type: "checkbox", checked: S.view.raw, onchange: (e) => { S.view.raw = e.target.checked; saveView(); redraw(); } }), "Raw renders")]);
     let bar = makeBar();
@@ -2713,6 +2727,12 @@ async function modelEditor(main, mid, tab) {
           h("p", { class: "small muted" }, "A file with this model's groups, kinds, words and settings (no sprites), to import on another machine or as a template for another game (Models → Import a model file)."),
           h("a", { class: "btn", href: `/api/models/${mid}/export`, download: `${mid}.json` }, "Export the model")),
         h("div", { class: "panel", hidden: d.access === "read" }, h("h2", {}, "Folder"), d.dir ? h("p", { class: "small mono muted" }, d.dir) : null,
+          h("button", { class: "btn", style: { marginRight: "8px" }, title: "Change the model's id (its folder moves with it; results, LoRAs and the gallery follow)", onclick: async () => {
+            const to = await askText("Rename the model", { input: "New id", value: mid, hint: "Lowercase letters, digits and _. Not while a job for it is queued or running.", ok: "Rename" });
+            if (!to || to === mid) return;
+            const r = await attempt(() => api(`/models/${mid}/rename`, { body: { to } }), "Renamed");
+            if (r) { await loadCatalog(); location.hash = "#/models/" + to; }
+          } }, "Rename this model"),
           h("button", { class: "btn danger", onclick: async () => {
             if (!(await askConfirm(`Delete the model ${m.label}? Its folder (sprites, training sets, checkpoints) is moved to .deleted, not erased.`, { danger: true, ok: "Delete", title: "Delete the model" }))) return;
             const r = await attempt(() => api("/models/" + mid, { method: "DELETE" }), "Model deleted");
@@ -3053,6 +3073,12 @@ routes.palettes = async (main, parts) => {
             const r = await attempt(() => api("/palettes/" + id, { method: "PUT", body: Object.assign({}, edit, { id }) }), "Copy made");
             if (r) { current = id; dirty = false; await loadPalettes(); drawList(); drawEditor(); }
           } }, "Make my own copy") : saveBtn,
+          p.access === "read" ? null : h("button", { class: "btn ghost", title: "Change the palette's id (the groups using it follow)", onclick: async () => {
+            const to = await askText("Rename the palette", { input: "New id", value: p.id, hint: "Lowercase letters, digits and _. The groups using it follow.", ok: "Rename" });
+            if (!to || to === p.id) return;
+            const r = await attempt(() => api("/palettes/" + p.id + "/rename", { body: { to } }), "Renamed");
+            if (r) { current = r.id; dirty = false; await loadPalettes(); await loadCatalog(); drawList(); drawEditor(); }
+          } }, "Rename id"),
           p.access === "read" ? null : h("button", { class: "btn ghost danger", onclick: async () => {
             if (!(await askConfirm(`Delete the palette ${p.label}?` + (p.used_by.length ? ` The groups using it (${p.used_by.join(", ")}) go back to no palette.` : ""), { danger: true, ok: "Delete", title: "Delete the palette" }))) return;
             if (await attempt(() => api("/palettes/" + p.id, { method: "DELETE" }), "Palette deleted")) { current = ""; dirty = false; await loadPalettes(); await loadCatalog(); current = (S.palettes[0] || {}).id || ""; drawList(); drawEditor(); }

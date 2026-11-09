@@ -146,7 +146,7 @@ it when the run finishes (`follow_up`). `GET /api/train/<model>` reports
 `previews_todo`, `previews_by_epoch` and `final_epoch`.
 `GET /api/loras` lists ComfyUI's LoRA files (model from `installed.json`, else from the
 trigger the name starts with; epoch; the number of results whose `job.txt` names the file);
-`POST /api/loras/use|rename|delete` change them (a model's own `<trigger>[_xl].safetensors`
+`POST /api/models/{id}/rename`, `/api/palettes/{id}/rename` and `/api/results/rename` move a resource to a new name (the registry id, and so the owner and shares, stay; `rewrite_job_heads` fixes `model=` in every `job.txt`; picks, gallery sources, installed-LoRA records and the groups' palettes are rewritten; a queued or running job on the thing refuses with 409). `POST /api/loras/use|rename|delete` change them (a model's own `<trigger>[_xl].safetensors`
 cannot be renamed or a rename target; a rename keeps the file's id).
 `GET /api/models/<id>/prompt?group=&kind=` returns the prompt the model builds
 for a group and a kind; the Preview prompts editor uses it to start a row.

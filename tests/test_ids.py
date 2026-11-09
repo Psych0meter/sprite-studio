@@ -55,3 +55,66 @@ def test_a_project_keeps_its_id_when_renamed(team, env):  # noqa: F811
     uid = next(p["uid"] for p in admin.get("/api/projects").json() if p["name"] == "Alpha")
     out = admin.post("/api/projects/rename", json={"old": "Alpha", "new": "Beta"}).json()
     assert [p["uid"] for p in out if p["name"] == "Beta"] == [uid]
+
+
+def test_a_result_can_be_renamed_and_its_links_follow(team, env):  # noqa: F811
+    admin, ann, bob = team
+    lora_file(env)
+    d = make_result(env)
+    gid = admin.post("/api/gallery", json={"path": str(d / "red_small_1_s11.png")}).json()["id"]
+    admin.post("/api/picks", json={"path": str(d / "red_small_1_s12.png"), "picked": True})
+    uid = admin.module.ACCOUNTS.uid("result", d.name)
+    assert admin.post("/api/results/rename", json={"name": d.name, "to": "better_name"}).json() == {
+        "renamed": "better_name"
+    }
+    new = Path(env["output"]) / "better_name"
+    assert new.is_dir() and not d.exists()
+    assert admin.module.ACCOUNTS.uid("result", "better_name") == uid  # same id
+    assert list(admin.get("/api/picks").json()) == [str(new / "red_small_1_s12.png")]
+    assert admin.get(f"/api/gallery/{gid}").json()["source"] == str(new / "red_small_1_s11.png")
+    assert admin.post("/api/results/rename", json={"name": "better_name", "to": "better_name"}).status_code == 200
+    make_result(env, "other")
+    assert admin.post("/api/results/rename", json={"name": "better_name", "to": "other"}).status_code == 400
+    assert admin.post("/api/results/rename", json={"name": "picked", "to": "x"}).status_code == 404
+
+
+def test_a_palette_can_be_renamed_and_its_groups_follow(team, env):  # noqa: F811
+    from test_accounts import make_model
+
+    admin, ann, bob = team
+    make_model(admin)
+    assert admin.put("/api/palettes/warm", json={"colours": ["#ff0000"], "label": "warm"}).status_code == 200
+    m = admin.get("/api/models/units").json()["model"]
+    g = {"id": "red", "label": "Red", "palette": "warm"}
+    admin.put("/api/models/units", json={"groups": [*m["groups"], g]})
+    uid = admin.module.ACCOUNTS.uid("palette", "warm")
+    r = admin.post("/api/palettes/warm/rename", json={"to": "cool"})
+    assert r.status_code == 200 and r.json()["id"] == "cool" and r.json()["label"] == "cool"
+    assert admin.get("/api/palettes/warm").status_code == 404
+    assert admin.module.ACCOUNTS.uid("palette", "cool") == uid
+    assert (
+        next(x for x in admin.get("/api/models/units").json()["model"]["groups"] if x["id"] == "red")["palette"]
+        == "cool"
+    )
+    assert admin.post("/api/palettes/cool/rename", json={"to": "Bad Name"}).status_code == 400
+
+
+def test_a_model_can_be_renamed_and_everything_follows(team, env):  # noqa: F811
+    from test_accounts import make_model
+
+    admin, ann, bob = team
+    make_model(admin)
+    lora_file(env)
+    d = make_result(env)
+    gid = admin.post("/api/gallery", json={"path": str(d / "red_small_1_s11.png")}).json()["id"]
+    uid = admin.module.ACCOUNTS.uid("model", "units")
+    r = admin.post("/api/models/units/rename", json={"to": "troops"})
+    assert r.status_code == 200 and r.json()["model"]["id"] == "troops"
+    assert not (Path(env["lora"]) / "units").exists() and (Path(env["lora"]) / "troops" / "model.json").exists()
+    assert admin.get("/api/models/units").status_code == 404
+    assert admin.module.ACCOUNTS.uid("model", "troops") == uid
+    assert " model=troops " in (d / "job.txt").read_text().splitlines()[0] + " "
+    assert admin.get(f"/api/gallery/{gid}").json()["model"] == "troops"
+    assert admin.post("/api/models/troops/rename", json={"to": "Not OK"}).status_code == 400
+    make_model(admin, "second", "pxsecond")
+    assert admin.post("/api/models/troops/rename", json={"to": "second"}).status_code == 400

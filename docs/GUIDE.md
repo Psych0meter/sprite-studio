@@ -55,6 +55,12 @@ A model lives in `~/lora/<id>/`: `model.json` (what it is), `sprites/`
 (what it learns from), `dataset/` and `output/` (SD 1.5 training set and
 runs; `dataset_xl/` and `output_xl/` for SDXL).
 
+**Renaming a model** (*Settings → Rename this model*) changes its id and moves
+the folder. Everything points at the model by a hidden id, so its owner, shares,
+LoRA records, results and gallery images follow. It is refused while a job for the
+model is queued or running. A model made from a template stops matching it, so
+*Use the template's settings* is no longer offered.
+
 ### 3.1 Projects and starting points
 
 Models belong to a *project*, one per project. The list at the top of the menu
@@ -399,7 +405,9 @@ so the pixel grid is a whole number (2 on SD 1.5, 4 on SDXL).
 Every run, batch and comparison of the output folder. Zoom (Fit, 1x to 8x),
 backdrop (checker, dark, floor, light), raw renders; star the variant to
 keep (*Export picks* copies them to `output/picked/`, named after the sprite
-they replace), compare side by side. **Delete** a result, one sprite of a
+they replace), compare side by side. **Rename** gives a result folder another name; its
+stars, owner, shares and the gallery images saved from it follow (not while a job is
+writing to it). **Delete** a result, one sprite of a
 batch, its failed sprites, or every empty result: they go to the output
 folder's `.bin`, where *Undo last delete* puts them back until you *Empty
 bin*. **Train on picks…** copies the starred sprites into a new or existing
@@ -439,6 +447,7 @@ name is a different file (which is why old files are kept).
 
 A LoRA reproduces the colours of its training sprites: a dark group comes
 out dark. A palette fixes colours after rendering, without retraining.
+**Rename id** changes a palette's id; the groups that use it follow.
 
 **Making one** (Palettes page, *New palette*):
 

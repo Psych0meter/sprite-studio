@@ -2427,6 +2427,34 @@ def _rewrite_head(jt: Path, lid: str) -> None:
     tmp.replace(jt)
 
 
+def rewrite_job_heads(match: str, key: str, new: str, *, add_missing: bool = False) -> int:
+    """Every result's job.txt (the bin included) whose first line has `key=<match>` gets `key=<new>` instead.
+    Returns how many were changed."""
+    root = setting_path("px_output")
+    n = 0
+    if not root.is_dir():
+        return n
+    for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt", ".bin/*/job.txt", ".bin/*/*/job.txt"):
+        for jt in root.glob(pattern):
+            try:
+                text = jt.read_text(errors="replace")
+            except OSError:
+                continue
+            first, sep, rest = text.partition("\n")
+            fixed = re.sub(rf"(?<!\S){re.escape(key)}={re.escape(match)}(?=\s|$)", f"{key}={new}", first)
+            if fixed != first:
+                tmp = jt.with_name(jt.name + ".tmp")
+                tmp.write_text(fixed + sep + rest)
+                tmp.replace(jt)
+                n += 1
+    return n
+
+
+def busy_with(pred) -> bool:
+    """Is a queued or running job one `pred(job)` says is about the thing being renamed?"""
+    return any(j["status"] in ("queued", "running") and pred(j) for j in list(JOBS.jobs.values()))
+
+
 def adopt_legacy_refs(f: Path) -> None:
     """Before a LoRA file is renamed: gives the id to the older results (job.txt with only `lora=<name>`) and
     gallery items (name and content hash) that point at it, so they follow the file afterwards."""
@@ -3177,6 +3205,48 @@ def api_model_delete(mid: str):
     return {"moved_to": str(dst)}
 
 
+@app.post("/api/models/{mid}/rename")
+async def api_model_rename(mid: str, request: Request):
+    """Gives a model another id ({"to": new}): its folder, sprites and training move with it. Its owner, shares,
+    LoRA files, results and gallery images follow by id."""
+    model_cfg(mid)  # (first: someone else's model does not exist for you)
+    b = await request.json()
+    new = str(b.get("to") or "").strip()
+    if not re.fullmatch(r"[a-z0-9_]{1,40}", new):
+        raise HTTPException(400, "a model id is lowercase letters, digits and _ (40 at most)")
+    if new == mid:
+        return api_model(mid)
+    p = pm()
+    src, dst = Path(p.model_dir(mid)), Path(p.model_dir(new))
+    if not src.exists():
+        raise HTTPException(400, "this built-in model has nothing saved to rename")
+    if dst.exists() or ACCOUNTS.entry("model", new):
+        raise HTTPException(400, f"a model {new} exists already")
+    if busy_with(
+        lambda j: (
+            mid in (j["meta"].get("category"), j["meta"].get("model"), (j["meta"].get("request") or {}).get("model"))
+        )
+    ):
+        raise HTTPException(409, "a job for this model is queued or running: rename it when the job is done")
+    uid = ACCOUNTS.uid("model", mid)
+    with _lock:
+        shutil.move(str(src), str(dst))
+        m = p.load(new)
+        p.save(m)  # (its id is written as the new one)
+        rec = _load("installed.json", {})
+        for r in rec.values():
+            if r.get("model") == mid:
+                r["model"], r["model_id"] = new, uid
+        _save("installed.json", rec)
+    ACCOUNTS.rename("model", mid, new)
+    rewrite_job_heads(mid, "model", new)
+    for g in gallery_metas():
+        if g.get("model_id") == uid or (not g.get("model_id") and g.get("model") == mid):
+            g["model"], g["model_id"] = new, uid
+            _gallery_write(g["id"], g)
+    return api_model(new)
+
+
 @app.post("/api/models/{mid}/upload")
 async def api_model_upload(mid: str, request: Request):
     m = model_cfg(mid)
@@ -3300,6 +3370,48 @@ async def api_results_delete(request: Request):
         raise HTTPException(400, "nothing to delete")
     done = [delete_result(x) for x in dict.fromkeys(paths)]
     return {"deleted": done, "bin": bin_info()}
+
+
+RESERVED_RESULTS = ("uploads", "picked", "recoloured")
+
+
+@app.post("/api/results/rename")
+async def api_results_rename(request: Request):
+    """Renames a result folder ({"name": old, "to": new}). It keeps its id, owner and shares; its stars and the
+    gallery images saved from it follow."""
+    b = await request.json()
+    old = str(b.get("name") or "")
+    root = setting_path("px_output")
+    if not old or old.startswith(".") or old in RESERVED_RESULTS or "/" in old or not (root / old).is_dir():
+        raise HTTPException(404, "no such result")
+    need("result", old, True)
+    new = name_ok(b.get("to") or "")
+    if new.startswith(".") or new in RESERVED_RESULTS:
+        raise HTTPException(400, "choose another name")
+    if new == old:
+        return {"renamed": old}
+    if (root / new).exists() or ACCOUNTS.entry("result", new):
+        raise HTTPException(400, f"{new} exists already")
+    src, dst = root / old, root / new
+    if busy_with(lambda j: str(j.get("out") or "").startswith(str(src))):
+        raise HTTPException(409, "a job is still writing to this result: rename it when the job is done")
+    with _lock:
+        src.rename(dst)
+        d = picks_load()
+        for picks in d["users"].values():
+            for k in [k for k in picks if k == str(src) or k.startswith(str(src) + "/")]:
+                picks[str(dst) + k[len(str(src)) :]] = picks.pop(k)
+        _save("picks.json", d)
+        for j in JOBS.jobs.values():
+            if str(j.get("out") or "").startswith(str(src)):
+                j["out"] = str(dst) + j["out"][len(str(src)) :]
+        JOBS.persist()
+    for m in gallery_metas():  # (the copy in the gallery remembers where it came from)
+        if str(m.get("source", "")).startswith(str(src) + "/"):
+            m["source"] = str(dst) + m["source"][len(str(src)) :]
+            _gallery_write(m["id"], m)
+    ACCOUNTS.rename("result", old, new)
+    return {"renamed": new}
 
 
 def bin_owner_key(d: Path) -> str:
@@ -3518,6 +3630,39 @@ async def api_palette_save(pid: str, request: Request):
     out = save_palette(clean_palette(await request.json(), pid))
     claim("palette", pid)
     return out
+
+
+@app.post("/api/palettes/{pid}/rename")
+async def api_palette_rename(pid: str, request: Request):
+    """Gives a palette another id ({"to": new}); the groups that use it, its owner and its shares follow."""
+    pal = read_palette(pid)
+    need("palette", pid, True)
+    new = (await request.json()).get("to") or ""
+    if not PAL_ID.fullmatch(new):
+        raise HTTPException(400, "a palette id is lowercase letters, digits and _")
+    if new == pid:
+        return pal
+    if (pal_dir() / f"{new}.json").exists() or ACCOUNTS.entry("palette", new):
+        raise HTTPException(400, f"a palette {new} exists already")
+    with _lock:
+        data = json.loads((pal_dir() / f"{pid}.json").read_text())
+        data["id"] = new
+        if data.get("label") in (pid, None, ""):
+            data["label"] = new
+        save_palette(data)
+        (pal_dir() / f"{pid}.json").unlink()
+        for mid in pm().list_models():  # (every model's groups: a rename must not leave a dangling palette)
+            try:
+                m = pm().load(mid)
+            except SystemExit:
+                continue
+            if any(g.get("palette") == pid for g in m["groups"]):
+                for g in m["groups"]:
+                    if g.get("palette") == pid:
+                        g["palette"] = new
+                pm().save(m)
+    ACCOUNTS.rename("palette", pid, new)
+    return read_palette(new)
 
 
 @app.delete("/api/palettes/{pid}")
