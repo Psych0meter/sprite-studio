@@ -26,7 +26,7 @@ starts it again afterwards.
 
 | What | Needed | Notes |
 |---|---|---|
-| OS | Debian 12/13, Ubuntu 22.04+ | tested on Debian 13 |
+| OS | Debian 12/13, Ubuntu 24.04+ | Python 3.11 or newer is required (Debian 12 has 3.11, Debian 13 3.13, Ubuntu 24.04 3.12); Ubuntu 22.04 (3.10) is not supported. Tested on Debian 13 |
 | NVIDIA GPU | 8 GB or more | 12 GB or more for comfortable SDXL training |
 | NVIDIA driver | installed, `nvidia-smi` works | on the host, for a container |
 | CPU / RAM | 4 cores / 16 GB | 2 cores / 12 GB at least; 32 GB RAM for SDXL training |

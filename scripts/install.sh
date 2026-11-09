@@ -57,6 +57,13 @@ apt-get update -q
 apt-get install -y -q git curl ca-certificates python3 python3-venv python3-pip python3-dev \
 	build-essential tmux unzip sudo python3-numpy python3-pil python3-scipy
 
+# Sprite Studio needs Python 3.11 or newer (Debian 12/13, Ubuntu 24.04+). Older systems (Ubuntu 22.04 has 3.10) stop here,
+# before anything is changed.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
+	echo "Python 3.11 or newer is needed; this system has $(python3 -V 2>&1). Use Debian 12/13 or Ubuntu 24.04 or newer." >&2
+	exit 2
+}
+
 if [ -n "$NVIDIA_RUN" ]; then
 	step "NVIDIA user-space libraries (no kernel module)"
 	sh "$NVIDIA_RUN" --no-kernel-module --silent
@@ -163,9 +170,12 @@ curl -s http://127.0.0.1:8188/system_stats | head -c 300; echo
 step "LoRA training (kohya sd-scripts)"
 # Training needs the GPU memory ComfyUI holds: train_lora.sh stops nothing
 # by itself, so stop ComfyUI before a training run (see the guide).
+# ComfyUI is started again whatever happens to the setup (a network or disk failure stops this script: set -e).
+trap 'systemctl start comfyui || true' EXIT
 systemctl stop comfyui
 as_user env COMFY="$COMFY" "$SG_APP/scripts/train_lora.sh" setup
 systemctl start comfyui
+trap - EXIT
 
 step "Sprite Studio (web app, port 8189)"
 # The app stops ComfyUI for a training run and starts it again: allow just that.

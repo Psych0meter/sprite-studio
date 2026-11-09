@@ -57,7 +57,7 @@ mock-ups: they show the interface, not what a trained model makes.
 
 ## Requirements
 
-- Linux (Debian 12/13 or Ubuntu 22.04+), on a machine or in a container
+- Linux (Debian 12/13 or Ubuntu 24.04+; Python 3.11 or newer), on a machine or in a container
   (an unprivileged Proxmox LXC container works).
 - An NVIDIA GPU with 8 GB of memory or more, and its driver.
 - About 35 GB of disk (50 GB with SDXL), 12 GB of RAM (16 recommended;
