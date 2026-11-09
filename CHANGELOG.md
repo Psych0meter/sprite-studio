@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Install**: Python 3.11 or newer is required (the project already needed it). `install.sh` stops with a clear message on an older system before changing anything; the supported systems are Debian 12/13 and Ubuntu 24.04+ (Ubuntu 22.04 has Python 3.10). The tests run on Python 3.11, 3.12 and 3.13.
+- **Jobs**: one user can have at most 20 jobs waiting for the GPU and 4 CPU jobs running (`SG_MAX_QUEUED_PER_USER`, `SG_MAX_CPU_JOBS_PER_USER`), so one person cannot fill the queue for everyone.
+- **Security**: file responses (`/api/file`) are marked `private`, so no shared cache keeps them.
+
+### Fixed
+
+- **Updates**: a Sprite Studio update that is cut short (power loss, a kill) while it replaces files is now detected and rolled back at the next start. The marker is written before the first file changes, the web packages are saved and put back with the files, and the release's `pyproject.toml` is read before anything changes.
+- **Install**: ComfyUI is started again when the training setup fails after it was stopped.
+- **Sharing**: a malformed list of users in a sharing request answers 400 instead of an error.
+
 ## [0.3.2] - 2026-11-08
 
 ### Added

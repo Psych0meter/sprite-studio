@@ -329,6 +329,8 @@ MAX_TEXT_SERVED = 10 * 1024 * 1024  # the biggest text file /api/file serves
 MAX_PIXELS = 64_000_000  # one image
 MAX_QUEUED = int(os.environ.get("SG_MAX_QUEUED", "100"))  # jobs waiting for the GPU
 MAX_CPU_JOBS = 8  # CPU jobs running at once
+MAX_QUEUED_PER_USER = int(os.environ.get("SG_MAX_QUEUED_PER_USER", "20"))  # GPU jobs one user may have waiting
+MAX_CPU_JOBS_PER_USER = int(os.environ.get("SG_MAX_CPU_JOBS_PER_USER", "4"))  # CPU jobs one user may have running
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 SERVED_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".json", ".txt", ".csv", ".log"}
 
@@ -442,6 +444,23 @@ class Jobs:
             "log": str(LOG_DIR / f"{jid}.log"),
         }
         with self.cv:
+            mine = job["owner"]
+            if mine and lane == "gpu" and kind != "update":
+                waiting = sum(1 for q in self.queue if self.jobs[q]["owner"] == mine)
+                if waiting >= MAX_QUEUED_PER_USER:
+                    raise HTTPException(
+                        429,
+                        f"you already have {waiting} jobs waiting for the GPU (the most one person can queue is "
+                        f"{MAX_QUEUED_PER_USER}): wait for some to finish or cancel some",
+                    )
+            if mine and lane != "gpu":
+                running = sum(
+                    1
+                    for j in self.jobs.values()
+                    if j["lane"] != "gpu" and j["status"] == "running" and j["owner"] == mine
+                )
+                if running >= MAX_CPU_JOBS_PER_USER:
+                    raise HTTPException(429, f"you already have {running} jobs running: try again in a moment")
             if lane == "gpu" and len(self.queue) >= MAX_QUEUED:
                 raise HTTPException(
                     429, f"{MAX_QUEUED} jobs are already waiting: wait for some to finish or cancel some"
@@ -1869,7 +1888,9 @@ def api_file(path: str = ""):
         raise HTTPException(403, "this kind of file is not served")
     if p.suffix.lower() in (".json", ".txt", ".csv", ".log") and p.stat().st_size > MAX_TEXT_SERVED:
         raise HTTPException(413, "this text file is too big to show")
-    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+    return FileResponse(
+        p, headers={"Cache-Control": "private, no-cache"}
+    )  # (kept by this browser only, checked each time)
 
 
 _info_slots = threading.BoundedSemaphore(2)  # image analysis builds large arrays: at most two at a time

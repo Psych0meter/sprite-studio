@@ -543,3 +543,35 @@ def test_an_installation_keyed_by_names_is_migrated_to_ids(team, env):
     assert [m["id"] for m in ann.get("/api/models").json()] == ["units"]
     assert [m["id"] for m in bob.get("/api/models").json()] == ["units"]
     assert any(j["id"] == "old" for j in ann.get("/api/jobs").json())
+
+
+def test_one_user_cannot_fill_the_gpu_queue_for_everyone(client, monkeypatch):
+    import pytest
+
+    app = client.module
+    monkeypatch.setattr(app.Jobs, "_gpu_worker", lambda self: None)  # (nothing runs: the jobs just wait)
+    monkeypatch.setattr(app, "MAX_QUEUED_PER_USER", 2)
+    jobs = app.Jobs()
+
+    def submit_as(owner, lane="gpu"):
+        token = app.acc.CURRENT.set(type("W", (), {"id": owner})())
+        try:
+            return jobs.submit("generate", "t", ["true"], lane=lane)
+        finally:
+            app.acc.CURRENT.reset(token)
+
+    submit_as("U-ann")
+    submit_as("U-ann")
+    with pytest.raises(app.HTTPException) as e:
+        submit_as("U-ann")
+    assert e.value.status_code == 429 and "2 jobs waiting" in e.value.detail
+    submit_as("U-bob")  # somebody else can still queue
+    assert len(jobs.queue) == 3
+
+
+def test_a_malformed_sharing_list_is_a_clean_400(team):
+    admin, ann, _ = team
+    make_model(ann)
+    for bad in ([{"a": 1}], [["x"]], [3], "bob"):
+        assert ann.put("/api/acl/model/units", json={"users": bad}).status_code == 400
+    assert ann.put("/api/acl/model/units", json={"users": [], "owner": ["x"]}).status_code == 400

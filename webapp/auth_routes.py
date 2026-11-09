@@ -180,8 +180,10 @@ def make_router(
         checked(kind, key)
         b = await body(request)
         users_ = b.get("users", [])
-        if not isinstance(users_, list):
+        if not isinstance(users_, list) or not all(isinstance(u, str) for u in users_):
             raise HTTPException(400, "users is a list of user names")
+        if b.get("owner") is not None and not isinstance(b["owner"], str):
+            raise HTTPException(400, "owner is a user name")
         known = accounts.users()
         unknown = [u for u in users_ if u not in known]
         if unknown:

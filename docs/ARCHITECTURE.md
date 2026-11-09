@@ -228,14 +228,21 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   - **Sprite Studio** (`studio_update`): refused on a git checkout (the
     installation made by `install.sh` is a copy). The release is cloned, its tag
     must be on the default branch and its `VERSION` must equal the tag, its
-    Python files must compile; the running files are copied to
-    `<state>/backups/app-<version>-<time>` (the last three are kept), the new
-    ones copied over (`scripts`, `webapp`, `docs`, `README.md`, `CHANGELOG.md`,
-    `VERSION`) and a marker `<state>/update_pending/` (`boots`, `backup`,
-    `from`, `to`) written. When the job ends the app re-executes itself. Two
-    safeguards undo an update that does not work: `webapp/run.sh` calls
-    `pxupdate.py studio-guard` at each start (the marker's `boots` counter
-    reaches 3 without a confirmation: the backup is copied back), and the
+    Python files must compile, and its `pyproject.toml` must be readable
+    (everything above happens before any installed file changes). The running
+    files are copied to `<state>/backups/app-<version>-<time>` (the last three
+    are kept) and the web environment's packages are saved
+    (`pip freeze --local`, `<state>/update/studio-freeze.txt`). Then the marker
+    `<state>/update_pending/` (`boots`, `backup`, `from`, `to`, `freeze`, and
+    `phase` = `applying`) is written, atomically (a folder renamed into
+    place), *before* the new files are copied over (`scripts`, `webapp`,
+    `docs`, `README.md`, `CHANGELOG.md`, `VERSION`) and FastAPI and uvicorn
+    installed; `phase` becomes `installed` when both are done. When the job
+    ends the app re-executes itself. Safeguards: `webapp/run.sh` calls
+    `pxupdate.py studio-guard` at each start: a marker still `applying` means
+    the update was cut short (power loss, a kill) and is rolled back at once;
+    otherwise its `boots` counter reaching 3 without a confirmation copies the
+    backup back (files and packages). The
     new process probes `/api/auth/state` after 25 s (answers: marker removed,
     `last_update.json` says `ok`; no answer: `studio-rollback` and restart).
     `studio-rollback` (the *Go back* button) copies the newest backup back and
@@ -265,7 +272,10 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   pixels and 25 MB each; a base64 file is size-checked before it is decoded; a zip may hold 5000
   files and `SG_MAX_ZIP_MB` (250) unpacked; `/api/info` analyses images up to
   16 million pixels; `/api/file` serves text files up to 10 MB. At most
-  `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429). The
+  `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429); one
+  user may have at most `SG_MAX_QUEUED_PER_USER` (20) jobs waiting for the GPU
+  and `SG_MAX_CPU_JOBS_PER_USER` (4) CPU jobs running, so one person cannot
+  fill the queue for the others. The
   logs of jobs that fell off the 300 kept are deleted after a day.
 - **Front end**: `app.js`, `accounts.js` (the account menu, Users page, Share dialog) and `palette.js`, a small `h()` element helper, one route
   function per page, in-app dialogs (`askText`, `askConfirm`); no global
