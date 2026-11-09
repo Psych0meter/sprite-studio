@@ -921,6 +921,8 @@ def result_set(folder: Path) -> dict:
     """One generation folder (pxmake.sh layout: job.txt, raw/, variants)."""
     job_txt = (folder / "job.txt").read_text(errors="replace") if (folder / "job.txt").exists() else ""
     head = dict(re.findall(r"(\w+)=(\S+)", job_txt.splitlines()[0])) if job_txt else {}
+    if head.get("lora_id"):  # (the file may have been renamed since)
+        head["lora"] = lora_name_of(head["lora_id"]) or head.get("lora", "")
     prompt = what = ""
     for line in job_txt.splitlines():
         if line.startswith("prompt: "):
@@ -2017,10 +2019,13 @@ def api_jobs_clear(only: str = ""):
     return {"ok": True}
 
 
-def lora_env(b: dict) -> dict:
+def lora_env(b: dict, m: dict | None = None) -> dict:
     env = {}
     if b.get("lora"):
         env["PX_LORA"] = name_ok(b["lora"])
+    used = env.get("PX_LORA") or (m["trigger"] + ".safetensors" if m else "")
+    if used and (lora_dir() / used).is_file():
+        env["PX_LORA_ID"] = lora_id(used)  # (written in the result's job.txt)
     if b.get("strength") not in (None, ""):
         env["PX_LORA_STRENGTH"] = str(body_get(b, "strength", 1.0, float))
     return env
@@ -2104,7 +2109,7 @@ async def api_generate(request: Request):
         cmd += ["--mirror", b["mirror"]]
     if b.get("mask"):
         title = "Touch-up: " + title
-    return JOBS.submit("generate", title, cmd, env=lora_env(b), out=out, meta={"count": count, "request": b})
+    return JOBS.submit("generate", title, cmd, env=lora_env(b, m), out=out, meta={"count": count, "request": b})
 
 
 @app.post("/api/batch/plan")
@@ -2173,14 +2178,15 @@ def fill_value(v: Any) -> int:
 @app.post("/api/batch")
 async def api_batch(request: Request):
     b = await request.json()
-    require_lora(model_cfg(body_model(b), write=False), name_ok(b["lora"]) if b.get("lora") else "")
+    bm = model_cfg(body_model(b), write=False)
+    require_lora(bm, name_ok(b["lora"]) if b.get("lora") else "")
     plan = await api_batch_plan(request)
     cmd = batch_cmd(b)
     tag = cmd[cmd.index("--tag") + 1]
     out = str(setting_path("px_output") / f"batch-{tag}")
     claim_folder(Path(out).name)
     return JOBS.submit(
-        "batch", f"Batch {tag}", cmd, env=lora_env(b), out=out, meta={"total": len(plan["todo"]), "request": b}
+        "batch", f"Batch {tag}", cmd, env=lora_env(b, bm), out=out, meta={"total": len(plan["todo"]), "request": b}
     )
 
 
@@ -2378,6 +2384,69 @@ async def api_train_caption(cat: str, request: Request):
     return {"ok": True}
 
 
+def lora_id(name: str) -> str:
+    """The stable id of a LoRA file (a UUID kept in lora_ids.json, made on first use). Results and gallery items
+    point at this id, never at the file name, so renaming a file changes nothing for them."""
+    with _lock:
+        ids = _load("lora_ids.json", {})
+        if name not in ids:
+            ids[name] = uuid.uuid4().hex
+            _save("lora_ids.json", ids)
+        return ids[name]
+
+
+def lora_name_of(lid: str) -> str:
+    """The current file name of the LoRA with this id ('' when it is gone)."""
+    return next((n for n, i in _load("lora_ids.json", {}).items() if i == lid and (lora_dir() / n).is_file()), "")
+
+
+def move_lora_id(old: str, new: str) -> None:
+    """A LoRA file renamed or archived keeps its id."""
+    with _lock:
+        ids = _load("lora_ids.json", {})
+        if old in ids:
+            ids[new] = ids.pop(old)
+            _save("lora_ids.json", ids)
+
+
+def _rewrite_head(jt: Path, lid: str) -> None:
+    """Adds `lora_id=` to the first line of a job.txt that has only the file name (older results)."""
+    text = jt.read_text(errors="replace")
+    first, sep, rest = text.partition("\n")
+    tmp = jt.with_name(jt.name + ".tmp")
+    tmp.write_text(f"{first} lora_id={lid}{sep}{rest}")
+    tmp.replace(jt)
+
+
+def adopt_legacy_refs(f: Path) -> None:
+    """Before a LoRA file is renamed: gives the id to the older results (job.txt with only `lora=<name>`) and
+    gallery items (name and content hash) that point at it, so they follow the file afterwards."""
+    lid = lora_id(f.name)
+    root = setting_path("px_output")
+    if root.is_dir():
+        for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt", ".bin/*/job.txt", ".bin/*/*/job.txt"):
+            for jt in root.glob(pattern):
+                try:
+                    with open(jt, errors="replace") as fh:
+                        head = fh.readline()
+                    if re.search(rf"\blora={re.escape(f.name)}(\s|$)", head) and "lora_id=" not in head:
+                        _rewrite_head(jt, lid)
+                except OSError:
+                    continue
+    sha = ""
+    for m in gallery_metas():
+        if m.get("lora_id"):
+            continue
+        if m.get("lora_sha"):
+            sha = sha or file_sha(f)
+            hit = m["lora_sha"] == sha
+        else:
+            hit = m.get("lora") == f.name
+        if hit:
+            m["lora_id"] = lid
+            _gallery_write(m["id"], m)
+
+
 def archive_lora(f: Path) -> Path:
     """Renames a LoRA file that is about to be replaced to `<name>_<unix time>.safetensors` (its install record
     follows) so that nothing a new install does can change an old file; returns the new path."""
@@ -2393,6 +2462,7 @@ def archive_lora(f: Path) -> Path:
         if f.name in rec:
             rec[new.name] = rec.pop(f.name)
             _save("installed.json", rec)
+    move_lora_id(f.name, new.name)
     return new
 
 
@@ -2413,14 +2483,18 @@ def file_sha(f: Path) -> str:
 
 
 def lora_references(f: Path, scan: dict[str, int] | None = None) -> dict[str, int]:
-    """What still needs this LoRA file: result folders rendered with it (by name, every user's) and gallery items
-    saved with it (by name and content). While any exists the file can be neither deleted nor renamed."""
-    results = (scan if scan is not None else _count_lora_results(setting_path("px_output"))).get(f.name, 0)
-    items = [m for m in gallery_metas() if m.get("lora") == f.name or m.get("lora_sha")]
+    """What still needs this LoRA file: result folders rendered with it (every user's) and gallery items saved
+    with it. They point at the file's id; older ones that have only the name (or name and content hash) are
+    matched by that until the file is renamed, which gives them the id."""
+    counts = scan if scan is not None else _count_lora_results(setting_path("px_output"))
+    lid = lora_id(f.name)
+    results = counts.get(lid, 0) + counts.get(f.name, 0)
     sha = ""
     n = 0
-    for m in items:
-        if m.get("lora_sha"):
+    for m in gallery_metas():
+        if m.get("lora_id"):
+            n += m["lora_id"] == lid
+        elif m.get("lora_sha"):
             sha = sha or file_sha(f)
             n += m["lora_sha"] == sha
         else:
@@ -2459,7 +2533,7 @@ def lora_in_use_message(name: str, refs: dict[str, int], what: str) -> str:
         bits.append(f"{refs['results']} result{'s' if refs['results'] != 1 else ''}")
     if refs["gallery"]:
         bits.append(f"{refs['gallery']} gallery image{'s' if refs['gallery'] != 1 else ''}")
-    return f"{name} cannot be {what}: {' and '.join(bits)} still use it. Delete them first (a gallery image keeps its LoRA)."
+    return f"{name} cannot be {what}: {' and '.join(bits)} still use it. Delete them first (a gallery image keeps its LoRA). Renaming is always possible."
 
 
 def lora_filename(s: str) -> str:
@@ -2503,7 +2577,7 @@ _lora_count_cache: dict[str, Any] = {"at": 0.0, "root": "", "data": {}}
 
 
 def lora_results_count() -> dict[str, int]:
-    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt). Reading them all
+    """How many result folders were rendered with each LoRA file (by `lora_id=`, else `lora=`, of every job.txt). Reading them all
     is slow with thousands of results, so the answer is kept for 20 seconds."""
     root = setting_path("px_output")
     c = _lora_count_cache
@@ -2527,8 +2601,8 @@ def _count_lora_results(root: Path) -> dict[str, int]:
                     head = fh.readline()
             except OSError:
                 continue
-            m = re.search(r"\blora=(\S+)", head)
-            if m:
+            m = re.search(r"\blora_id=([0-9a-f]{32})\b", head) or re.search(r"\blora=(\S+)", head)
+            if m:  # (by id when the result has one, else by file name)
                 counts[m.group(1)] = counts.get(m.group(1), 0) + 1
     return counts
 
@@ -2564,8 +2638,11 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
         defaults[m["trigger"] + ".safetensors"] = (mid, "SD 1.5")
         defaults[m["trigger"] + "_xl.safetensors"] = (mid, "SDXL")
     gal: dict[str, int] = {}
-    for m in gallery_metas():  # (by name: the file itself is checked when deleting)
-        gal[m.get("lora", "")] = gal.get(m.get("lora", ""), 0) + 1
+    ids = _load("lora_ids.json", {})
+    by_id = {i: n for n, i in ids.items()}
+    for m in gallery_metas():  # (by id, else by name; the file's content is checked when deleting)
+        k = by_id.get(m.get("lora_id", ""), m.get("lora", ""))
+        gal[k] = gal.get(k, 0) + 1
     rows = []
     for f in sorted(lora_dir().glob("*.safetensors")) if lora_dir().is_dir() else []:
         info = lora_info(f.name, rec)
@@ -2593,7 +2670,7 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
                 "checkpoint": info.get("checkpoint"),
                 "in_use": d[1] if d else "",
                 "in_use_model": d[0] if d else "",
-                "results": used.get(f.name, 0),
+                "results": used.get(ids.get(f.name, ""), 0) + used.get(f.name, 0),
                 "gallery": gal.get(f.name, 0),
                 **ACCOUNTS.tag("model", model or "-"),
             }
@@ -2659,15 +2736,14 @@ async def api_loras_rename(request: Request):
         raise HTTPException(400, "That name is a model's own: use the Use button to install a LoRA as the one in use.")
     if dst.exists():
         raise HTTPException(400, f"{dst.name} already exists")
-    refs = lora_references(src)
-    if refs["results"] or refs["gallery"]:
-        raise HTTPException(409, lora_in_use_message(src.name, refs, "renamed"))
+    adopt_legacy_refs(src)  # (results and gallery items follow the id from now on)
     with _lock:
         src.rename(dst)
         rec = _load("installed.json", {})
         if src.name in rec:
             rec[dst.name] = rec.pop(src.name)
             _save("installed.json", rec)
+    move_lora_id(src.name, dst.name)
     return {"renamed": dst.name}
 
 
@@ -2697,6 +2773,10 @@ async def api_loras_delete(request: Request):
             done.append(f.name)
             rec.pop(f.name, None)
         _save("installed.json", rec)
+        ids = _load("lora_ids.json", {})
+        for f in todo:
+            ids.pop(f.name, None)
+        _save("lora_ids.json", ids)
     if kept and not done:
         raise HTTPException(409, " ".join(kept))
     return {"deleted": done, "kept": kept}
@@ -4008,6 +4088,8 @@ def gallery_row(m: dict) -> dict:
         for k in ("id", "name", "created", "folder", "tags", "note", "seed", "model", "group", "kind", "lora", "w", "h")
     }
     row["epoch"] = (m.get("lora_info") or {}).get("epoch")
+    if m.get("lora_id"):  # (the file may have been renamed since it was saved)
+        row["lora"] = lora_name_of(m["lora_id"]) or m.get("lora")
     return tagged("gallery", m["id"], row)
 
 
@@ -4051,9 +4133,11 @@ async def api_gallery_add(request: Request):
     lora = params.get("lora", "")
     info: dict[str, Any] = {}
     sha = ""
+    lid = params.get("lora_id") or ""
     lf = lora_dir() / lora if lora and lora == Path(lora).name else None
     if lf is not None and lf.is_file():
         li = lora_info(lora)
+        lid = lid or lora_id(lora)
         info = {k: li.get(k) for k in ("model", "checkpoint", "epoch", "final", "trained", "installed_at", "size")}
         with contextlib.suppress(OSError):
             sha = file_sha(lf)
@@ -4072,6 +4156,7 @@ async def api_gallery_add(request: Request):
         "group": params.get("group", ""),
         "kind": params.get("kind", ""),
         "lora": lora,
+        "lora_id": lid,
         "lora_sha": sha,
         "lora_info": info,
         "params": params,

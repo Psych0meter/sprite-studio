@@ -60,7 +60,7 @@ scripts/
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
 | `$PX_OUTPUT/uploads/<id>/`, `picked/<id>/`, `recoloured/<id>/` (`<id>` is the user's id, `U-...`) | what a user sends for a generation, exports as picks, or recolours from a source they only read |
-| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
+| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `lora_ids.json` (the stable id of each LoRA file), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -147,7 +147,7 @@ it when the run finishes (`follow_up`). `GET /api/train/<model>` reports
 `GET /api/loras` lists ComfyUI's LoRA files (model from `installed.json`, else from the
 trigger the name starts with; epoch; the number of results whose `job.txt` names the file);
 `POST /api/loras/use|rename|delete` change them (a model's own `<trigger>[_xl].safetensors`
-cannot be renamed or a rename target).
+cannot be renamed or a rename target; a rename keeps the file's id).
 `GET /api/models/<id>/prompt?group=&kind=` returns the prompt the model builds
 for a group and a kind; the Preview prompts editor uses it to start a row.
 The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
@@ -263,10 +263,17 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   `/delete`, `/export` (a zip of PNGs named after the sprites plus
   `manifest.json`; `folders` keeps the gallery folders). Folders and tags are
   labels on the item, not directories. Items outlive their results (they are
-  copies). `lora_references(file)` counts the result folders using a LoRA name
-  (every user's, by `lora=` in `job.txt`) and the gallery items made with it
-  (by name, and by content hash when recorded); while either is non-zero
-  `/api/loras/delete` and `/rename` answer 409. `install_lora` never
+  copies). Links to a LoRA are by id, never by file name: `lora_ids.json`
+  (`{file name: uuid}`, made by `lora_id(name)` on first use, moved with the file
+  by rename and archive, dropped on delete) gives each file a UUID; `pxmake.sh`
+  writes it as `lora_id=` (from `PX_LORA_ID`) after `lora=` in `job.txt`, and a
+  gallery item stores `lora_id`. `lora_references(file)` counts the result
+  folders (every user's) and gallery items with that id; older ones that have
+  only a name (or name plus content hash) are matched by that, and
+  `adopt_legacy_refs` stamps them with the id just before a rename (rewriting
+  the first line of their `job.txt`, the bin included). The name shown comes from
+  the id (`lora_name_of`), so a rename changes nothing for them. While a count
+  is non-zero `/api/loras/delete` answers 409; `/rename` is always allowed. `install_lora` never
   overwrites: an existing file is first renamed `<stem>_<mtime>.safetensors`
   with its install record (`archive_lora`); `train_lora.sh` does the same for
   `install`, and moves the last run's checkpoints and previews to

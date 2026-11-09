@@ -2007,7 +2007,7 @@ routes.loras = async (main) => {
 // ---------------------------------------------------------------- Gallery
 //
 // The sprites a user keeps: a copy of the image and the recipe (LoRA, epoch, seed, prompt...) that made it. It stays
-// when its result is deleted; while it is here the LoRA it was made with cannot be deleted or renamed.
+// when its result is deleted; while it is here the LoRA it was made with cannot be deleted.
 
 async function downloadGalleryZip(ids, folders) {
   try {
@@ -2051,7 +2051,7 @@ function galleryDialog(id, folders, onChange) {
             row("Model", g.model), row("Group", g.group), row("Kind", g.kind),
             row("Settings", Object.entries(p).filter(([k]) => !["name", "model", "group", "kind", "lora"].includes(k)).map(([k, v]) => `${k}=${v}`).join("  ")),
             row("Prompt", g.prompt), row("Extra", g.what), row("Saved", fmtTime(g.created)), row("Owner", g.owner))),
-          h("p", { class: "hint" }, "The recipe cannot be changed. The LoRA file cannot be deleted or renamed while this image is in the gallery."))),
+          h("p", { class: "hint" }, "The recipe cannot be changed. The LoRA file cannot be deleted while this image is in the gallery (renaming it is fine)."))),
       h("div", { class: "stack", style: { gap: "8px", marginTop: "12px" } },
         h("label", {}, "Name", name), h("label", {}, "Folder", folder), h("label", {}, "Tags", tags), h("label", {}, "Note", note)),
       h("div", { class: "row", style: { marginTop: "16px", justifyContent: "space-between", flexWrap: "wrap" } },
@@ -2241,7 +2241,7 @@ routes.lorafiles = async (main) => {
         h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end", flexWrap: "nowrap" } },
           f.model && !f.in_use ? h("button", { class: "btn sm primary", title: `Install as the ${f.base} LoRA that ${f.model_label} generates with`,
             onclick: () => act(() => api("/loras/use", { body: { name: f.name } }), "Installed as the one in use") }, "Use") : null,
-          h("button", { class: "btn sm", disabled: !!f.in_use || !!f.results || !!f.gallery, title: f.in_use ? "The LoRA a model generates with keeps its name" : f.results || f.gallery ? "Results or gallery images use this name" : "Rename",
+          h("button", { class: "btn sm", disabled: !!f.in_use, title: f.in_use ? "The LoRA a model generates with keeps its name" : "Rename (results and gallery images follow)",
             onclick: async () => {
               const cur = f.name.replace(/\.safetensors$/, "");
               const to = await askText("Rename the LoRA", { input: "New name", value: cur, ok: "Rename" });
@@ -2254,7 +2254,7 @@ routes.lorafiles = async (main) => {
             } }, "Delete")))))))));
     const pgr = pager(shown.length, paging, () => { store.set("lorafiles_size", paging.size); load(); });
     if (pgr) body.append(pgr);
-    body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes, and the gallery images kept with it. A LoRA that results or gallery images still use cannot be renamed or deleted, and installing a new LoRA over a name keeps the old file as name_<time>.safetensors."));
+    body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes, and the gallery images kept with it. A LoRA that results or gallery images still use cannot be deleted (renaming is fine: they follow the file), and installing a new LoRA over a name keeps the old file as name_<time>.safetensors."));
   };
   await load();
 };

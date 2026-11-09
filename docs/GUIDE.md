@@ -349,17 +349,19 @@ shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
 - **Use** installs a file as the one its model generates with (same as
   *Use* on the Train page, for files you added earlier). The SDXL file is
   kept apart from the SD 1.5 one.
-- **Rename** a file. The one in use keeps its name, because the name is how
-  the app finds it; a name that belongs to a model is refused.
+- **Rename** a file. The one a model generates with keeps its name (the model
+  looks for it by that name); a name that belongs to a model is refused.
 - **Nothing is overwritten.** Installing a LoRA over a name that exists
   (*Use*, or *Install* on the Train page) first renames the old file to
   `<name>_<time>.safetensors` (the time is a unix time), so a result or a
   gallery image made with it can still be explained, and you can *Use* the old
   file again. The same goes for training: a new run moves the checkpoints and
   previews of the last one to `previous/<time>/` in the model's output folder.
-- A LoRA that **results or gallery images still use cannot be renamed or
-  deleted** (the buttons are off, with the reason in their tooltip). Delete
-  those results (and the gallery images made with it) first.
+- A LoRA that **results or gallery images still use cannot be deleted** (the
+  button is off, with the reason in its tooltip). Delete those results (and the
+  gallery images made with it) first. **Renaming is always fine**: results and
+  gallery images follow the file by an id the app keeps for it, not by its name,
+  and show the new name.
 - **Delete** one file, or tick several and delete them together. The
   trained checkpoints of the Train page are never touched, so a deleted
   LoRA can be installed again. Deleting the one in use leaves the model
@@ -414,8 +416,8 @@ the seed, model, group, kind, settings, prompt and extras. Then:
 
 - It **stays even when its result is deleted**, and the recipe cannot be
   edited; only the name, folder, tags and note can. While an image is in the
-  gallery, **its LoRA cannot be deleted or renamed**; remove the image from
-  the gallery and the LoRA is free again.
+  gallery, **its LoRA cannot be deleted** (it can be renamed; the image follows);
+  remove the image from the gallery and the LoRA is free again.
 - **Share** an image (button in its dialog) with chosen people or everyone;
   they can look at it and export it, not change or remove it. Each person has
   their own gallery.

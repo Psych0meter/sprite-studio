@@ -56,10 +56,35 @@ def test_a_gallery_image_survives_its_result_and_pins_its_lora(client, env):
     r = client.post("/api/loras/delete", json={"names": ["pxunit.safetensors"]})
     assert r.status_code == 409 and "gallery image" in r.text
     assert lora.exists()
-    assert client.post("/api/loras/rename", json={"name": "pxunit.safetensors", "to": "pxunit_new"}).status_code == 409
     assert client.post("/api/gallery/delete", json={"ids": [gid]}).json() == {"deleted": 1}
     assert client.post("/api/loras/delete", json={"names": ["pxunit.safetensors"]}).status_code == 200
     assert not lora.exists()
+
+
+def test_renaming_a_lora_breaks_nothing(client, env):
+    """Results and gallery items point at the file's id, so a used LoRA can be renamed freely."""
+    lora = lora_file(env)
+    old_result = make_result(env, "old_one")  # older: job.txt has only the name
+    new_result = make_result(env, "new_one")
+    import app as webapp
+
+    lid = webapp.lora_id("pxunit.safetensors")
+    head = new_result / "job.txt"
+    head.write_text(head.read_text().replace("lora=pxunit.safetensors", f"lora=pxunit.safetensors lora_id={lid}"))
+    gid = client.post("/api/gallery", json={"path": str(new_result / "new_one_s11.png")}).json()["id"]
+    old_gid = client.post("/api/gallery", json={"path": str(old_result / "old_one_s11.png")}).json()["id"]
+    assert client.post("/api/loras/rename", json={"name": "pxunit.safetensors", "to": "pxunit_new"}).status_code == 200
+    assert not lora.exists() and (lora.parent / "pxunit_new.safetensors").exists()
+    row = next(r for r in client.get("/api/loras").json()["files"] if r["name"] == "pxunit_new.safetensors")
+    assert row["results"] == 2 and row["gallery"] == 2  # all four still point at it
+    assert client.get(f"/api/gallery/{gid}").json()["lora"] == "pxunit_new.safetensors"
+    assert client.get(f"/api/gallery/{old_gid}").json()["lora"] == "pxunit_new.safetensors"
+    # and renaming again, the older result (now with the id in its job.txt) follows too
+    assert client.post("/api/loras/rename", json={"name": "pxunit_new", "to": "pxunit_final"}).status_code == 200
+    row = next(r for r in client.get("/api/loras").json()["files"] if r["name"] == "pxunit_final.safetensors")
+    assert row["results"] == 2 and row["gallery"] == 2
+    r = client.post("/api/loras/delete", json={"names": ["pxunit_final"]})
+    assert r.status_code == 409  # still in use: only deleting is blocked
 
 
 def test_a_lora_with_results_cannot_be_deleted(client, env):
