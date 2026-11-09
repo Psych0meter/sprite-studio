@@ -1,6 +1,7 @@
 """The web app's API, on empty isolated folders (no GPU, no ComfyUI)."""
 
 import shutil
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -307,7 +308,7 @@ def test_jobs_clear_only_successful(client):
         webapp.JOBS.jobs.clear()
 
 
-def test_updates_compares_with_upstream(client, env, tmp_path):
+def test_updates_compare_with_the_latest_release_not_the_branch_tip(client, env, tmp_path, monkeypatch):
     import subprocess
 
     def git(cwd, *a):
@@ -321,15 +322,21 @@ def test_updates_compares_with_upstream(client, env, tmp_path):
     (up / "f").write_text("1")
     git(up, "add", "f")
     git(up, "commit", "-q", "-m", "first")
-    # the ComfyUI folder itself is the checkout
-    shutil.rmtree(env["comfy"])
+    git(up, "tag", "v1.0.0")
+    shutil.rmtree(env["comfy"])  # the ComfyUI folder itself is the checkout
     subprocess.run(["git", "clone", "-q", str(up), str(env["comfy"])], check=True, capture_output=True)
     (up / "f").write_text("2")
-    git(up, "commit", "-qam", "second")
+    git(up, "commit", "-qam", "unreleased work")
+    monkeypatch.setenv("SG_UPDATE_REPO", str(up))
+    monkeypatch.setenv("PXUPDATE_APP", str(tmp_path / "installed"))  # (an installation: a copy, not a checkout)
     items = {i["name"]: i for i in client.get("/api/updates?force=1").json()["items"]}
-    assert items["ComfyUI"]["ok"] and items["ComfyUI"]["behind"] == 1
-    assert items["ComfyUI"]["commits"][0].endswith("second")
+    assert items["ComfyUI"]["ok"] and items["ComfyUI"]["behind"] == 0  # the branch moved, no release did
+    git(up, "tag", "v1.1.0")
+    items = {i["name"]: i for i in client.get("/api/updates?force=1").json()["items"]}
+    assert items["ComfyUI"]["behind"] == 1 and items["ComfyUI"]["latest"] == "v1.1.0"
     assert not items["kohya sd-scripts"]["ok"]
+    studio = items["Sprite Studio"]
+    assert studio["ok"] and studio["latest"] == "v1.1.0" and studio["behind"] == 1 and studio["can_roll_back"] is False
 
 
 def test_speed_ignores_jobs_that_did_not_really_finish(client):
@@ -420,3 +427,72 @@ def test_training_speed_is_seconds_per_step_of_each_base_model(client, tmp_path)
         assert webapp.speed()["train_sec_per_step"] == {"sd15": 2.0, "sdxl": 3.6}
     finally:
         webapp.JOBS.jobs.clear()
+
+
+def test_a_leftover_update_marker_is_cleared_and_a_finished_studio_update_restarts(client, monkeypatch):
+    import app as webapp
+
+    marker = webapp.STATE_DIR / "update_pending"
+    marker.mkdir(parents=True)
+    (marker / "to").write_text("0.0.1-not-this-one")
+    webapp.confirm_update_when_healthy(0.0)
+    assert not marker.exists()  # (the running version is not the one the marker waits for)
+    seen = []
+    monkeypatch.setattr(webapp, "restart_self", lambda delay=3.0: seen.append(delay))
+    webapp.follow_up({"kind": "update", "status": "done", "meta": {"target": "studio"}})
+    webapp.follow_up({"kind": "update", "status": "failed", "meta": {"target": "studio"}})
+    webapp.follow_up({"kind": "update", "status": "done", "meta": {"target": "comfyui"}})
+    assert seen == [3.0]
+
+
+def test_update_items_link_to_github_and_carry_release_notes(monkeypatch):
+    import app as webapp
+
+    assert webapp.github_slug("https://github.com/Psych0meter/sprite-studio.git") == "Psych0meter/sprite-studio"
+    assert webapp.github_slug("git@github.com:comfyanonymous/ComfyUI.git") == "comfyanonymous/ComfyUI"
+    assert webapp.github_slug("https://example.com/a/b.git") is None
+    assert webapp.github_slug("/tmp/local/repo") is None
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"body": "- **Updates**: new things"}'
+
+    monkeypatch.setattr(webapp.urllib.request, "urlopen", lambda *a, **k: Resp())
+    webapp._notes_cache.clear()
+    out = webapp.release_links("https://github.com/o/r", "v1.2.0", True)
+    assert out["repo_url"] == "https://github.com/o/r" and out["release_url"].endswith("/releases/tag/v1.2.0")
+    assert out["notes"].startswith("- **Updates**")
+    assert webapp.release_links("https://github.com/o/r", "v1.2.0", False)["repo_url"]  # no notes asked: none fetched
+    assert webapp.release_links("/tmp/x", "v1.2.0", True) == {}
+
+
+def test_status_lists_the_disks_the_app_works_on(client):
+    disks = client.get("/api/status").json()["disks"]
+    assert disks and all(d["total"] >= d["used"] > 0 and d["free"] >= 0 and d["what"] for d in disks)
+    import app as webapp
+
+    d = webapp.disk_info(Path("/nonexistent/deep/path"))  # (the nearest existing folder answers)
+    assert d["disk"]["total"] > 0
+    assert webapp.tree_size(Path("/nonexistent")) == 0
+
+
+def test_the_catalog_reads_the_results_once_however_many_loras_there_are(client, env, monkeypatch):
+    import app as webapp
+
+    for i in range(5):
+        (env["comfy"] / "models" / "loras" / f"extra{i}.safetensors").write_bytes(b"x")
+    calls = []
+    real = webapp._count_lora_results
+    monkeypatch.setattr(webapp, "_count_lora_results", lambda root: calls.append(1) or real(root))
+    webapp._lora_count_cache.update(at=0.0, root="", data={})
+    assert client.get("/api/catalog").status_code == 200
+    assert len(calls) == 0  # the catalog needs no counts at all
+    client.get("/api/loras")
+    client.get("/api/loras")
+    assert len(calls) == 1  # and the LoRA page reuses the answer for a few seconds

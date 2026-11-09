@@ -114,6 +114,7 @@ function fmtDur(s) {
   if (s < 3600) return Math.floor(s / 60) + " min " + String(s % 60).padStart(2, "0") + " s";
   return Math.floor(s / 3600) + " h " + String(Math.floor(s % 3600 / 60)).padStart(2, "0") + " min";
 }
+const fmtBytes = (b) => b >= 1e9 ? (b / 1073741824).toFixed(1) + " GB" : b >= 1e6 ? (b / 1048576).toFixed(0) + " MB" : Math.max(0, Math.round(b / 1024)) + " KB";
 const fmtMB = (b) => b ? (b / 1048576).toFixed(b > 1e9 ? 0 : 1) + " MB" : "";
 function ago(t) {
   const s = Date.now() / 1000 - t;
@@ -216,7 +217,14 @@ const S = {
 function saveView() { store.set("view", S.view); }
 function setTray(t) { S.tray = t; store.set("tray", t); $("#tray-count").textContent = t.length || ""; }
 
-async function loadCatalog() { S.catalog = await api("/catalog"); drawProjectPicker(); return S.catalog; }
+// Calls made together (the router and the page both ask on a first visit) share one request.
+let catalogCall = null;
+async function loadCatalog() {
+  if (!catalogCall) catalogCall = api("/catalog").finally(() => { catalogCall = null; });
+  S.catalog = await catalogCall;
+  drawProjectPicker();
+  return S.catalog;
+}
 
 /** The project shown: every page lists only its models. */
 S.project = store.get("project", "");
@@ -281,6 +289,13 @@ const statusLoop = autoRefresh({
   global: true,
 });
 
+// A label, a small bar (amber from 80 %, red from 92 % when `warn`) and a value, for the status line.
+function meter(label, frac, text, title, warn = true) {
+  const f = Math.max(0, Math.min(1, frac || 0));
+  const cls = "meter" + (warn && f > 0.92 ? " bad" : warn && f > 0.8 ? " warn" : "");
+  return h("span", { class: cls, title }, label, h("span", { class: "bar" }, h("i", { style: { width: Math.round(f * 100) + "%" } })), text);
+}
+
 function renderStatus() {
   const st = S.status;
   const c = st.comfy;
@@ -289,11 +304,16 @@ function renderStatus() {
   line.innerHTML = "";
   line.append(h("span", {}, h("i", { class: "dot " + (c.up ? "up" : "down") }), c.up ? "ComfyUI running" : "ComfyUI stopped"));
   if (st.gpu) {
-    line.append(h("span", {}, `${st.gpu.name.replace("NVIDIA GeForce ", "")}  memory ${(st.gpu.mem_used / 1024).toFixed(1)} of ${(st.gpu.mem_total / 1024).toFixed(0)} GB, GPU busy ${st.gpu.util} %, ${st.gpu.temp} °C`));
-    line.lastChild.title = "Memory: what is allocated on the card. GPU busy: the share of time the card was computing (100 % while training or rendering is normal, it is not memory).";
+    const g = st.gpu;
+    line.append(meter(g.name.replace("NVIDIA GeForce ", ""), g.mem_used / g.mem_total, `${(g.mem_used / 1024).toFixed(1)} of ${(g.mem_total / 1024).toFixed(0)} GB`,
+      "Memory: what is allocated on the card."));
+    line.append(meter("GPU busy", g.util / 100, `${g.util} %  ${g.temp} °C`,
+      "The share of time the card was computing (100 % while training or rendering is normal, it is not memory).", false));
   } else if (c.up && c.vram_total) {
-    line.append(h("span", {}, `${(c.device || "GPU").replace("NVIDIA GeForce ", "")}  ${((c.vram_total - c.vram_free) / 1073741824).toFixed(1)} of ${(c.vram_total / 1073741824).toFixed(0)} GB in use`));
+    const used = c.vram_total - c.vram_free;
+    line.append(meter((c.device || "GPU").replace("NVIDIA GeForce ", ""), used / c.vram_total, `${(used / 1073741824).toFixed(1)} of ${(c.vram_total / 1073741824).toFixed(0)} GB`, "Memory in use on the card."));
   }
+  (st.disks || []).forEach((d) => line.append(meter("Disk", d.used / d.total, `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}`, `Holds: ${d.what.join(", ")}`)));
   const aj = $("#active-job");
   aj.innerHTML = "";
   const run = st.running.find((j) => j.lane === "gpu") || st.running[0];
@@ -844,9 +864,12 @@ async function route() {
   const parts = path.split("/").filter(Boolean);
   const name = parts[0] || "";
   document.querySelectorAll(".rail a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === name));
-  const main = $("#main");
-  main.innerHTML = "";
+  // A fresh element for every page: a page still loading when the user moves on keeps drawing into the one that
+  // was dropped, instead of appending (Train under Results) to the new page.
+  const old = $("#main");
+  const main = old.cloneNode(false);
   main.classList.remove("is-loading");
+  old.replaceWith(main);
   const params = new URLSearchParams(query || "");
   const loading = h("div", { class: "page-loading", role: "status" }, h("span", { class: "spinner" }), " Loading…");
   const slow = setTimeout(() => main.append(loading), 300);
@@ -1662,7 +1685,7 @@ routes.train = async (main, parts) => {
       s2.append(h("div", { class: "inline-fields" },
         numField("Epochs", "epochs", 1, 60, 1, "passes over the set; a checkpoint every 2", xl ? "8" : "12"),
         numField("Rank", "dim", 4, 128, 4, xl ? "LoRA size; 16 keeps SDXL in 8 GB" : "LoRA size; 32 is plenty", xl ? "16" : "32"),
-        numField("Learning rate", "lr", 0.00001, 0.001, 0.00001, "1e-4: slower is safer"),
+        lrField(),
         xl ? null : h("div", { class: "field" }, h("label", {}, "Precision"),
           h("select", { onchange: (e) => { opts.precision = e.target.value; store.set("precisionChosen", true); keep(); } },
             [["auto", "Automatic"], ["no", "Full (fp32)"], ["fp16", "Half (fp16)"], ["bf16", "Half (bf16, RTX 30 and newer)"]]
@@ -1779,6 +1802,16 @@ routes.train = async (main, parts) => {
   let refreshEstimate = () => {};
   const numField = (label, key, min, max, step, hint, placeholder) => h("div", { class: "field" }, h("label", {}, label),
     h("input", { type: "number", min, max, step, value: opts[key], placeholder, oninput: (e) => { opts[key] = e.target.value; keep(); if (key === "epochs") refreshEstimate(); } }), h("div", { class: "hint" }, hint));
+  // The learning rate is shown as a plain decimal in the browser's own format (0,0001 or 0.0001), never as an
+  // exponent. A text input, so what is typed stays as typed; 1e-4, 0.0001 and 0,0001 are all read.
+  const lrNumber = (v) => Number(String(v).trim().replace(",", "."));
+  const lrText = (v) => { const n = lrNumber(v); return n > 0 ? n.toLocaleString(undefined, { maximumFractionDigits: 8, useGrouping: false }) : String(v); };
+  const lrField = () => {
+    const input = h("input", { type: "text", inputmode: "decimal", value: lrText(opts.lr), placeholder: lrText(0.0001),
+      oninput: (e) => { opts.lr = String(lrNumber(e.target.value) || ""); keep(); },
+      onchange: (e) => { const n = lrNumber(e.target.value); if (n > 0 && n <= 0.01) { e.target.value = lrText(n); opts.lr = String(n); keep(); } else { toast("Learning rate: a small number such as " + lrText(0.0001) + " (between " + lrText(0.00001) + " and " + lrText(0.001) + " is usual)", true); } } });
+    return h("div", { class: "field" }, h("label", {}, "Learning rate"), input, h("div", { class: "hint" }, `${lrText(0.0001)} is a good start: smaller is slower and safer`));
+  };
   const install = async (path, as) => {
     const r = await attempt(() => api(`/train/${cat}/install`, { body: { checkpoint: path, as } }));
     if (r) { toast(`Installed as ${r.installed}`); await loadCatalog(); redraw(); }
@@ -3017,29 +3050,43 @@ routes.settings = async (main) => {
 routes.users = (main) => usersPage(main);
 
 routes.updates = async (main) => {
-  if (!isAdmin()) { main.append(h("div", { class: "note bad" }, "Only an administrator updates ComfyUI and kohya sd-scripts.")); return; }
+  if (!isAdmin()) { main.append(h("div", { class: "note bad" }, "Only an administrator updates Sprite Studio, ComfyUI and kohya sd-scripts.")); return; }
   const box = h("div", { class: "stack" });
   const note = h("p", { class: "muted small" });
-  main.append(head("Updates", "ComfyUI and kohya sd-scripts, compared with their upstream repositories. Checking only reads (a git fetch); updating pulls the new code and its Python packages, never touches your models, LoRAs or results."),
+  main.append(head("Updates", "Sprite Studio, ComfyUI and kohya sd-scripts move to their latest released version only (a vX.Y.Z tag), never to unfinished work. Checking only reads; updating never touches your models, LoRAs or results. If an update fails its check, the previous version is put back automatically."),
     h("div", { class: "row", style: { marginBottom: "12px" } }, h("button", { class: "btn", type: "button", id: "recheck" }, "Check again"), note), box);
-  const targets = { "ComfyUI": "comfyui", "kohya sd-scripts": "sd-scripts" };
+  const targets = { "Sprite Studio": "studio", "ComfyUI": "comfyui", "kohya sd-scripts": "sd-scripts" };
   let data = null, checking = false;
+  const start = async (target, text, title, ok) => {
+    if (!(await askConfirm(text, { ok, title }))) return;
+    const job = await attempt(() => api("/updates/apply", { body: { target } }), "Started");
+    if (job) location.hash = "#/jobs/" + job.id;
+  };
+  const studioNotes = (it) => [
+    it.pending ? h("div", { class: "note warn" }, `Version ${it.pending.to} was installed and has not been confirmed yet. It is confirmed once it has run for 25 seconds; if it does not start, the previous version comes back on its own.`) : null,
+    it.last && it.last.status === "rolled back" ? h("div", { class: "note bad" }, `The last update (to ${it.last.from || "?"}) was rolled back: ${it.last.reason || "it failed"}. You are on ${it.last.to}.`) : null,
+  ];
   const draw = () => {
     note.textContent = checking ? "Checking…" : data ? "Checked " + fmtTime(data.checked) : "";
     box.replaceChildren(...(data ? data.items.map((it) => h("div", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, it.name),
-        it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.behind} newer commit${it.behind === 1 ? "" : "s"}`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
+        it.ok ? (it.behind ? h("span", { class: "tag amber" }, `${it.latest} available`) : h("span", { class: "tag ok" }, "up to date")) : h("span", { class: "tag bad" }, "cannot check")),
+      it.studio ? studioNotes(it) : null,
+      it.backups_bytes ? h("p", { class: "small muted" }, `Kept previous versions: ${fmtBytes(it.backups_bytes)}`) : null,
+      it.repo_url ? h("p", { class: "small" }, h("a", { href: it.repo_url, target: "_blank", rel: "noopener noreferrer" }, "GitHub page"),
+        it.behind && it.release_url ? [" · ", h("a", { href: it.release_url, target: "_blank", rel: "noopener noreferrer" }, `Release ${it.latest}`)] : null) : null,
+      it.behind && it.notes ? h("details", { class: "small", open: true }, h("summary", {}, `What's new in ${it.latest}`),
+        h("pre", { class: "mono", style: { whiteSpace: "pre-wrap", maxHeight: "260px", overflow: "auto", margin: "6px 0 10px" } }, it.notes)) : null,
       it.ok ? [
-        h("p", { class: "small" }, `Installed ${it.current} on ${it.branch}`, it.behind ? `, latest ${it.latest}` : "", h("span", { class: "muted mono" }, "  " + it.path)),
-        it.behind ? h("ul", { class: "small mono", style: { margin: "6px 0 10px 18px", padding: 0 } }, it.commits.map((c) => h("li", {}, c))) : null,
-        it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, git pull, git stash pop), or the update refuses.") : null,
-        it.behind ? h("button", { class: "btn primary", type: "button", disabled: it.dirty, onclick: async () => {
-          const extra = it.name === "ComfyUI" ? " ComfyUI restarts at the end." : " No training should be running.";
-          if (!(await askConfirm(`Update ${it.name} from ${it.current} to ${it.latest}?${extra} It runs as a job: you can follow it in Jobs.`, { ok: "Update", title: "Update " + it.name }))) return;
-          const job = await attempt(() => api("/updates/apply", { body: { target: targets[it.name] } }), "Update started");
-          if (job) location.hash = "#/jobs/" + job.id;
-        } }, "Update now") : null,
-      ] : h("p", { class: "muted small" }, it.error || "unknown error"))) : []));
+        h("p", { class: "small" }, `Installed ${it.current}`, `, latest release ${it.latest}`, h("span", { class: "muted mono" }, "  " + it.path)),
+        it.dirty ? h("div", { class: "note warn" }, "Tracked files were edited here: update by hand (git stash, then update, then git stash pop), or the update refuses.") : null,
+        it.behind ? h("button", { class: "btn primary", type: "button", disabled: it.dirty, onclick: () => start(targets[it.name],
+          it.studio ? `Update Sprite Studio from ${it.current} to ${it.latest}? No job may be running. The page restarts by itself in a few seconds; if the new version does not start or answer, the previous one is put back automatically.`
+            : `Update ${it.name} from ${it.current} to ${it.latest}?${it.name === "ComfyUI" ? " ComfyUI restarts at the end." : " No training should be running."} If its check fails, the previous version is put back. It runs as a job: you can follow it in Jobs.`,
+          "Update " + it.name, "Update") }, "Update now") : null,
+      ] : h("p", { class: "muted small" }, it.error || "unknown error"),
+      it.studio && it.can_roll_back ? h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "btn ghost sm", type: "button", onclick: () => start("studio-rollback",
+        "Put the previous Sprite Studio version back (the copy kept before the last update)? The page restarts by itself.", "Go back", "Go back") }, "Go back to the previous version")) : null)) : []));
   };
   const check = async (force) => {
     checking = true; draw();

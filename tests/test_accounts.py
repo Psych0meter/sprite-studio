@@ -60,7 +60,7 @@ def test_what_existed_before_accounts_goes_to_the_first_administrator(web, env):
     (env["output"] / "old_run" / "job.txt").write_text("name=old\n")
     code = web.module.ACCOUNTS.setup_code()
     web.post("/api/auth/setup", json={"username": "root", "password": ADMIN_PASSWORD, "code": code})
-    assert web.module.ACCOUNTS.entry("result", "old_run")["owner"] == "root"
+    assert web.module.ACCOUNTS.owner("result", "old_run") == "root"
 
 
 def test_wrong_passwords_lock_the_account_for_a_while(client):
@@ -235,7 +235,7 @@ def test_jobs_are_private_but_the_queue_shows_the_gpu_is_busy(team):
     app = admin.module
     job = app.JOBS.submit("test", "Ann's secret job", ["true"], lane="cpu")
     assert job["owner"] == ""  # (submitted by the app itself, no request)
-    job["owner"] = "ann"
+    job["owner"] = app.ACCOUNTS.id_of("ann")
     assert any(j["title"] == "Ann's secret job" for j in ann.get("/api/jobs").json())
     assert not any(j["title"] == "Ann's secret job" for j in bob.get("/api/jobs").json())
     assert bob.get(f"/api/jobs/{job['id']}").status_code == 404
@@ -258,7 +258,7 @@ def test_picks_are_per_user(team, env):
     bob.post("/api/picks", json={"path": str(png), "picked": True, "as": "mine"})
     assert ann.get("/api/picks").json()[str(png)]["as"] != "mine"
     out = bob.post("/api/picks/export", json={}).json()
-    assert "bob" in out["folder"]
+    assert admin.module.ACCOUNTS.id_of("bob") in out["folder"]  # a folder named by the id, not the name
 
 
 # ---- sharing
@@ -333,7 +333,7 @@ def test_a_result_folder_name_taken_by_someone_else_is_refused(team):
             app.claim_folder("batch-mine")
         assert e.value.status_code == 400 and "belongs to someone else" in e.value.detail
         app.claim_folder("batch-new")  # a new name is claimed
-        assert app.ACCOUNTS.entry("result", "batch-new")["owner"] == "bob"
+        assert app.ACCOUNTS.owner("result", "batch-new") == "bob"
     finally:
         app.acc.CURRENT.reset(token)
     app.claim_folder("batch-mine")  # the app itself is trusted
@@ -369,6 +369,10 @@ def test_updating_is_for_administrators_and_waits_for_an_idle_gpu(team, monkeypa
     monkeypatch.setattr(app.JOBS, "submit", lambda *a, **k: seen.append((a, k)) or {"id": "j1", "kind": a[0]})
     r = admin.post("/api/updates/apply", json={"target": "sd-scripts"})
     assert r.status_code == 200 and seen[0][0][0] == "update" and seen[0][0][2][-1] == "sd-scripts"
+    app.JOBS.jobs["idle"] = {"status": "running", "lane": "cpu", "kind": "batch", "owner": "ann"}
+    assert admin.post("/api/updates/apply", json={"target": "studio"}).status_code == 409  # it restarts: no job at all
+    app.JOBS.jobs.pop("idle")
+    assert admin.post("/api/updates/apply", json={"target": "studio"}).status_code == 200
     app.JOBS.jobs["busy"] = {"status": "running", "lane": "gpu", "kind": "train", "owner": "ann"}
     assert admin.post("/api/updates/apply", json={"target": "comfyui"}).status_code == 409
     app.JOBS.jobs.pop("busy")
@@ -429,3 +433,113 @@ def test_administrator_only_routes_refuse_users_and_anonymous(team, web, method,
     for c, want in ((ann, 403), (TestClient(web.module.app), 401)):
         r = getattr(c, method)(url, **({} if method == "get" else {"json": {}}))
         assert r.status_code == want, (method, url, r.status_code)
+
+
+def test_a_new_user_with_a_deleted_users_name_starts_with_nothing(team, env):
+    admin, ann, bob = team
+    mod = admin.module
+    make_model(ann, "shared", "pxshared")
+    assert ann.put("/api/acl/model/shared", json={"users": ["bob"]}).status_code == 200
+    make_model(bob, "bobs", "pxbobs")
+    bid = mod.ACCOUNTS.id_of("bob")
+    aid = mod.ACCOUNTS.id_of("admin")
+    with mod._lock:
+        mod.JOBS.jobs["jb"] = {
+            "id": "jb", "kind": "generate", "status": "done", "returncode": 0, "error": None, "log": str(env["output"] / "jb.log"),
+            "created": 1.0, "started": 1.0, "ended": 2.0, "meta": {}, "title": "bobs job", "owner": bid, "lane": "gpu",
+        }  # fmt: skip
+        mod._save("picks.json", {"users": {bid: {"/some/path.png": {"as": "x", "time": 1}}}})
+        mod._save("projects.json", {"entries": [[bid, "Bobs project"]]})
+    (env["output"] / "uploads" / bid).mkdir(parents=True)
+    (env["output"] / "uploads" / bid / "sketch.png").write_bytes(b"x")
+
+    assert admin.delete("/api/users/bob").status_code == 200
+
+    again = signed_in(admin, "bob", "another long password")
+    assert [m["id"] for m in again.get("/api/models").json()] == []  # not ann's share, not the old model
+    assert again.get("/api/jobs").json() == [] or all(j["id"] != "jb" for j in again.get("/api/jobs").json())
+    assert again.get("/api/picks").json() == {}
+    assert all(p["name"] != "Bobs project" for p in again.get("/api/projects").json())
+    assert not (env["output"] / "uploads" / bid).exists()
+    # what was theirs went to the administrator, not away
+    assert (env["output"] / "uploads" / aid / "from_bob" / "sketch.png").exists()
+    assert mod.JOBS.jobs["jb"]["owner"] == aid
+    assert mod.ACCOUNTS.id_of("bob") not in (bid,)  # the same name, another identity
+    assert not any(bid in str(v) for v in mod.ACCOUNTS._acl().values())
+    assert mod.ACCOUNTS.tag("model", "shared")["shared_with"] == []
+    assert mod.ACCOUNTS.owner("model", "bobs") == "admin"
+
+
+def test_the_state_the_app_keeps_is_private_to_its_user(client):
+    import stat
+
+    mod = client.module
+    mod._save("x.json", {"a": 1})
+    for p in (mod.STATE_DIR / "x.json", mod.STATE_DIR / "auth.log"):
+        assert p.exists() and stat.S_IMODE(p.stat().st_mode) == 0o600, p
+    assert stat.S_IMODE(mod.STATE_DIR.stat().st_mode) == 0o700
+
+
+def test_the_api_is_not_cached_and_the_schema_is_not_published(client):
+    r = client.get("/api/status")
+    assert r.headers["cache-control"] == "private, no-store"
+    assert client.get("/openapi.json").status_code in (401, 404) or "paths" not in client.get("/openapi.json").text
+
+
+def test_training_does_not_start_while_comfyui_is_still_running(client, monkeypatch):
+    mod = client.module
+    monkeypatch.setattr(mod, "comfy_status", lambda: {"up": True})
+    monkeypatch.setattr(mod, "comfy_service", lambda action: (True, ""))
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="still running"):
+        mod.JOBS._free_gpu({"id": "t", "log": "/dev/null"})
+
+
+def test_an_installation_keyed_by_names_is_migrated_to_ids(team, env):
+    """What 0.3.0 and 0.3.1 wrote (names everywhere, no ids) keeps working after the update."""
+    import json
+
+    admin, ann, bob = team
+    mod = admin.module
+    make_model(ann, "units")
+    mod.ACCOUNTS.share("model", "units", ["bob"], False)
+    state = mod.STATE_DIR
+    # turn the state back into what the older versions wrote
+    users = json.loads((state / "users.json").read_text())
+    for u in users.values():
+        u.pop("id", None)
+    (state / "users.json").write_text(json.dumps(users))
+    sessions = json.loads((state / "sessions.json").read_text())
+    for v in sessions.values():
+        v.pop("uid", None)  # (sessions of the older versions did not name an id)
+    (state / "sessions.json").write_text(json.dumps(sessions))
+    (state / "acl.json").write_text(
+        json.dumps({"model": {"units": {"owner": "ann", "users": ["bob", "ghost"], "all": False}}})
+    )
+    (state / "projects.json").write_text(json.dumps({"entries": [["ann", "Game"], ["ghost", "Lost"]]}))
+    (state / "picks.json").write_text(json.dumps({"users": {"ann": {"/p.png": {"as": "x", "time": 1}}, "ghost": {}}}))
+    with mod._lock:
+        mod.JOBS.jobs["old"] = {
+            "id": "old", "kind": "generate", "status": "done", "returncode": 0, "error": None, "log": str(state / "old.log"),
+            "created": 1.0, "started": 1.0, "ended": 2.0, "meta": {}, "title": "old", "owner": "ann", "lane": "cpu",
+        }  # fmt: skip
+    (env["output"] / "uploads" / "ann").mkdir(parents=True)
+    (env["output"] / "uploads" / "ann" / "s.png").write_bytes(b"x")
+
+    mod.ACCOUNTS._cache.clear()
+    mod.ACCOUNTS.migrate_ids()
+    mod.migrate_identities()
+    mod.migrate_identities()  # again: nothing changes
+
+    aid, bid = mod.ACCOUNTS.id_of("ann"), mod.ACCOUNTS.id_of("bob")
+    assert aid.startswith("U-") and bid.startswith("U-") and aid != bid
+    assert mod.ACCOUNTS.owner("model", "units") == "ann"
+    assert mod.ACCOUNTS.tag("model", "units")["shared_with"] == ["bob"]  # the user who no longer exists is dropped
+    assert mod.JOBS.jobs["old"]["owner"] == aid
+    assert json.loads((state / "picks.json").read_text())["users"] == {aid: {"/p.png": {"as": "x", "time": 1}}}
+    assert json.loads((state / "projects.json").read_text())["entries"] == [[aid, "Game"], ["", "Lost"]]
+    assert (env["output"] / "uploads" / aid / "s.png").exists() and not (env["output"] / "uploads" / "ann").exists()
+    # and they can still use what is theirs, with the session they had
+    assert [m["id"] for m in ann.get("/api/models").json()] == ["units"]
+    assert [m["id"] for m in bob.get("/api/models").json()] == ["units"]
+    assert any(j["id"] == "old" for j in ann.get("/api/jobs").json())

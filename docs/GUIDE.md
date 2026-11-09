@@ -440,7 +440,7 @@ a batch. The preview is computed exactly as generation will do it.
 | Training precision | Automatic: bf16 on RTX 30 and newer, fp16 on RTX 20, full precision on older cards; SDXL always in half precision |
 | ComfyUI during training | stopped on cards under 15 GB (Settings: auto, always, never) |
 | Time estimates | measured from your own jobs that finished without error (failed, cancelled and partly failed ones are ignored) |
-| Updates | *Check for updates* on the Overview's ComfyUI card compares ComfyUI and kohya sd-scripts with their upstream (git fetch only). Administrators update from the **Updates** page (*Update now*: `git pull --ff-only`, requirements, ComfyUI restart; it waits for an idle GPU and refuses local changes) |
+| Updates | The **Updates** page (administrators) compares Sprite Studio, ComfyUI and kohya sd-scripts with their latest *released* version (a `vX.Y.Z` tag; unfinished work on the main branch is never installed). *Update now* installs the release and checks that it works; if the check fails the previous version is put back by itself. ComfyUI and sd-scripts wait for an idle GPU and refuse local changes. Sprite Studio waits until no job runs, then restarts (the page reconnects in a few seconds); if it does not start, it goes back to the previous version after a few attempts, and *Go back to the previous version* does it by hand. An installation that is a git checkout is updated with `git pull` instead |
 
 ## 9. Accounts and sharing
 

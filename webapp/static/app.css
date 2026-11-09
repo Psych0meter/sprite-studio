@@ -168,6 +168,10 @@ input[type=checkbox] { accent-color: var(--amber); width: 15px; height: 15px; }
 /* ---- progress, status */
 .bar { height: 6px; background: var(--line-soft); border-radius: 3px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--cyan); border-radius: 3px; transition: width 0.6s ease; }
+.meter { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.meter .bar { width: 56px; }
+.meter.warn .bar > i { background: var(--amber); }
+.meter.bad .bar > i { background: var(--err); }
 .bar.done > i { background: var(--ok); }
 .bar.failed > i { background: var(--err); }
 .status { display: inline-flex; align-items: center; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
@@ -389,3 +393,6 @@ th.sortable:hover { color: var(--text, inherit); }
 .btn.is-loading { padding-right: 38px; }
 .btn.is-loading::after { top: 50%; right: 12px; margin-top: -10px; }
 @media (prefers-reduced-motion: reduce) { .spinner, .is-loading::after { animation-duration: 3s; } }
+
+/* the corner spinner is for what has none of its own: it hides while a control or the page shows one */
+body:has(.is-loading, .page-loading) .busy { display: none; }

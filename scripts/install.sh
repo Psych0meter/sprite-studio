@@ -14,6 +14,8 @@
 #                 and output/ (results); a NAS share works   [/home/$SG_USER/sprites]
 #   TORCH_INDEX   PyTorch wheel index  [chosen from the GPU: cu128 for RTX 50
 #                 (Blackwell) cards, cu126 for the others, GTX 10 included]
+#   COMFY_LISTEN  address ComfyUI listens on [127.0.0.1: this machine only; ComfyUI
+#                 has no login, so 0.0.0.0 opens it to the whole network]
 #   TORCH_VERSION pin a version (e.g. 2.7.1)
 #   NVIDIA_RUN    in a container: the NVIDIA .run installer of the HOST's
 #                 driver version, to install its user-space part (nvidia-smi...)
@@ -26,6 +28,7 @@
 set -euo pipefail
 
 SG_USER="${SG_USER:-spritegen}"
+COMFY_LISTEN="${COMFY_LISTEN:-127.0.0.1}"
 HOME_DIR="/home/$SG_USER"
 SG_APP="${SG_APP:-$HOME_DIR/spritegen}"
 # A reinstall keeps the data folder the service already uses (SG_DATA given to this script wins).
@@ -146,7 +149,7 @@ After=network-online.target
 [Service]
 User=$SG_USER
 WorkingDirectory=$COMFY
-ExecStart=$COMFY/.venv/bin/python main.py --listen 0.0.0.0 --port 8188
+ExecStart=$COMFY/.venv/bin/python main.py --listen $COMFY_LISTEN --port 8188
 Restart=on-failure
 
 [Install]
@@ -223,7 +226,7 @@ step "done"
 cat <<EOF
 Sprite Studio $(cat "$SG_APP/VERSION" 2>/dev/null || true)
   Studio:   http://$(hostname -I | awk '{print $1}'):8189   (systemctl status spritegen-web)
-  ComfyUI:  http://$(hostname -I | awk '{print $1}'):8188   (systemctl status comfyui)
+  ComfyUI:  http://$COMFY_LISTEN:8188   (systemctl status comfyui; this machine only unless COMFY_LISTEN=0.0.0.0)
   Scripts:  $SG_APP/scripts   (su - $SG_USER)
 Next: open the studio, create a model in Models, add its sprites, train it.
 EOF

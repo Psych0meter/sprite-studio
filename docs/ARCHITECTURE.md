@@ -59,8 +59,8 @@ scripts/
 | `$PX_OUTPUT/batch-<tag>/<kind>/<sprite>/` | one sprite of a batch (same layout); `sheet_<kind>.png`, `batch.log` |
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
-| `$PX_OUTPUT/uploads/<user>/`, `picked/<user>/`, `recoloured/<user>/` | what a user sends for a generation, exports as picks, or recolours from a source they only read |
-| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
+| `$PX_OUTPUT/uploads/<id>/`, `picked/<id>/`, `recoloured/<id>/` (`<id>` is the user's id, `U-...`) | what a user sends for a generation, exports as picks, or recolours from a source they only read |
+| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -174,7 +174,16 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
 - **Ownership and sharing** (`acl.json`): three kinds of resource, `model`
   (its id; its LoRA files follow it), `result` (the top folder of
   `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id),
-  each with an `owner`, `users` and `all`. Access is `write` (owner,
+  each with an `owner`, `users` and `all`. **Accounts are identified by an id**
+  (`U-` and 32 hex digits, made when the account is created, in `users.json`;
+  a name starts with a lowercase letter or digit, so it can never be mistaken for
+  one): `owner` and `users` here, the owner of a job, a project or a pick list
+  and the per-user folders all use the id, never the name, so a name given
+  again after a deletion inherits nothing. Names appear only at the edges
+  (the API answers and the pages show names; a session also remembers the id
+  it belongs to). Older state keyed by names is migrated when the app starts
+  (`Accounts.migrate_ids`, `migrate_identities`; a name with no account is
+  dropped). Access is `write` (owner,
   administrators) or `read` (shared); `need()` and `can()` apply it, a
   resource nobody shares answers 404 (it does not exist for that user), a
   read-only one 403. The rule for a request comes from its method (a change
@@ -197,16 +206,42 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   `DELETE /api/jobs` clears the finished ones (`?only=done`: the successful
   ones only). The speed estimates (`speed()`) read only jobs that exited 0
   without an error.
-- **Updates**: `GET /api/updates` runs `git fetch` in the ComfyUI folder and
-  in `<lora_home>/sd-scripts` and compares each with its upstream branch; it
-  never pulls or installs (the fetch refreshes git's own remote records only).
-  The answer is cached for 15 minutes (`?force=1` looks again) and one check
-  runs at a time. `POST /api/updates/apply` (`{"target": "comfyui"|"sd-scripts"}`,
-  administrators only) submits a CPU-lane `update` job running
-  `scripts/pxupdate.sh`: it refuses modified tracked files, does
-  `git pull --ff-only`, installs the requirements in the checkout's venv and
-  restarts the ComfyUI service (the sudoers rule of `install.sh` allows it).
-  409 while a GPU job or another update runs.
+- **Updates**: only released versions are installed: the latest release is the
+  highest stable tag `vX.Y.Z` (`git ls-remote --tags --refs`; pre-release tags
+  such as `v1.2.0-rc.1` and other names are ignored). `GET /api/updates`
+  compares the installed version of Sprite Studio (`VERSION`, against
+  `SG_UPDATE_REPO`, default the project's repository), the ComfyUI folder and
+  `<lora_home>/sd-scripts` (a `git fetch --tags`; a checkout is behind when the
+  release tag is not an ancestor of `HEAD`, so a checkout past the release is
+  left alone). It never pulls or installs. The answer is cached for 15 minutes
+  (`?force=1` looks again) and one check runs at a time.
+  `POST /api/updates/apply` (`{"target": "comfyui"|"sd-scripts"|"studio"|
+  "studio-rollback"}`, administrators only) submits a CPU-lane `update` job
+  running `scripts/pxupdate.py <target>`; 409 while a GPU job or another
+  update runs (for `studio`, while any job runs).
+  - **ComfyUI, sd-scripts** (`git_target`): refuses modified tracked files,
+    saves `pip freeze` to `<state>/update/<target>-freeze.txt`, checks out the
+    release tag (detached), installs `requirements.txt`, then checks the result
+    (ComfyUI: restart the service, `/system_stats` answers within 2 minutes;
+    sd-scripts: `import library.train_util`). On any failure the previous
+    branch or commit is checked out and the frozen packages reinstalled.
+  - **Sprite Studio** (`studio_update`): refused on a git checkout (the
+    installation made by `install.sh` is a copy). The release is cloned, its tag
+    must be on the default branch and its `VERSION` must equal the tag, its
+    Python files must compile; the running files are copied to
+    `<state>/backups/app-<version>-<time>` (the last three are kept), the new
+    ones copied over (`scripts`, `webapp`, `docs`, `README.md`, `CHANGELOG.md`,
+    `VERSION`) and a marker `<state>/update_pending/` (`boots`, `backup`,
+    `from`, `to`) written. When the job ends the app re-executes itself. Two
+    safeguards undo an update that does not work: `webapp/run.sh` calls
+    `pxupdate.py studio-guard` at each start (the marker's `boots` counter
+    reaches 3 without a confirmation: the backup is copied back), and the
+    new process probes `/api/auth/state` after 25 s (answers: marker removed,
+    `last_update.json` says `ok`; no answer: `studio-rollback` and restart).
+    `studio-rollback` (the *Go back* button) copies the newest backup back and
+    records `last_update.json` (`rolled back`). Limit: the guard is the new
+    version's own `run.sh`, so a release whose `run.sh` is broken is only
+    caught by systemd restarting it into the 25 s probe, not by the guard.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.

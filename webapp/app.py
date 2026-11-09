@@ -59,11 +59,15 @@ SCRIPTS = Path(os.environ.get("SG_SCRIPTS", HERE.parent / "scripts")).resolve()
 VERSION = next((f.read_text().strip() for f in (HERE.parent / "VERSION",) if f.exists()), "dev")
 STATE_DIR = Path(os.environ.get("SG_WEB_STATE", Path.home() / ".spritegen-web"))
 LOG_DIR = STATE_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+for _d in (STATE_DIR, LOG_DIR):  # what the app keeps (accounts, prompts, paths, logs) is for its own user only
+    _d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        _d.chmod(0o700)
 sys.path.insert(0, str(SCRIPTS))
 
 import accounts as acc  # noqa: E402  (users, sessions, ownership: webapp/accounts.py)
 import auth_routes  # noqa: E402  (sign in, users, sharing)
+import pxupdate  # noqa: E402  (updates to released versions: scripts/pxupdate.py)
 
 import pxmodel  # noqa: E402  (the sprite models: scripts/pxmodel.py)
 from pxtool import MAX_COLOURS  # noqa: E402  (the most colours a palette holds)
@@ -212,9 +216,19 @@ def _load(name: str, default: Any) -> Any:
         return default
 
 
+def _private_open(path: str | Path, mode: str = "a"):
+    """Opens a file of the app's own state for text writing, created readable by its user only (0600)."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    fd = os.open(path, flags, 0o600)
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, 0o600)
+    return os.fdopen(fd, mode)
+
+
 def _save(name: str, data: Any) -> None:
     tmp = STATE_DIR / (name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
+    with _private_open(tmp, "w") as fh:
+        fh.write(json.dumps(data, indent=1))
     tmp.replace(STATE_DIR / name)
 
 
@@ -275,12 +289,12 @@ def gate_path(root: Path, rp: Path, write: bool | None) -> None:
                 raise HTTPException(403, "only an administrator can do this")
             return
         top = parts[0]
-        if top == "picked":  # exported picks: each user has a folder of their own
-            if len(parts) > 1 and parts[1] == w.name:
+        if top == "picked":  # exported picks: each user has a folder of their own (named by their id)
+            if len(parts) > 1 and w.id and parts[1] == w.id:
                 return
             raise HTTPException(404, "not found")
         if top in ("uploads", "recoloured"):  # sketches and masks sent for a generation: a folder per user
-            if len(parts) > 1 and parts[1] == w.name:
+            if len(parts) > 1 and w.id and parts[1] == w.id:
                 return
             raise HTTPException(404, "not found")
         if top == ".bin":  # a deleted result belongs to whoever owned the result
@@ -411,7 +425,7 @@ class Jobs:
         jid = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
         job = {
             "id": jid,
-            "owner": (who_now().name if who_now() else ""),
+            "owner": (who_now().id if who_now() else ""),
             "kind": kind,
             "title": title,
             "lane": lane,
@@ -456,7 +470,7 @@ class Jobs:
             self._run(jid)
 
     def _log(self, job: dict, text: str) -> None:
-        with open(job["log"], "a") as fh:
+        with _private_open(job["log"]) as fh:
             fh.write(text if text.endswith("\n") else text + "\n")
 
     def _run(self, jid: str) -> None:
@@ -485,7 +499,7 @@ class Jobs:
             env = job_env()
             env.update(job["env"])
             self._log(job, "$ " + " ".join(_quote(c) for c in job["cmd"]))
-            with open(job["log"], "a") as fh:
+            with _private_open(job["log"]) as fh:
                 p = subprocess.Popen(
                     job["cmd"],
                     stdout=fh,
@@ -542,6 +556,11 @@ class Jobs:
             if not comfy_status()["up"]:
                 break
             time.sleep(1)
+        if comfy_status()["up"]:
+            raise RuntimeError(
+                "ComfyUI is still running 30 s after it was asked to stop, so the GPU may not be free. "
+                "Stop it yourself (systemctl stop comfyui) and start the training again."
+            )
         time.sleep(3)
         return True
 
@@ -577,12 +596,14 @@ class Jobs:
 
     def view(self, job: dict, with_progress: bool = True) -> dict:
         if not job_mine(job):  # somebody else's job: the queue shows that the GPU is busy, nothing more
-            keys = ("id", "owner", "kind", "lane", "status", "created", "started", "ended")
+            keys = ("id", "kind", "lane", "status", "created", "started", "ended")
             v = {k: job.get(k) for k in keys}
+            v["owner"] = ACCOUNTS.name_of(job.get("owner", ""))
             v.update(title="another user's job", foreign=True, position=None)
             v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
             return v
         v = {k: job[k] for k in job if k not in ("env",)}
+        v["owner"] = ACCOUNTS.name_of(job.get("owner", ""))
         v["position"] = list(self.queue).index(job["id"]) + 1 if job["id"] in self.queue else None
         if with_progress:
             v["progress"] = progress(job)
@@ -592,7 +613,7 @@ class Jobs:
 def job_mine(job: dict) -> bool:
     """Whether the signed-in user may see this job's details (their own; an administrator sees all)."""
     w = who_now()
-    return w is None or w.admin or job.get("owner") == w.name
+    return w is None or w.admin or bool(w.id and job.get("owner") == w.id)
 
 
 def job_get(jid: str) -> dict:
@@ -755,12 +776,25 @@ def train_seconds_per_step(log: str) -> float | None:
         return None
 
 
+_speed_cache: dict[str, Any] = {"sig": None, "value": None}
+
+
 def speed() -> dict:
     """How fast this machine is, from the logs of finished jobs: seconds per rendered image, and per
-    training step (per base model; the median of the last runs), plus minutes of the last run."""
-    per_image, train, steps = [], {}, {}
+    training step (per base model; the median of the last runs), plus minutes of the last run.
+    Reading those logs is slow, so the answer is kept until a job starts, ends or changes."""
     with _lock:
         jobs = sorted(JOBS.jobs.values(), key=lambda j: -j["created"])
+        sig = tuple((j["id"], j["status"], j.get("ended"), j.get("returncode")) for j in jobs)
+        if _speed_cache["sig"] == sig:
+            return _speed_cache["value"]
+    value = _measure_speed(jobs)
+    _speed_cache.update(sig=sig, value=value)
+    return value
+
+
+def _measure_speed(jobs: list[dict]) -> dict:
+    per_image, train, steps = [], {}, {}
     for j in jobs:
         if j["status"] != "done" or j.get("returncode") != 0 or j.get("error"):
             continue  # only runs that really finished: not failed, cancelled, interrupted or partly failed ones
@@ -1220,7 +1254,7 @@ def require_lora(m: dict, chosen: str = "") -> None:
 # --------------------------------------------------------------------------
 # the web app
 
-app = FastAPI(title="Sprite Studio", version=VERSION, docs_url=None, redoc_url=None)
+app = FastAPI(title="Sprite Studio", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 JOBS = Jobs()
 LOGIN_PAGE = HERE / "static" / "login.html"
 
@@ -1276,6 +1310,10 @@ async def no_stale_pages(request: Request, call_next):
     response = await call_next(request)
     if not request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-cache"
+    elif "json" in response.headers.get("content-type", ""):
+        response.headers["Cache-Control"] = "private, no-store"  # what the API answers is for the signed-in user only
+    else:
+        response.headers.setdefault("Cache-Control", "private")  # images and files: kept by the browser, never shared
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -1382,6 +1420,7 @@ def api_status():
     return {
         "comfy": comfy_status(),
         "gpu": gpu_info(),
+        "disks": disks_info(),
         "running": running,
         "queued": queued,
         "time": time.time(),
@@ -1401,73 +1440,278 @@ _updates_lock = threading.Lock()
 UPDATES_TTL = 15 * 60  # a check is reused for 15 minutes; ?force=1 looks again
 
 
+_notes_cache: dict[tuple[str, str], dict] = {}
+
+
+def disk_info(path: Path) -> dict:
+    """Space of the volume that holds `path` (its nearest existing parent): total, used, free in bytes."""
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        u = shutil.disk_usage(p)
+    except OSError:
+        return {}
+    return {"disk": {"total": u.total, "used": u.used, "free": u.free}}
+
+
+def disks_info() -> list[dict]:
+    """The disks the app works on (results, models and LoRAs, ComfyUI, its own state): one entry per volume with the
+    folders on it, space in bytes."""
+    s = settings()
+    folders = [
+        ("results", s["px_output"]),
+        ("models", s["lora_home"]),
+        ("ComfyUI", s["comfy_dir"]),
+        ("app", str(STATE_DIR)),
+    ]
+    vols: dict[int, dict] = {}
+    for label, f in folders:
+        p = Path(f)
+        while not p.exists() and p != p.parent:
+            p = p.parent
+        try:
+            dev = p.stat().st_dev
+            u = shutil.disk_usage(p)
+        except OSError:
+            continue
+        v = vols.setdefault(dev, {"total": u.total, "used": u.used, "free": u.free, "what": []})
+        v["what"].append(label)
+    return list(vols.values())
+
+
+def tree_size(path: Path) -> int:
+    """Bytes under a folder (0 when it is missing); files that vanish meanwhile are skipped."""
+    total = 0
+    for f in Path(path).rglob("*") if Path(path).is_dir() else []:
+        with contextlib.suppress(OSError):
+            if f.is_file() and not f.is_symlink():
+                total += f.stat().st_size
+    return total
+
+
+def github_slug(url: str) -> str | None:
+    """`owner/repo` of a GitHub remote (https or ssh form), or None for any other host."""
+    m = re.match(
+        r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$",
+        url.strip(),
+    )
+    return m.group(1) if m else None
+
+
+def release_links(remote: str, tag: str | None, want_notes: bool) -> dict:
+    """The GitHub page of a repository, and (when a newer release exists) the page and notes of that release.
+    Only github.com is asked, with a short timeout; any failure leaves the link and no notes."""
+    slug = github_slug(remote)
+    if not slug:
+        return {}
+    out: dict[str, Any] = {"repo_url": f"https://github.com/{slug}"}
+    if not tag:
+        return out
+    out["release_url"] = f"https://github.com/{slug}/releases/tag/{tag}"
+    if want_notes:
+        key = (slug, tag)
+        if key not in _notes_cache:
+            notes = ""
+            try:
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{slug}/releases/tags/{tag}",
+                    headers={"Accept": "application/vnd.github+json", "User-Agent": "sprite-studio"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as r:  # noqa: S310  (a fixed https host)
+                    notes = str(json.loads(r.read(200000)).get("body") or "")[:6000]
+            except (OSError, ValueError):
+                pass
+            _notes_cache[key] = {"notes": notes}
+        out.update(_notes_cache[key])
+    return out
+
+
 def check_repo_update(name: str, repo: Path) -> dict:
-    """Compares a git checkout with its upstream branch. `git fetch` refreshes git's own records of the remote
-    (remote branches, tags); the files of the checkout are never touched and nothing is installed."""
+    """Compares a git checkout with the latest released version (the highest stable `vX.Y.Z` tag). `git fetch --tags`
+    refreshes git's own records of the remote; the files of the checkout are never touched and nothing is installed."""
     info: dict[str, Any] = {"name": name, "path": str(repo)}
     if not (repo / ".git").exists():
         return {**info, "ok": False, "error": "not a git checkout"}
     try:
         _git(repo, "fetch", "--quiet", "--tags", "origin", timeout=90)
-        try:
-            upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-        except OSError:
-            raise OSError("this checkout has no upstream branch to compare with") from None
-        behind = int(_git(repo, "rev-list", "--count", "HEAD..@{u}"))
+        tag = pxupdate.latest_release(_git(repo, "remote", "get-url", "origin"))
+        if not tag:
+            raise OSError("no released version (a vX.Y.Z tag) found upstream")
+        at_or_past = (
+            subprocess.run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor", tag, "HEAD"], capture_output=True, check=False
+            ).returncode
+            == 0
+        )
         info.update(
             ok=True,
-            branch=_git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
-            upstream=upstream,
             current=_git(repo, "describe", "--tags", "--always"),
-            latest=_git(repo, "describe", "--tags", "--always", "@{u}"),
-            behind=behind,
+            latest=tag,
+            behind=0 if at_or_past else 1,
             dirty=bool(_git(repo, "status", "--porcelain", "--untracked-files=no")),  # tracked files edited here
-            commits=_git(repo, "log", "--format=%h %s", "-n", "8", "HEAD..@{u}").splitlines() if behind else [],
+            **release_links(_git(repo, "remote", "get-url", "origin"), tag, not at_or_past),
         )
-    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+    except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
         info.update(ok=False, error=str(e)[:300])
     return info
 
 
+def studio_state() -> dict:
+    """What the Updates page shows for Sprite Studio itself (the pending / last result are local files)."""
+    d: dict[str, Any] = {}
+    pend = STATE_DIR / "update_pending"
+    if pend.is_dir():
+        d["pending"] = {k: (pend / k).read_text().strip() for k in ("from", "to") if (pend / k).exists()}
+    last = STATE_DIR / "last_update.json"
+    if last.exists():
+        with contextlib.suppress(OSError, ValueError):
+            d["last"] = json.loads(last.read_text())
+    d["can_roll_back"] = bool(pxupdate.backups())
+    d["backups_bytes"] = tree_size(STATE_DIR / "backups")
+    return d
+
+
+def check_studio_update() -> dict:
+    info: dict[str, Any] = {
+        "name": "Sprite Studio",
+        "path": str(pxupdate.app_dir()),
+        "studio": True,
+        **studio_state(),
+        **disk_info(pxupdate.app_dir()),
+    }
+    if (pxupdate.app_dir() / ".git").exists():
+        return {
+            **info,
+            "ok": False,
+            "error": "this is a git checkout: update it with git pull (an installation made by install.sh updates here)",
+        }
+    try:
+        repo = os.environ.get("SG_UPDATE_REPO", pxupdate.STUDIO_REPO)
+        tag = pxupdate.latest_release(repo)
+        if not tag:
+            raise OSError("no released version (a vX.Y.Z tag) found upstream")
+        behind = pxupdate.version_key(tag) > pxupdate.version_key(VERSION)
+        info.update(
+            ok=True,
+            current="v" + VERSION,
+            latest=tag,
+            behind=1 if behind else 0,
+            dirty=False,
+            **release_links(repo, tag, behind),
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired, pxupdate.UpdateError) as e:
+        info.update(ok=False, error=str(e)[:300])
+    return info
+
+
+def restart_self(delay: float = 3.0) -> None:
+    """Starts this program again in place (same process id, so systemd keeps watching it) after a short delay."""
+
+    def go() -> None:
+        time.sleep(delay)
+        os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606
+
+    threading.Thread(target=go, daemon=True).start()
+
+
+def confirm_update_when_healthy(wait: float = 25.0) -> None:
+    """After Sprite Studio updated itself: once the new version has answered for a while, the update is confirmed
+    (the safety copy stays for a manual roll back); if it does not answer, it is rolled back and restarted."""
+    pend = STATE_DIR / "update_pending"
+    if not pend.is_dir():
+        return
+    try:
+        target = (pend / "to").read_text().strip()
+    except OSError:
+        target = ""
+    if target != VERSION:  # (a leftover from an update that never started, or a hand roll back)
+        shutil.rmtree(pend, ignore_errors=True)
+        return
+
+    def check() -> None:
+        time.sleep(wait)
+        port = os.environ.get("SG_WEB_PORT", "8189")
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/auth/state", timeout=5) as r:
+                ok = r.status == 200
+        except (OSError, ValueError):
+            ok = False
+        if ok:
+            shutil.rmtree(pend, ignore_errors=True)
+            _save_private_text(
+                STATE_DIR / "last_update.json", json.dumps({"status": "ok", "to": VERSION, "at": time.time()})
+            )
+            return
+        subprocess.run(
+            [sys.executable, str(SCRIPTS / "pxupdate.py"), "studio-rollback", "the new version did not answer"],
+            check=False,
+            env=job_env(),
+        )
+        restart_self(1.0)
+
+    threading.Thread(target=check, daemon=True).start()
+
+
+def _save_private_text(path: Path, text: str) -> None:
+    with _private_open(str(path), "w") as fh:
+        fh.write(text)
+
+
 @app.get("/api/updates")
 def api_updates(force: int = 0):
-    """Are there newer ComfyUI and kohya sd-scripts versions? The answer is kept for 15 minutes and one check runs at
-    a time (a second request waits for it and gets its answer); the update itself is a manual step."""
+    """Are there newer released versions of ComfyUI, kohya sd-scripts and Sprite Studio? The answer is kept for 15
+    minutes and one check runs at a time (a second request waits for it and gets its answer); the update itself is a
+    manual step."""
     with _updates_lock:
         c = _updates_cache
         if force or not c["data"] or time.time() - c["at"] > UPDATES_TTL:
             c["data"] = [
+                check_studio_update(),
                 check_repo_update("ComfyUI", setting_path("comfy_dir")),
                 check_repo_update("kohya sd-scripts", setting_path("lora_home") / "sd-scripts"),
             ]
             c["at"] = time.time()
-        return {"checked": c["at"], "items": c["data"]}
+        items = [{**i, **studio_state()} if i.get("studio") else i for i in c["data"]]  # (pending / last stay fresh)
+        return {"checked": c["at"], "items": items}
 
 
 @app.post("/api/updates/apply")
 async def api_updates_apply(request: Request):
-    """Updates ComfyUI or kohya sd-scripts (scripts/pxupdate.sh: a fast-forward pull, then their requirements) as a
-    job. Refused while a job uses the GPU, because the code and packages would change under it."""
+    """Updates ComfyUI, kohya sd-scripts or Sprite Studio to their latest released version (scripts/pxupdate.py), as a
+    job; a failed check puts the previous version back. Refused while a job uses the GPU, because the code and
+    packages would change under it; Sprite Studio itself waits for every job to end and then restarts. Target
+    "studio-rollback" puts the safety copy of the previous Sprite Studio version back."""
     b = await request.json()
     target = b.get("target")
-    if target not in ("comfyui", "sd-scripts"):
-        raise HTTPException(400, "choose comfyui or sd-scripts")
+    if target not in ("comfyui", "sd-scripts", "studio", "studio-rollback"):
+        raise HTTPException(400, "choose comfyui, sd-scripts or studio")
+    own = target in ("studio", "studio-rollback")
     with _lock:
-        if any(j["status"] in ("running", "queued") and j["lane"] == "gpu" for j in JOBS.jobs.values()):
+        active = [j for j in JOBS.jobs.values() if j["status"] in ("running", "queued")]
+        if own and active:
+            raise HTTPException(409, "Sprite Studio restarts after its update: wait until no job is running")
+        if any(j["lane"] == "gpu" for j in active):
             raise HTTPException(409, "a job is using the GPU: update when the queue is empty")
-        if any(j["status"] in ("running", "queued") and j["kind"] == "update" for j in JOBS.jobs.values()):
+        if any(j["kind"] == "update" for j in active):
             raise HTTPException(409, "an update is running already")
     _updates_cache["at"] = 0.0  # (the next check looks again)
-    title = "Update ComfyUI" if target == "comfyui" else "Update kohya sd-scripts"
+    title = {
+        "comfyui": "Update ComfyUI",
+        "sd-scripts": "Update kohya sd-scripts",
+        "studio": "Update Sprite Studio",
+        "studio-rollback": "Go back to the previous Sprite Studio",
+    }[target]
     return JOBS.submit(
         "update",
         title,
-        [str(SCRIPTS / "pxupdate.sh"), target],
+        [sys.executable, str(SCRIPTS / "pxupdate.py"), target],
         lane="cpu",
         env={
             "COMFY": str(setting_path("comfy_dir")),
             "PX_LORA_HOME": str(setting_path("lora_home")),
             "COMFY_SERVICE": settings()["comfy_service"],
+            "SG_WEB_STATE": str(STATE_DIR),
         },
         meta={"target": target},
     )
@@ -1491,15 +1735,14 @@ def api_catalog():
             {"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime}
             for f in sorted(lora_dir().glob("*.safetensors"))
         ]
+    lora_models = {r["name"]: r["model"] for r in lora_rows(True, counts=False)}  # (once, not once per file)
     return {
         "models": models_summary(),
         "projects": [x["name"] for x in project_list() if x["name"]],
         "sources": sources(),
         "speed": speed(),
         "gpu_mb": gpu_memory_mb(),
-        "loras": [
-            x for x in loras if lora_allowed(next((r["model"] for r in lora_rows(True) if r["name"] == x["name"]), ""))
-        ],
+        "loras": [x for x in loras if lora_allowed(lora_models.get(x["name"], ""))],
         "settings": settings() if is_admin() else {},
     }
 
@@ -1517,7 +1760,7 @@ def project_registry() -> dict:
 
 def project_list() -> list[dict]:
     w = who_now()
-    names = {n for o, n in project_registry()["entries"] if w is None or w.admin or o == w.name}
+    names = {n for o, n in project_registry()["entries"] if w is None or w.admin or (w.id and o == w.id)}
     models: dict[str, list[str]] = {}
     for m in models_summary():
         models.setdefault(m.get("project") or "", []).append(m["id"])
@@ -1538,7 +1781,7 @@ def project_name(v: Any) -> str:
 
 def _set_project_names(add: str = "", drop: str = "") -> None:
     w = who_now()
-    me = w.name if w else ""
+    me = w.id if w else ""
     with _lock:
         d = project_registry()
         # a user's project names are theirs; an administrator's changes reach everyone's
@@ -1629,9 +1872,21 @@ def api_file(path: str = ""):
     return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
 
+_info_slots = threading.BoundedSemaphore(2)  # image analysis builds large arrays: at most two at a time
+
+
 @app.get("/api/info")
 def api_info(path: str):
     p = safe_path(path)
+    if not _info_slots.acquire(timeout=20):
+        raise HTTPException(503, "busy analysing other images: try again in a moment")
+    try:
+        return _analyse_image(p)
+    finally:
+        _info_slots.release()
+
+
+def _analyse_image(p: Path) -> dict:
     import numpy as np
     from scipy import ndimage
 
@@ -1666,7 +1921,7 @@ async def api_upload(request: Request):
     raw = decode_data_url(b.get("data"))
     check_image(raw, "PNG")
     w = who_now()
-    folder = setting_path("px_output") / "uploads" / (w.name if w else "_app")
+    folder = setting_path("px_output") / "uploads" / ((w.id or w.name) if w else "_app")
     folder.mkdir(parents=True, exist_ok=True)
     f = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name_ok(b.get('name', 'sketch.png'))}"
     if f.suffix != ".png":
@@ -2037,7 +2292,16 @@ def submit_previews(cat: str, model: str, epochs: list[int] | None = None, promp
 
 
 def follow_up(job: dict) -> None:
-    """What a finished job asked for next: a training run started with "render previews afterwards"."""
+    """What a finished job asked for next: a training run started with "render previews afterwards"; the app itself
+    restarting after it updated (or rolled back) its own files."""
+    if (
+        job["kind"] == "update"
+        and job["meta"].get("target") in ("studio", "studio-rollback")
+        and job["status"] == "done"
+    ):
+        if job["meta"].get("restart", True):
+            restart_self(3.0)
+        return
     if job["kind"] != "train" or job["status"] != "done" or not job["meta"].get("then_previews"):
         return
     cat, model = job["meta"]["category"], model_ok(job["meta"].get("model"))
@@ -2151,10 +2415,23 @@ def model_triggers() -> dict[str, dict]:
     return out
 
 
+_lora_count_cache: dict[str, Any] = {"at": 0.0, "root": "", "data": {}}
+
+
 def lora_results_count() -> dict[str, int]:
-    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt)."""
-    counts: dict[str, int] = {}
+    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt). Reading them all
+    is slow with thousands of results, so the answer is kept for 20 seconds."""
     root = setting_path("px_output")
+    c = _lora_count_cache
+    if c["root"] == str(root) and time.time() - c["at"] < 20:
+        return c["data"]
+    counts = _count_lora_results(root)
+    c.update(at=time.time(), root=str(root), data=counts)
+    return counts
+
+
+def _count_lora_results(root: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
     if not root.is_dir():
         return counts
     for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt"):
@@ -2194,10 +2471,10 @@ def lora_allowed(model: str, write: bool = False) -> bool:
     return bool(model) and can("model", model, write)
 
 
-def lora_rows(everything: bool = False) -> list[dict]:
+def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
     models = model_triggers()
     rec = _load("installed.json", {})
-    counts = lora_results_count()
+    used = lora_results_count() if counts else {}  # (reading every job.txt of the results is the slow part)
     defaults = {}
     for mid, m in models.items():
         defaults[m["trigger"] + ".safetensors"] = (mid, "SD 1.5")
@@ -2229,7 +2506,7 @@ def lora_rows(everything: bool = False) -> list[dict]:
                 "checkpoint": info.get("checkpoint"),
                 "in_use": d[1] if d else "",
                 "in_use_model": d[0] if d else "",
-                "results": counts.get(f.name, 0),
+                "results": used.get(f.name, 0),
                 **ACCOUNTS.tag("model", model or "-"),
             }
         )
@@ -2257,7 +2534,7 @@ def lora_file(name: str, write: bool = True) -> Path:
     f = existing_lora(name)
     if f is None:
         raise HTTPException(404, f"{lora_filename(name)} is not in ComfyUI's models/loras")
-    row = next((r for r in lora_rows(True) if r["name"] == f.name), None)
+    row = next((r for r in lora_rows(True, counts=False) if r["name"] == f.name), None)
     if not lora_allowed((row or {}).get("model", ""), write):
         raise HTTPException(404 if not lora_allowed((row or {}).get("model", "")) else 403, "not yours to change")
     return f
@@ -2268,7 +2545,7 @@ async def api_loras_use(request: Request):
     """Installs a LoRA file as its model's default (<trigger>.safetensors, or <trigger>_xl.safetensors for SDXL)."""
     b = await request.json()
     src = lora_file(b.get("name", ""))
-    row = next((r for r in lora_rows(True) if r["name"] == src.name), None)
+    row = next((r for r in lora_rows(True, counts=False) if r["name"] == src.name), None)
     mid = b.get("model") or (row or {}).get("model")
     models = model_triggers()
     if mid not in models:
@@ -3249,7 +3526,7 @@ async def api_palette_apply(request: Request):
             except HTTPException:
                 mine = False  # shared with you to use: the copy goes to your own folder
         w = who_now()
-        own = out_root / "recoloured" / (w.name if w else "_app")
+        own = out_root / "recoloured" / ((w.id or w.name) if w else "_app")
         folder = src.parent if out_root in src.parents and mine and not is_recoloured(src, out_root) else own
         folder.mkdir(parents=True, exist_ok=True)
         stem = re.sub(r"_pal-[a-z0-9_]+$", "", src.stem)
@@ -3423,7 +3700,7 @@ def picks_load() -> dict:
 
 def picks_name() -> str:
     w = who_now()
-    return w.name if w else ""
+    return (w.id or w.name) if w else ""
 
 
 def picks_mine(d: dict) -> dict:
@@ -3619,23 +3896,101 @@ def resource_exists(kind: str, key: str) -> bool:
 
 
 def adopt_existing(admin: str) -> None:
+    aid = ACCOUNTS.id_of(admin)
     for mid in pm().list_models():
-        ACCOUNTS.claim("model", mid, admin)
+        ACCOUNTS.claim("model", mid, aid)
     out = setting_path("px_output")
     for d in out.iterdir() if out.is_dir() else []:
         if d.is_dir() and d.name not in ("uploads", "picked", "recoloured") and not d.name.startswith("."):
-            ACCOUNTS.claim("result", d.name, admin)
+            ACCOUNTS.claim("result", d.name, aid)
     for f in pal_dir().glob("*.json") if pal_dir().is_dir() else []:
-        ACCOUNTS.claim("palette", f.stem, admin)
+        ACCOUNTS.claim("palette", f.stem, aid)
     with _lock:
         reg = project_registry()
-        _save("projects.json", {"entries": [[o or admin, n] for o, n in reg["entries"]]})
+        _save("projects.json", {"entries": [[o or aid, n] for o, n in reg["entries"]]})
         for j in JOBS.jobs.values():
-            j.setdefault("owner", admin)
+            j.setdefault("owner", aid)
         JOBS.persist()
 
 
-app.include_router(auth_routes.make_router(ACCOUNTS, adopt_existing, resource_exists))
+def _id_or_blank(owner: str, ids: dict[str, str]) -> str:
+    return owner if owner.startswith(acc.ID_PREFIX) or not owner else ids.get(owner, "")
+
+
+def migrate_identities() -> None:
+    """Before 0.3.2 jobs, picks, projects and the per-user folders were keyed by user name. A name can be given
+    again after a deletion, so they are keyed by the account's id now (accounts and shares: Accounts.migrate_ids).
+    A name that no longer matches an account is dropped (its jobs and projects then belong to nobody but the
+    administrators)."""
+    users = ACCOUNTS.users()
+    if not users:
+        return
+    ids = {n: u["id"] for n, u in users.items() if u.get("id")}
+    with _lock:
+        changed = False
+        for j in JOBS.jobs.values():
+            o = j.get("owner", "")
+            if o and not o.startswith(acc.ID_PREFIX):
+                j["owner"], changed = _id_or_blank(o, ids), True
+        if changed:
+            JOBS.persist()
+        d = picks_load()
+        if any(k and not k.startswith(acc.ID_PREFIX) for k in d["users"]):
+            d["users"] = {
+                (_id_or_blank(k, ids) or k): v
+                for k, v in d["users"].items()
+                if k == "" or k in ids or k.startswith(acc.ID_PREFIX)
+            }
+            _save("picks.json", d)
+        reg = project_registry()
+        if any(o and not o.startswith(acc.ID_PREFIX) for o, _ in reg["entries"]):
+            _save("projects.json", {"entries": [[_id_or_blank(o, ids), n] for o, n in reg["entries"]]})
+    out = setting_path("px_output")
+    for top in ("uploads", "picked", "recoloured"):
+        for name, uid in ids.items():
+            src, dst = out / top / name, out / top / uid
+            if src.is_dir() and not dst.exists():
+                with contextlib.suppress(OSError):
+                    src.rename(dst)
+
+
+def user_removed(uid: str, target_id: str, label: str) -> None:
+    """Everything a deleted user left that is keyed by their id goes to `target_id`, so that nothing of it can
+    reach a new account (shares and ownership of resources are handled by Accounts)."""
+    with _lock:
+        for j in JOBS.jobs.values():
+            if j.get("owner") == uid:
+                j["owner"] = target_id
+        JOBS.persist()
+        d = picks_load()
+        gone = d["users"].pop(uid, {})
+        if gone:
+            mine = d["users"].setdefault(target_id, {})
+            mine.update({k: v for k, v in gone.items() if k not in mine})
+        _save("picks.json", d)
+        reg = project_registry()
+        _save("projects.json", {"entries": [[target_id if o == uid else o, n] for o, n in reg["entries"]]})
+    out = setting_path("px_output")
+    for top in ("uploads", "picked", "recoloured"):
+        src = out / top / uid
+        if not src.is_dir():
+            continue
+        dest = out / top / target_id / f"from_{label}"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            n = 1
+            while dest.exists():
+                n += 1
+                dest = dest.with_name(f"from_{label}_{n}")
+            shutil.move(str(src), str(dest))
+        except OSError as e:
+            print(f"user removed: could not move {src}: {e!r}", file=sys.stderr, flush=True)
+
+
+migrate_identities()
+
+
+app.include_router(auth_routes.make_router(ACCOUNTS, adopt_existing, resource_exists, user_removed))
 app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
 
 
@@ -3660,6 +4015,7 @@ if __name__ == "__main__":
     import uvicorn
 
     announce_setup()
+    confirm_update_when_healthy()
     uvicorn.run(
         app,
         host=os.environ.get("SG_WEB_HOST", "127.0.0.1"),
