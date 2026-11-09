@@ -21,7 +21,7 @@ SG_UPDATE_REPO (where Sprite Studio's releases come from). PXUPDATE_APP and PXUP
 
 Studio update, step by step: the release is cloned (from a tag that is on the default branch), its VERSION must
 match the tag and its Python must compile; what is installed is copied to <state>/backups/; the files are
-replaced; a marker `<state>/update_pending/` records the backup and a start counter. The app then restarts itself;
+replaced; a marker `<state>/update_pending/` (written first, before any file changes) records the backup, the\npackages to put back and a start counter; a start that finds it still `applying` rolls back at once. The app then restarts itself;
 once it answers on its own port for 25 seconds it removes the marker (confirmed). If it never does (it crashes: the
 counter reaches 3 in run.sh; it runs but does not answer: the app checks itself) the backup is restored.
 The data, models, accounts and the Python environment are never touched.
@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -243,36 +244,78 @@ def studio_update() -> None:
             raise UpdateError(f"{tag} carries version {read_version(src)}: refused")
         run([sys.executable, "-m", "compileall", "-q", str(src / "webapp"), str(src / "scripts")])
         say(f"downloaded {tag}; it compiles")
+        deps = studio_web_deps(src)  # (read before anything on disk changes: a failure here is harmless)
+        venv = app / "webapp" / ".venv"
         back = state_dir() / "backups" / f"app-{current}-{int(time.time())}"
         back.mkdir(parents=True)
         copy_files(app, back)
         say(f"backup of {current}: {back}")
         for old in backups()[:-KEEP_BACKUPS]:
             shutil.rmtree(old, ignore_errors=True)
+        freeze = save_freeze(venv)
+        # The marker comes first: from here on, an update that is cut short (power loss, a kill) is noticed at
+        # the next start and rolled back, whatever step it stopped at.
+        write_marker(back, current, tag.lstrip("v"), "applying", freeze)
         try:
             copy_files(src, app)
-            venv = app / "webapp" / ".venv"
-            if (venv / "bin" / "pip").exists():
-                import tomllib
-
-                deps = tomllib.loads((src / "pyproject.toml").read_text())["project"]["dependencies"]
-                web = [d for d in deps if re.match(r"(fastapi|uvicorn)", d, re.I)]
-                if web:
-                    run([str(venv / "bin" / "pip"), "install", "-q", *web], timeout=900)
+            if deps and (venv / "bin" / "pip").exists():
+                run([str(venv / "bin" / "pip"), "install", "-q", *deps], timeout=900)
         except (UpdateError, OSError, subprocess.TimeoutExpired) as e:
-            copy_files(back, app)
+            restore(back, freeze, venv)
+            shutil.rmtree(marker(), ignore_errors=True)
             raise UpdateError(f"the files could not be installed ({e}): the previous version was put back") from None
-    m = marker()
-    m.mkdir(parents=True)
+    (marker() / "phase").write_text("installed")
+    say(f"installed {tag}. Sprite Studio restarts; it rolls back by itself if the new version does not start.")
+
+
+def studio_web_deps(src: Path) -> list[str]:
+    """The web app's own packages (FastAPI, uvicorn) as pyproject.toml of the release asks for them."""
+    f = src / "pyproject.toml"
+    if not f.exists():
+        raise UpdateError("the release has no pyproject.toml: refused")
+    try:
+        deps = tomllib.loads(f.read_text())["project"]["dependencies"]
+    except (tomllib.TOMLDecodeError, KeyError) as e:
+        raise UpdateError(f"the release's pyproject.toml cannot be read ({e}): refused") from None
+    return [d for d in deps if re.match(r"(fastapi|uvicorn)", d, re.I)]
+
+
+def save_freeze(venv: Path) -> str:
+    """The packages installed in the web app's own environment, to put back if the new ones do not work."""
+    pip = venv / "bin" / "pip"
+    if not pip.exists():
+        return ""
+    out = run([str(pip), "freeze", "--local"], check=False)
+    f = state_dir() / "update" / "studio-freeze.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(out + "\n")
+    return str(f)
+
+
+def write_marker(back: Path, current: str, to: str, phase: str, freeze: str) -> None:
+    """update_pending/ is written beside its final place and renamed, so it is there complete or not at all."""
+    tmp = state_dir() / "update_pending.new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
     for k, v in {
         "boots": "0",
         "backup": str(back),
         "from": current,
-        "to": tag.lstrip("v"),
+        "to": to,
+        "phase": phase,
+        "freeze": freeze,
         "at": str(time.time()),
     }.items():
-        (m / k).write_text(v)
-    say(f"installed {tag}. Sprite Studio restarts; it rolls back by itself if the new version does not start.")
+        (tmp / k).write_text(v)
+    tmp.rename(marker())
+
+
+def restore(back: Path, freeze: str, venv: Path) -> None:
+    """The files of a backup, and the web app's packages as they were (best effort for the packages)."""
+    copy_files(back, app_dir())
+    pip = venv / "bin" / "pip"
+    if freeze and Path(freeze).exists() and pip.exists():
+        run([str(pip), "install", "-q", "--no-deps", "-r", freeze], check=False, timeout=900)
 
 
 def studio_rollback(reason: str = "") -> None:
@@ -281,8 +324,9 @@ def studio_rollback(reason: str = "") -> None:
     back = Path((m / "backup").read_text().strip()) if (m / "backup").exists() else (backups() or [None])[-1]
     if not back or not back.is_dir():
         raise UpdateError("no backup to go back to")
-    came_from = read_version(app)
-    copy_files(back, app)
+    freeze = (m / "freeze").read_text().strip() if (m / "freeze").exists() else ""
+    came_from = (m / "to").read_text().strip() if (m / "to").exists() else read_version(app)
+    restore(back, freeze, app / "webapp" / ".venv")
     shutil.rmtree(m, ignore_errors=True)
     result = state_dir() / "last_update.json"
     result.write_text(
@@ -297,6 +341,10 @@ def studio_guard() -> None:
     """At each start of the service: an update that has not been confirmed by its third start is undone."""
     m = marker()
     if not (m / "boots").exists():
+        return
+    if (m / "phase").exists() and (m / "phase").read_text().strip() == "applying":
+        say("an update was cut short while it replaced the files: going back")
+        studio_rollback("the update was interrupted")
         return
     n = int((m / "boots").read_text().strip() or 0) + 1
     (m / "boots").write_text(str(n))
