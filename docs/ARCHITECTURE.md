@@ -60,7 +60,7 @@ scripts/
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
 | `$PX_OUTPUT/uploads/<id>/`, `picked/<id>/`, `recoloured/<id>/` (`<id>` is the user's id, `U-...`) | what a user sends for a generation, exports as picks, or recolours from a source they only read |
-| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `lora_ids.json` (the stable id of each LoRA file), `projects.json` (projects with no model yet) |
+| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `ids.json` (`{kind: {name: uuid}}` for `model`, `palette`, `result`, `project`, `lora`: the stable id of every resource, made the first time it is needed and moved by a rename; `lora_ids.json` of the 0.3.3 development builds is folded into it), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -263,9 +263,8 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   `/delete`, `/export` (a zip of PNGs named after the sprites plus
   `manifest.json`; `folders` keeps the gallery folders). Folders and tags are
   labels on the item, not directories. Items outlive their results (they are
-  copies). Links to a LoRA are by id, never by file name: `lora_ids.json`
-  (`{file name: uuid}`, made by `lora_id(name)` on first use, moved with the file
-  by rename and archive, dropped on delete) gives each file a UUID; `pxmake.sh`
+  copies). Links to a LoRA are by id, never by file name: the ids registry (`ids.json`, `lora_id(name)` makes one on first use, rename and
+  archive move it with the file, delete drops it) gives each file a UUID; `pxmake.sh`
   writes it as `lora_id=` (from `PX_LORA_ID`) after `lora=` in `job.txt`, and a
   gallery item stores `lora_id`. `lora_references(file)` counts the result
   folders (every user's) and gallery items with that id; older ones that have

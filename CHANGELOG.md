@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Identity**: every model, palette, result, project and LoRA file now has a stable UUID, made automatically for what exists already (`ids.json`). Ownership and sharing are kept by that id instead of the name (the old list is migrated on start-up; nothing is lost), rows in the API carry a `uid`, the sharing routes accept the id as well as the name, and gallery images and installed-LoRA records remember the model by id. Names are labels: a rename keeps the owner, the shares and the links. Models, palettes and results cannot be renamed yet; folders and `model.json` / `job.txt` keep their names on disk.
+
 - **LoRA files**: nothing is overwritten any more. Installing a LoRA over an existing name (*Use*, *Install*) keeps the old file as `<name>_<unix time>.safetensors`; a new training moves the last run's checkpoints and previews to `previous/<unix time>/` in the model's output folder.
 - **LoRA files**: a LoRA that results or gallery images still use cannot be deleted (the button is off, the server answers 409). Renaming is always allowed: every LoRA file has a stable id, new results and gallery images point at that id (`lora_id=` in the result's job notes), and older ones are given the id the first time their file is renamed, so nothing is lost. The table shows the gallery count next to the results.
 

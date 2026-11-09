@@ -119,6 +119,7 @@ def tagged(kind: str, key: str, row: dict) -> dict:
     """A list row with who owns it and who it is shared with (what the pages show next to it)."""
     w = who_now()
     row.update(ACCOUNTS.tag(kind, key))
+    row["uid"] = ACCOUNTS.uid(kind, key)  # (the stable id: the name can change, this does not)
     row["access"] = "write" if w is None or ACCOUNTS.access(w, kind, key) == "write" else "read"
     return row
 
@@ -1245,6 +1246,8 @@ def lora_info(name: str, rec: dict | None = None) -> dict:
         out.update(
             {k: r.get(k) for k in ("model", "checkpoint", "epoch", "final", "trained")}, installed_at=r.get("installed")
         )
+        if r.get("model_id"):  # (the model's id is what is kept; its name can change)
+            out["model"] = ACCOUNTS.name_of_uid("model", r["model_id"]) or r.get("model")
     return out
 
 
@@ -1789,9 +1792,12 @@ def project_list() -> list[dict]:
         models.setdefault(m.get("project") or "", []).append(m["id"])
         if m.get("project"):
             names.add(m["project"])
-    out = [{"name": n, "models": sorted(models.get(n, []))} for n in sorted(names, key=str.lower)]
+    out = [
+        {"name": n, "uid": ACCOUNTS.uid("project", n), "models": sorted(models.get(n, []))}
+        for n in sorted(names, key=str.lower)
+    ]
     if models.get(""):
-        out.append({"name": "", "models": sorted(models[""])})
+        out.append({"name": "", "uid": "", "models": sorted(models[""])})
     return out
 
 
@@ -1843,6 +1849,10 @@ async def api_project_rename(request: Request):
             m["project"] = new
             p.save(m)
     _set_project_names(add=new, drop=old)
+    if not ACCOUNTS.uid(
+        "project", new, mint=False
+    ):  # (a plain rename keeps the project's id; a merge keeps the target's)
+        ACCOUNTS.rename_id("project", old, new)
     return project_list()
 
 
@@ -1865,6 +1875,7 @@ async def api_project_delete(request: Request):
             m["project"] = dest
             p.save(m)
     _set_project_names(drop=name)
+    ACCOUNTS.forget_id("project", name)
     if dest:
         _set_project_names(add=dest)
     return project_list()
@@ -2385,28 +2396,26 @@ async def api_train_caption(cat: str, request: Request):
 
 
 def lora_id(name: str) -> str:
-    """The stable id of a LoRA file (a UUID kept in lora_ids.json, made on first use). Results and gallery items
+    """The stable id of a LoRA file (a UUID in the ids registry, made on first use). Results and gallery items
     point at this id, never at the file name, so renaming a file changes nothing for them."""
-    with _lock:
-        ids = _load("lora_ids.json", {})
-        if name not in ids:
-            ids[name] = uuid.uuid4().hex
-            _save("lora_ids.json", ids)
-        return ids[name]
+    legacy = _load("lora_ids.json", {})  # (0.3.3 development builds kept them in a file of their own)
+    if name in legacy and not ACCOUNTS.uid("lora", name, mint=False):
+        with ACCOUNTS.lock:
+            ids = ACCOUNTS._ids(True)
+            ids.setdefault("lora", {})[name] = legacy[name]
+            ACCOUNTS._write("ids.json", ids)
+    return ACCOUNTS.uid("lora", name)
 
 
 def lora_name_of(lid: str) -> str:
     """The current file name of the LoRA with this id ('' when it is gone)."""
-    return next((n for n, i in _load("lora_ids.json", {}).items() if i == lid and (lora_dir() / n).is_file()), "")
+    n = ACCOUNTS.name_of_uid("lora", lid)
+    return n if n and (lora_dir() / n).is_file() else ""
 
 
 def move_lora_id(old: str, new: str) -> None:
     """A LoRA file renamed or archived keeps its id."""
-    with _lock:
-        ids = _load("lora_ids.json", {})
-        if old in ids:
-            ids[new] = ids.pop(old)
-            _save("lora_ids.json", ids)
+    ACCOUNTS.rename_id("lora", old, new)
 
 
 def _rewrite_head(jt: Path, lid: str) -> None:
@@ -2513,6 +2522,7 @@ def install_lora(src: Path, name: str, model: str, meta: dict | None = None) -> 
     m = re.search(r"-(\d+)$", src.stem)
     entry = {
         "model": model,
+        "model_id": ACCOUNTS.uid("model", model) if model else "",
         "checkpoint": src.name,
         "epoch": int(m.group(1)) if m else None,
         "final": not m,
@@ -2638,7 +2648,7 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
         defaults[m["trigger"] + ".safetensors"] = (mid, "SD 1.5")
         defaults[m["trigger"] + "_xl.safetensors"] = (mid, "SDXL")
     gal: dict[str, int] = {}
-    ids = _load("lora_ids.json", {})
+    ids = ACCOUNTS._ids().get("lora", {})
     by_id = {i: n for n, i in ids.items()}
     for m in gallery_metas():  # (by id, else by name; the file's content is checked when deleting)
         k = by_id.get(m.get("lora_id", ""), m.get("lora", ""))
@@ -2670,6 +2680,7 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
                 "checkpoint": info.get("checkpoint"),
                 "in_use": d[1] if d else "",
                 "in_use_model": d[0] if d else "",
+                "uid": lora_id(f.name),
                 "results": used.get(ids.get(f.name, ""), 0) + used.get(f.name, 0),
                 "gallery": gal.get(f.name, 0),
                 **ACCOUNTS.tag("model", model or "-"),
@@ -2773,10 +2784,8 @@ async def api_loras_delete(request: Request):
             done.append(f.name)
             rec.pop(f.name, None)
         _save("installed.json", rec)
-        ids = _load("lora_ids.json", {})
         for f in todo:
-            ids.pop(f.name, None)
-        _save("lora_ids.json", ids)
+            ACCOUNTS.forget_id("lora", f.name)
     if kept and not done:
         raise HTTPException(409, " ".join(kept))
     return {"deleted": done, "kept": kept}
@@ -4088,6 +4097,8 @@ def gallery_row(m: dict) -> dict:
         for k in ("id", "name", "created", "folder", "tags", "note", "seed", "model", "group", "kind", "lora", "w", "h")
     }
     row["epoch"] = (m.get("lora_info") or {}).get("epoch")
+    if m.get("model_id"):  # (the model's id is what is kept; its name can change)
+        row["model"] = ACCOUNTS.name_of_uid("model", m["model_id"]) or m.get("model")
     if m.get("lora_id"):  # (the file may have been renamed since it was saved)
         row["lora"] = lora_name_of(m["lora_id"]) or m.get("lora")
     return tagged("gallery", m["id"], row)
@@ -4153,6 +4164,7 @@ async def api_gallery_add(request: Request):
         "source": str(src),
         "seed": seed,
         "model": params.get("model", ""),
+        "model_id": ACCOUNTS.uid("model", params["model"]) if params.get("model") else "",
         "group": params.get("group", ""),
         "kind": params.get("kind", ""),
         "lora": lora,
