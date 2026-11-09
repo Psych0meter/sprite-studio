@@ -1735,15 +1735,14 @@ def api_catalog():
             {"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime}
             for f in sorted(lora_dir().glob("*.safetensors"))
         ]
+    lora_models = {r["name"]: r["model"] for r in lora_rows(True, counts=False)}  # (once, not once per file)
     return {
         "models": models_summary(),
         "projects": [x["name"] for x in project_list() if x["name"]],
         "sources": sources(),
         "speed": speed(),
         "gpu_mb": gpu_memory_mb(),
-        "loras": [
-            x for x in loras if lora_allowed(next((r["model"] for r in lora_rows(True) if r["name"] == x["name"]), ""))
-        ],
+        "loras": [x for x in loras if lora_allowed(lora_models.get(x["name"], ""))],
         "settings": settings() if is_admin() else {},
     }
 
@@ -2416,10 +2415,23 @@ def model_triggers() -> dict[str, dict]:
     return out
 
 
+_lora_count_cache: dict[str, Any] = {"at": 0.0, "root": "", "data": {}}
+
+
 def lora_results_count() -> dict[str, int]:
-    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt)."""
-    counts: dict[str, int] = {}
+    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt). Reading them all
+    is slow with thousands of results, so the answer is kept for 20 seconds."""
     root = setting_path("px_output")
+    c = _lora_count_cache
+    if c["root"] == str(root) and time.time() - c["at"] < 20:
+        return c["data"]
+    counts = _count_lora_results(root)
+    c.update(at=time.time(), root=str(root), data=counts)
+    return counts
+
+
+def _count_lora_results(root: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
     if not root.is_dir():
         return counts
     for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt"):
@@ -2459,10 +2471,10 @@ def lora_allowed(model: str, write: bool = False) -> bool:
     return bool(model) and can("model", model, write)
 
 
-def lora_rows(everything: bool = False) -> list[dict]:
+def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
     models = model_triggers()
     rec = _load("installed.json", {})
-    counts = lora_results_count()
+    used = lora_results_count() if counts else {}  # (reading every job.txt of the results is the slow part)
     defaults = {}
     for mid, m in models.items():
         defaults[m["trigger"] + ".safetensors"] = (mid, "SD 1.5")
@@ -2494,7 +2506,7 @@ def lora_rows(everything: bool = False) -> list[dict]:
                 "checkpoint": info.get("checkpoint"),
                 "in_use": d[1] if d else "",
                 "in_use_model": d[0] if d else "",
-                "results": counts.get(f.name, 0),
+                "results": used.get(f.name, 0),
                 **ACCOUNTS.tag("model", model or "-"),
             }
         )
@@ -2522,7 +2534,7 @@ def lora_file(name: str, write: bool = True) -> Path:
     f = existing_lora(name)
     if f is None:
         raise HTTPException(404, f"{lora_filename(name)} is not in ComfyUI's models/loras")
-    row = next((r for r in lora_rows(True) if r["name"] == f.name), None)
+    row = next((r for r in lora_rows(True, counts=False) if r["name"] == f.name), None)
     if not lora_allowed((row or {}).get("model", ""), write):
         raise HTTPException(404 if not lora_allowed((row or {}).get("model", "")) else 403, "not yours to change")
     return f
@@ -2533,7 +2545,7 @@ async def api_loras_use(request: Request):
     """Installs a LoRA file as its model's default (<trigger>.safetensors, or <trigger>_xl.safetensors for SDXL)."""
     b = await request.json()
     src = lora_file(b.get("name", ""))
-    row = next((r for r in lora_rows(True) if r["name"] == src.name), None)
+    row = next((r for r in lora_rows(True, counts=False) if r["name"] == src.name), None)
     mid = b.get("model") or (row or {}).get("model")
     models = model_triggers()
     if mid not in models:

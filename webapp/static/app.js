@@ -217,7 +217,14 @@ const S = {
 function saveView() { store.set("view", S.view); }
 function setTray(t) { S.tray = t; store.set("tray", t); $("#tray-count").textContent = t.length || ""; }
 
-async function loadCatalog() { S.catalog = await api("/catalog"); drawProjectPicker(); return S.catalog; }
+// Calls made together (the router and the page both ask on a first visit) share one request.
+let catalogCall = null;
+async function loadCatalog() {
+  if (!catalogCall) catalogCall = api("/catalog").finally(() => { catalogCall = null; });
+  S.catalog = await catalogCall;
+  drawProjectPicker();
+  return S.catalog;
+}
 
 /** The project shown: every page lists only its models. */
 S.project = store.get("project", "");

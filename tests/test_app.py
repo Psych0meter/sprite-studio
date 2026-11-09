@@ -480,3 +480,19 @@ def test_status_lists_the_disks_the_app_works_on(client):
     d = webapp.disk_info(Path("/nonexistent/deep/path"))  # (the nearest existing folder answers)
     assert d["disk"]["total"] > 0
     assert webapp.tree_size(Path("/nonexistent")) == 0
+
+
+def test_the_catalog_reads_the_results_once_however_many_loras_there_are(client, env, monkeypatch):
+    import app as webapp
+
+    for i in range(5):
+        (env["comfy"] / "models" / "loras" / f"extra{i}.safetensors").write_bytes(b"x")
+    calls = []
+    real = webapp._count_lora_results
+    monkeypatch.setattr(webapp, "_count_lora_results", lambda root: calls.append(1) or real(root))
+    webapp._lora_count_cache.update(at=0.0, root="", data={})
+    assert client.get("/api/catalog").status_code == 200
+    assert len(calls) == 0  # the catalog needs no counts at all
+    client.get("/api/loras")
+    client.get("/api/loras")
+    assert len(calls) == 1  # and the LoRA page reuses the answer for a few seconds
