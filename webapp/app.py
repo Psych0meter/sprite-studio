@@ -1050,6 +1050,17 @@ def scan_results() -> list[dict]:
         i["busy"] = any(i["path"] == b or b.startswith(i["path"] + "/") for b in busy)
         if i["busy"]:
             i["empty"] = False  # still rendering
+            if i["type"] == "batch":  # (the sprites listed so far include the one being drawn: show the planned total)
+                planned = next(
+                    (
+                        j["meta"].get("planned") or j["meta"].get("total")
+                        for j in JOBS.jobs.values()
+                        if j["status"] in ("queued", "running") and j.get("out") == i["path"] and j["meta"].get("total")
+                    ),
+                    0,
+                )
+                if planned:
+                    i["planned"] = planned
     items.sort(key=lambda i: -i["mtime"])
     return items
 
@@ -2197,7 +2208,12 @@ async def api_batch(request: Request):
     out = str(setting_path("px_output") / f"batch-{tag}")
     claim_folder(Path(out).name)
     return JOBS.submit(
-        "batch", f"Batch {tag}", cmd, env=lora_env(b, bm), out=out, meta={"total": len(plan["todo"]), "request": b}
+        "batch",
+        f"Batch {tag}",
+        cmd,
+        env=lora_env(b, bm),
+        out=out,
+        meta={"total": len(plan["todo"]), "planned": len(plan["todo"]) + int(plan.get("done") or 0), "request": b},
     )
 
 

@@ -118,3 +118,23 @@ def test_a_model_can_be_renamed_and_everything_follows(team, env):  # noqa: F811
     assert admin.post("/api/models/troops/rename", json={"to": "Not OK"}).status_code == 400
     make_model(admin, "second", "pxsecond")
     assert admin.post("/api/models/troops/rename", json={"to": "second"}).status_code == 400
+
+
+def test_a_running_batch_shows_its_planned_total(client, env):
+    import app as webapp
+
+    d = Path(env["output"]) / "batch-run"
+    for n in range(3):  # three sprites started so far: the third is still being drawn
+        s = d / "units" / f"s{n}"
+        s.mkdir(parents=True)
+        (s / "job.txt").write_text("name=s model=units\n")
+    job = {"status": "running", "out": str(d), "meta": {"total": 7, "planned": 10}}
+    webapp.JOBS.jobs["t1"] = job
+    try:
+        row = next(i for i in client.get("/api/results").json() if i["type"] == "batch")
+        assert row["busy"] and row["planned"] == 10 and row["tried"] == 3
+        job["status"] = "done"
+        row = next(i for i in client.get("/api/results").json() if i["type"] == "batch")
+        assert "planned" not in row  # finished: what was made is the answer
+    finally:
+        webapp.JOBS.jobs.pop("t1", None)

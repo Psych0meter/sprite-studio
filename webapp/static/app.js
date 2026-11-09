@@ -1301,7 +1301,7 @@ routes.results = async (main, _parts, params) => {
             h("div", { class: "s" }, i.type === "batch" ? h("span", { class: "tag amber" }, "batch") : i.type === "matrix" ? h("span", { class: "tag" }, "LoRA test") : null,
               i.empty ? [" ", h("span", { class: "tag bad", title: "Nothing was rendered: see the job's log on the Jobs page" }, "empty")] : null,
               i.busy ? [" ", h("span", { class: "tag" }, "running")] : null,
-              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
+              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.planned || i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
             ownerBadge(i) || i.access === "write" ? h("div", { class: "row", style: { gap: "6px", marginTop: "3px" } }, ownerBadge(i),
               i.access === "write" ? h("button", { class: "btn sm ghost", type: "button", style: { padding: "0 6px", minHeight: "20px" },
                 onclick: (e) => { e.stopPropagation(); shareDialog("result", i.path.split("/").pop(), i.title, async () => { items = await api("/results"); drawItems(); }); } }, "Share") : null) : null)));
