@@ -3132,7 +3132,7 @@ routes.jobs = async (main, parts) => {
         h("td", {}, statusLabel(j)),
         h("td", { style: { width: "220px" } }, j.status === "running" ? [progressBar(j), h("div", { class: "small muted" }, (j.progress && j.progress.text) || "")] : null),
         h("td", { class: "small muted nowrap" }, fmtTime(j.started || j.created)),
-        h("td", { class: "small muted nowrap" }, j.started ? fmtDur((j.ended || Date.now() / 1000) - j.started) : ""),
+        h("td", { class: "small muted nowrap" }, j.started && j.ended ? fmtDur(j.ended - j.started) : ""),
         h("td", { class: "nowrap" }, j.foreign ? null : ["running", "queued"].includes(j.status)
           ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(() => loop.poll({ force: true })); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
@@ -3143,7 +3143,7 @@ routes.jobs = async (main, parts) => {
   const busy = (jobs) => jobs.some((j) => ["running", "queued"].includes(j.status));
   const loop = autoRefresh({
     fetch: () => api("/jobs"),
-    // the page shown: its rows' status and progress (the elapsed time of a running job moves with it)
+    // the page shown: its rows' status and progress
     signature: (jobs) => JSON.stringify([jobs.length, paging.page, paging.size, pageOf(jobs, paging).rows.map((j) => [j.id, j.status, j.position, j.progress && j.progress.text, j.progress && j.progress.fraction, j.ended])]),
     rebuild: draw,
     every: (jobs) => (busy(jobs) ? 3000 : 15000),  // idle: a slow look, for jobs started from elsewhere

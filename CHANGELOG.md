@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Jobs**: the *Took* column stays empty while a job runs (the time so far is not a duration); it fills in when the job ends.
 - **Updates**: a Sprite Studio update that is cut short (power loss, a kill) while it replaces files is now detected and rolled back at the next start. The marker is written before the first file changes, the web packages are saved and put back with the files, and the release's `pyproject.toml` is read before anything changes.
 - **Install**: ComfyUI is started again when the training setup fails after it was stopped.
 - **Sharing**: a malformed list of users in a sharing request answers 400 instead of an error.
