@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-10
+
 ### Added
 
 - **Models**: *Remove duplicates* in a model's Sprites tab finds sprites that are the same image under different names (for example results added to a model more than once), shows them, and moves all but one of each set to `sprites/.trash`. The one kept is the one with settings made by hand, else the shortest name.
@@ -15,12 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Checks (GitHub)**: they run once per branch push instead of a second time for the pull request, they are not repeated on a tag (the release workflow already runs them), and a newer push cancels the run still going for the previous one. Branch protection must require `Checks / lint (push)` instead of `Checks / lint (pull_request)`.
+- **Checks (GitHub)**: they run once per branch push instead of a second time for the pull request, they are not repeated on a tag (the release workflow already runs them), and a newer push cancels the run still going for the previous one.
 - **Identity**: every model, palette, result, project and LoRA file now has a stable UUID, made automatically for what exists already (`ids.json`). Ownership and sharing are kept by that id instead of the name (the old list is migrated on start-up; nothing is lost), rows in the API carry a `uid`, the sharing routes accept the id as well as the name, and gallery images and installed-LoRA records remember the model by id. Names are labels: a rename keeps the owner, the shares and the links. 
-
 - **LoRA files**: nothing is overwritten any more. Installing a LoRA over an existing name (*Use*, *Install*) keeps the old file as `<name>_<unix time>.safetensors`; a new training moves the last run's checkpoints and previews to `previous/<unix time>/` in the model's output folder.
 - **LoRA files**: a LoRA that results or gallery images still use cannot be deleted (the button is off, the server answers 409). Renaming is always allowed: every LoRA file has a stable id, new results and gallery images point at that id (`lora_id=` in the result's job notes), and older ones are given the id the first time their file is renamed, so nothing is lost. The table shows the gallery count next to the results.
-
 - **Install**: Python 3.11 or newer is required (the project already needed it). `install.sh` stops with a clear message on an older system before changing anything; the supported systems are Debian 12/13 and Ubuntu 24.04+ (Ubuntu 22.04 has Python 3.10). The tests run on Python 3.11, 3.12 and 3.13.
 - **Jobs**: one user can have at most 20 jobs waiting for the GPU and 4 CPU jobs running (`SG_MAX_QUEUED_PER_USER`, `SG_MAX_CPU_JOBS_PER_USER`), so one person cannot fill the queue for everyone.
 - **Security**: file responses (`/api/file`) are marked `private`, so no shared cache keeps them.
@@ -266,7 +266,8 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Psych0meter/sprite-studio/compare/v0.2.0...v0.3.0
