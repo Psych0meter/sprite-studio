@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Checks (GitHub)**: they run once per branch push instead of a second time for the pull request, they are not repeated on a tag (the release workflow already runs them), and a newer push cancels the run still going for the previous one. Branch protection must require `Checks / lint (push)` instead of `Checks / lint (pull_request)`.
 - **Identity**: every model, palette, result, project and LoRA file now has a stable UUID, made automatically for what exists already (`ids.json`). Ownership and sharing are kept by that id instead of the name (the old list is migrated on start-up; nothing is lost), rows in the API carry a `uid`, the sharing routes accept the id as well as the name, and gallery images and installed-LoRA records remember the model by id. Names are labels: a rename keeps the owner, the shares and the links. 
 
 - **LoRA files**: nothing is overwritten any more. Installing a LoRA over an existing name (*Use*, *Install*) keeps the old file as `<name>_<unix time>.safetensors`; a new training moves the last run's checkpoints and previews to `previous/<unix time>/` in the model's output folder.
