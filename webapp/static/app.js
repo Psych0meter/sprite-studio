@@ -2166,8 +2166,9 @@ routes.gallery = async (main) => {
   };
   const draw = () => {
     for (const id of [...sel]) if (!items.some((i) => i.id === id)) sel.delete(id);
+    const shown0 = filtered();
     const folders = count(filtered("folder"), (i) => [i.folder || ""]);
-    const tagCounts = count(filtered("tag"), (i) => i.tags || []);
+    const tagCounts = count(shown0, (i) => i.tags || []);  // what each tag leaves of what is shown now
     const allFolders = [...new Set(items.map((i) => i.folder || ""))];
     const shown = filtered();
     for (const id of [...sel]) if (!shown.some((i) => i.id === id)) sel.delete(id);  // only what is on screen stays selected
@@ -2207,6 +2208,7 @@ routes.gallery = async (main) => {
       h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", margin: "12px 0" } },
         h("label", { class: "row", style: { gap: "6px" } }, h("input", { type: "checkbox", checked: ids.length > 0 && ids.every((id) => sel.has(id)),
           onchange: (e) => { ids.forEach((id) => (e.target.checked ? sel.add(id) : sel.delete(id))); draw(); } }), `Select all shown (${shown.length})`),
+        h("span", { class: "muted small" }, shown.length === items.length ? `${items.length} sprites` : `${shown.length} of ${items.length} sprites`),
         sel.size ? [
           h("span", { class: "muted small" }, `${sel.size} selected`),
           h("button", { class: "btn sm", onclick: () => downloadGalleryZip([...sel], false) }, "Export zip"),
