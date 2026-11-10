@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Gallery**: the counts follow the filters. "All", folder and tag chips and "Select all shown" now count what the search, owner, folder and tag filters leave, and the search box updates them as you type.
 - **Updates**: updating Sprite Studio from the web page failed at the package step (*No such file or directory*) and was rolled back. The update ran from the `scripts` folder it was replacing; it now works from a folder that stays. If your installation is on 0.3.2, update it once by hand: `cd <install folder> && sudo scripts/install.sh` (or download the 0.3.4 release), because the 0.3.2 updater still has the problem.
 - **Sign-in block**: the user name, the Password and Sign out buttons and the version in the left rail are centred.
 

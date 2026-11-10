@@ -2114,19 +2114,22 @@ routes.gallery = async (main) => {
   main.append(body);
   const load = async () => { items = (await api("/gallery")).items; draw(); };
   const count = (list, f) => { const m = new Map(); list.forEach((i) => f(i).forEach((k) => m.set(k, (m.get(k) || 0) + 1))); return m; };
-  const filtered = () => {
+  // The items the filters keep; `skip` leaves one filter out ("folder" or "tag"), so a chip counts what it would show.
+  const filtered = (skip) => {
     const q = state.find.trim().toLowerCase();
     return items.filter((i) =>
-      (state.folder === "*" || (i.folder || "") === state.folder) && (!state.tag || (i.tags || []).includes(state.tag)) &&
+      (skip === "folder" || state.folder === "*" || (i.folder || "") === state.folder) &&
+      (skip === "tag" || !state.tag || (i.tags || []).includes(state.tag)) &&
       (state.who === "all" || (state.who === "mine" ? i.owner === ME.username : i.owner !== ME.username)) &&
       (!q || [i.name, i.lora, i.model, i.group, i.kind, String(i.seed), i.folder, ...(i.tags || [])].join(" ").toLowerCase().includes(q))); 
   };
   const draw = () => {
     for (const id of [...sel]) if (!items.some((i) => i.id === id)) sel.delete(id);
-    const folders = count(items, (i) => [i.folder || ""]);
-    const tagCounts = count(items, (i) => i.tags || []);
+    const folders = count(filtered("folder"), (i) => [i.folder || ""]);
+    const tagCounts = count(filtered("tag"), (i) => i.tags || []);
+    const allFolders = [...new Set(items.map((i) => i.folder || ""))];
     const shown = filtered();
-    const names = [...folders.keys()].filter(Boolean).sort();
+    const names = allFolders.filter(Boolean).sort();
     const chip = (label, on, fn, title) => h("button", { class: "chip" + (on ? " on" : ""), type: "button", title, onclick: fn }, label);
     const ids = shown.map((i) => i.id);
     const writable = [...sel].filter((id) => (items.find((i) => i.id === id) || {}).access === "write");
@@ -2134,15 +2137,19 @@ routes.gallery = async (main) => {
       h("datalist", { id: "g-folders" }, names.map((n) => h("option", { value: n }))),
       h("div", { class: "panel" },
         h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
-          h("input", { type: "search", placeholder: "Search name, LoRA, seed, tag…", value: state.find, style: { maxWidth: "260px" }, oninput: (e) => { state.find = e.target.value; keep(); drawGrid(); } }),
+          h("input", { type: "search", placeholder: "Search name, LoRA, seed, tag…", value: state.find, style: { maxWidth: "260px" }, oninput: (e) => {  // (the counts follow the search: draw it all again, keeping the cursor in the box)
+            state.find = e.target.value; keep(); draw();
+            const box = body.querySelector("input[type=search]");
+            box.focus(); box.setSelectionRange(box.value.length, box.value.length);
+          } }),
           chip("All", state.who === "all", () => { state.who = "all"; keep(); draw(); }), chip("Mine", state.who === "mine", () => { state.who = "mine"; keep(); draw(); }),
           chip("Shared with me", state.who === "shared", () => { state.who = "shared"; keep(); draw(); })),
         h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Folders"),
-          chip(`All (${items.length})`, state.folder === "*", () => { state.folder = "*"; keep(); draw(); }),
-          folders.has("") ? chip(`No folder (${folders.get("")})`, state.folder === "", () => { state.folder = ""; keep(); draw(); }) : null,
-          names.map((n) => chip(`${n} (${folders.get(n)})`, state.folder === n, () => { state.folder = n; keep(); draw(); }))),
+          chip(`All (${filtered("folder").length})`, state.folder === "*", () => { state.folder = "*"; keep(); draw(); }),
+          folders.has("") || state.folder === "" ? chip(`No folder (${folders.get("") || 0})`, state.folder === "", () => { state.folder = ""; keep(); draw(); }) : null,
+          names.map((n) => chip(`${n} (${folders.get(n) || 0})`, state.folder === n, () => { state.folder = n; keep(); draw(); }))),
         tagCounts.size ? h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Tags"),
-          [...tagCounts.keys()].sort().map((t) => chip(`${t} (${tagCounts.get(t)})`, state.tag === t, () => { state.tag = state.tag === t ? "" : t; keep(); draw(); }))) : null),
+          [...new Set([...tagCounts.keys(), ...(state.tag ? [state.tag] : [])])].sort().map((t) => chip(`${t} (${tagCounts.get(t) || 0})`, state.tag === t, () => { state.tag = state.tag === t ? "" : t; keep(); draw(); }))) : null),
       h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", margin: "12px 0" } },
         h("label", { class: "row", style: { gap: "6px" } }, h("input", { type: "checkbox", checked: ids.length > 0 && ids.every((id) => sel.has(id)),
           onchange: (e) => { ids.forEach((id) => (e.target.checked ? sel.add(id) : sel.delete(id))); draw(); } }), `Select all shown (${shown.length})`),
