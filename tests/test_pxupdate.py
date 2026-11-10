@@ -116,7 +116,16 @@ def studio(tmp_path, upstream):
     (app / "scripts" / "tool.sh").write_text("#!/bin/sh\n")
     (app / "webapp" / "app.py").write_text("print('v1')\n")
     (app / "webapp" / "static" / "old.js").write_text("gone in the next version")
-    commit(upstream, {"VERSION": "1.1.0\n", "webapp/app.py": "print('v1.1')\n"}, "release", "v1.1.0")
+    commit(
+        upstream,
+        {
+            "VERSION": "1.1.0\n",
+            "webapp/app.py": "print('v1.1')\n",
+            "pyproject.toml": '[project]\nname="x"\ndependencies=["fastapi>=0.110","numpy"]\n',
+        },
+        "release",
+        "v1.1.0",
+    )
     git(upstream, "rm", "-q", "-f", "webapp/static/i.js")
     return {"home": tmp_path / "home", "PXUPDATE_APP": app, "SG_UPDATE_REPO": upstream, "app": app}
 
@@ -170,3 +179,49 @@ def test_a_git_checkout_is_never_overwritten(studio):
     (studio["app"] / ".git").mkdir()
     r = run(["studio"], studio)
     assert r.returncode == 1 and "git checkout" in r.stderr
+
+
+def test_an_update_cut_short_while_replacing_files_is_rolled_back_at_the_next_start(studio):
+    app = studio["app"]
+    # what an interrupted update leaves: the marker (written first) says "applying", the files are half replaced
+    state = studio["home"] / "state"
+    backup = state / "backups" / "app-1.0.0-1"
+    backup.mkdir(parents=True)
+    (backup / "VERSION").write_text("1.0.0\n")
+    (backup / "webapp").mkdir()
+    (backup / "webapp" / "app.py").write_text("print('v1')\n")
+    marker = state / "update_pending"
+    marker.mkdir()
+    for k, v in {"boots": "0", "backup": str(backup), "from": "1.0.0", "to": "1.1.0", "phase": "applying"}.items():
+        (marker / k).write_text(v)
+    (app / "VERSION").write_text("1.1.0\n")
+    (app / "webapp" / "app.py").write_text("half written")
+    r = run(["studio-guard"], studio)  # the very first start afterwards: no need to wait for three
+    assert "cut short" in r.stdout
+    assert (app / "VERSION").read_text().strip() == "1.0.0" and "v1" in (app / "webapp" / "app.py").read_text()
+    assert not marker.exists()
+    assert "interrupted" in (state / "last_update.json").read_text()
+
+
+def test_the_marker_exists_before_any_installed_file_changes(studio):
+    # a package install that fails after the files were copied puts everything back and leaves no marker
+    app = studio["app"]
+    venv = app / "webapp" / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    pip = venv / "pip"
+    pip.write_text('#!/bin/sh\nif [ "$1" = freeze ]; then echo "fastapi==0.1"; exit 0; fi\nexit 1\n')
+    pip.chmod(0o755)
+    r = run(["studio"], studio)
+    assert r.returncode == 1 and "previous version was put back" in r.stderr
+    assert (app / "VERSION").read_text().strip() == "1.0.0"
+    assert not (studio["home"] / "state" / "update_pending").exists()
+    assert (studio["home"] / "state" / "update" / "studio-freeze.txt").read_text().strip() == "fastapi==0.1"
+
+
+def test_a_release_without_readable_dependencies_is_refused_before_anything_changes(studio, upstream):
+    git(upstream, "tag", "-d", "v1.1.0")
+    commit(upstream, {"VERSION": "1.2.0\n", "pyproject.toml": "not toml ["}, "bad", "v1.2.0")
+    r = run(["studio"], studio)
+    assert r.returncode == 1 and "refused" in r.stderr
+    assert (studio["app"] / "VERSION").read_text().strip() == "1.0.0"
+    assert not (studio["home"] / "state" / "update_pending").exists()

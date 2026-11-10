@@ -1,9 +1,15 @@
 name: Checks
 
+# Branch pushes only: a pull request shows the checks of its head commit, so running them again for the
+# pull request would repeat the same code.
 on:
   push:
-  pull_request:
-    branches: [main]
+    branches: ["**"]  # (naming only branches also leaves tags out: release.yml checks those)
+
+# A newer push to the same branch makes the run of the previous one pointless.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -32,11 +38,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest

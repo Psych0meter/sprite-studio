@@ -30,10 +30,12 @@ import binascii
 import contextlib
 import csv
 import datetime as dt
+import hashlib
 import io
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -117,6 +119,7 @@ def tagged(kind: str, key: str, row: dict) -> dict:
     """A list row with who owns it and who it is shared with (what the pages show next to it)."""
     w = who_now()
     row.update(ACCOUNTS.tag(kind, key))
+    row["uid"] = ACCOUNTS.uid(kind, key)  # (the stable id: the name can change, this does not)
     row["access"] = "write" if w is None or ACCOUNTS.access(w, kind, key) == "write" else "read"
     return row
 
@@ -329,6 +332,8 @@ MAX_TEXT_SERVED = 10 * 1024 * 1024  # the biggest text file /api/file serves
 MAX_PIXELS = 64_000_000  # one image
 MAX_QUEUED = int(os.environ.get("SG_MAX_QUEUED", "100"))  # jobs waiting for the GPU
 MAX_CPU_JOBS = 8  # CPU jobs running at once
+MAX_QUEUED_PER_USER = int(os.environ.get("SG_MAX_QUEUED_PER_USER", "20"))  # GPU jobs one user may have waiting
+MAX_CPU_JOBS_PER_USER = int(os.environ.get("SG_MAX_CPU_JOBS_PER_USER", "4"))  # CPU jobs one user may have running
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 SERVED_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".json", ".txt", ".csv", ".log"}
 
@@ -442,6 +447,23 @@ class Jobs:
             "log": str(LOG_DIR / f"{jid}.log"),
         }
         with self.cv:
+            mine = job["owner"]
+            if mine and lane == "gpu" and kind != "update":
+                waiting = sum(1 for q in self.queue if self.jobs[q]["owner"] == mine)
+                if waiting >= MAX_QUEUED_PER_USER:
+                    raise HTTPException(
+                        429,
+                        f"you already have {waiting} jobs waiting for the GPU (the most one person can queue is "
+                        f"{MAX_QUEUED_PER_USER}): wait for some to finish or cancel some",
+                    )
+            if mine and lane != "gpu":
+                running = sum(
+                    1
+                    for j in self.jobs.values()
+                    if j["lane"] != "gpu" and j["status"] == "running" and j["owner"] == mine
+                )
+                if running >= MAX_CPU_JOBS_PER_USER:
+                    raise HTTPException(429, f"you already have {running} jobs running: try again in a moment")
             if lane == "gpu" and len(self.queue) >= MAX_QUEUED:
                 raise HTTPException(
                     429, f"{MAX_QUEUED} jobs are already waiting: wait for some to finish or cancel some"
@@ -900,6 +922,8 @@ def result_set(folder: Path) -> dict:
     """One generation folder (pxmake.sh layout: job.txt, raw/, variants)."""
     job_txt = (folder / "job.txt").read_text(errors="replace") if (folder / "job.txt").exists() else ""
     head = dict(re.findall(r"(\w+)=(\S+)", job_txt.splitlines()[0])) if job_txt else {}
+    if head.get("lora_id"):  # (the file may have been renamed since)
+        head["lora"] = lora_name_of(head["lora_id"]) or head.get("lora", "")
     prompt = what = ""
     for line in job_txt.splitlines():
         if line.startswith("prompt: "):
@@ -1026,6 +1050,17 @@ def scan_results() -> list[dict]:
         i["busy"] = any(i["path"] == b or b.startswith(i["path"] + "/") for b in busy)
         if i["busy"]:
             i["empty"] = False  # still rendering
+            if i["type"] == "batch":  # (the sprites listed so far include the one being drawn: show the planned total)
+                planned = next(
+                    (
+                        j["meta"].get("planned") or j["meta"].get("total")
+                        for j in JOBS.jobs.values()
+                        if j["status"] in ("queued", "running") and j.get("out") == i["path"] and j["meta"].get("total")
+                    ),
+                    0,
+                )
+                if planned:
+                    i["planned"] = planned
     items.sort(key=lambda i: -i["mtime"])
     return items
 
@@ -1222,6 +1257,8 @@ def lora_info(name: str, rec: dict | None = None) -> dict:
         out.update(
             {k: r.get(k) for k in ("model", "checkpoint", "epoch", "final", "trained")}, installed_at=r.get("installed")
         )
+        if r.get("model_id"):  # (the model's id is what is kept; its name can change)
+            out["model"] = ACCOUNTS.name_of_uid("model", r["model_id"]) or r.get("model")
     return out
 
 
@@ -1766,9 +1803,12 @@ def project_list() -> list[dict]:
         models.setdefault(m.get("project") or "", []).append(m["id"])
         if m.get("project"):
             names.add(m["project"])
-    out = [{"name": n, "models": sorted(models.get(n, []))} for n in sorted(names, key=str.lower)]
+    out = [
+        {"name": n, "uid": ACCOUNTS.uid("project", n), "models": sorted(models.get(n, []))}
+        for n in sorted(names, key=str.lower)
+    ]
     if models.get(""):
-        out.append({"name": "", "models": sorted(models[""])})
+        out.append({"name": "", "uid": "", "models": sorted(models[""])})
     return out
 
 
@@ -1820,6 +1860,10 @@ async def api_project_rename(request: Request):
             m["project"] = new
             p.save(m)
     _set_project_names(add=new, drop=old)
+    if not ACCOUNTS.uid(
+        "project", new, mint=False
+    ):  # (a plain rename keeps the project's id; a merge keeps the target's)
+        ACCOUNTS.rename_id("project", old, new)
     return project_list()
 
 
@@ -1842,6 +1886,7 @@ async def api_project_delete(request: Request):
             m["project"] = dest
             p.save(m)
     _set_project_names(drop=name)
+    ACCOUNTS.forget_id("project", name)
     if dest:
         _set_project_names(add=dest)
     return project_list()
@@ -1869,7 +1914,9 @@ def api_file(path: str = ""):
         raise HTTPException(403, "this kind of file is not served")
     if p.suffix.lower() in (".json", ".txt", ".csv", ".log") and p.stat().st_size > MAX_TEXT_SERVED:
         raise HTTPException(413, "this text file is too big to show")
-    return FileResponse(p, headers={"Cache-Control": "no-cache"})
+    return FileResponse(
+        p, headers={"Cache-Control": "private, no-cache"}
+    )  # (kept by this browser only, checked each time)
 
 
 _info_slots = threading.BoundedSemaphore(2)  # image analysis builds large arrays: at most two at a time
@@ -1994,10 +2041,13 @@ def api_jobs_clear(only: str = ""):
     return {"ok": True}
 
 
-def lora_env(b: dict) -> dict:
+def lora_env(b: dict, m: dict | None = None) -> dict:
     env = {}
     if b.get("lora"):
         env["PX_LORA"] = name_ok(b["lora"])
+    used = env.get("PX_LORA") or (m["trigger"] + ".safetensors" if m else "")
+    if used and (lora_dir() / used).is_file():
+        env["PX_LORA_ID"] = lora_id(used)  # (written in the result's job.txt)
     if b.get("strength") not in (None, ""):
         env["PX_LORA_STRENGTH"] = str(body_get(b, "strength", 1.0, float))
     return env
@@ -2081,7 +2131,7 @@ async def api_generate(request: Request):
         cmd += ["--mirror", b["mirror"]]
     if b.get("mask"):
         title = "Touch-up: " + title
-    return JOBS.submit("generate", title, cmd, env=lora_env(b), out=out, meta={"count": count, "request": b})
+    return JOBS.submit("generate", title, cmd, env=lora_env(b, m), out=out, meta={"count": count, "request": b})
 
 
 @app.post("/api/batch/plan")
@@ -2150,14 +2200,20 @@ def fill_value(v: Any) -> int:
 @app.post("/api/batch")
 async def api_batch(request: Request):
     b = await request.json()
-    require_lora(model_cfg(body_model(b), write=False), name_ok(b["lora"]) if b.get("lora") else "")
+    bm = model_cfg(body_model(b), write=False)
+    require_lora(bm, name_ok(b["lora"]) if b.get("lora") else "")
     plan = await api_batch_plan(request)
     cmd = batch_cmd(b)
     tag = cmd[cmd.index("--tag") + 1]
     out = str(setting_path("px_output") / f"batch-{tag}")
     claim_folder(Path(out).name)
     return JOBS.submit(
-        "batch", f"Batch {tag}", cmd, env=lora_env(b), out=out, meta={"total": len(plan["todo"]), "request": b}
+        "batch",
+        f"Batch {tag}",
+        cmd,
+        env=lora_env(b, bm),
+        out=out,
+        meta={"total": len(plan["todo"]), "planned": len(plan["todo"]) + int(plan.get("done") or 0), "request": b},
     )
 
 
@@ -2355,15 +2411,162 @@ async def api_train_caption(cat: str, request: Request):
     return {"ok": True}
 
 
+def lora_id(name: str) -> str:
+    """The stable id of a LoRA file (a UUID in the ids registry, made on first use). Results and gallery items
+    point at this id, never at the file name, so renaming a file changes nothing for them."""
+    legacy = _load("lora_ids.json", {})  # (0.3.3 development builds kept them in a file of their own)
+    if name in legacy and not ACCOUNTS.uid("lora", name, mint=False):
+        with ACCOUNTS.lock:
+            ids = ACCOUNTS._ids(True)
+            ids.setdefault("lora", {})[name] = legacy[name]
+            ACCOUNTS._write("ids.json", ids)
+    return ACCOUNTS.uid("lora", name)
+
+
+def lora_name_of(lid: str) -> str:
+    """The current file name of the LoRA with this id ('' when it is gone)."""
+    n = ACCOUNTS.name_of_uid("lora", lid)
+    return n if n and (lora_dir() / n).is_file() else ""
+
+
+def move_lora_id(old: str, new: str) -> None:
+    """A LoRA file renamed or archived keeps its id."""
+    ACCOUNTS.rename_id("lora", old, new)
+
+
+def _rewrite_head(jt: Path, lid: str) -> None:
+    """Adds `lora_id=` to the first line of a job.txt that has only the file name (older results)."""
+    text = jt.read_text(errors="replace")
+    first, sep, rest = text.partition("\n")
+    tmp = jt.with_name(jt.name + ".tmp")
+    tmp.write_text(f"{first} lora_id={lid}{sep}{rest}")
+    tmp.replace(jt)
+
+
+def rewrite_job_heads(match: str, key: str, new: str, *, add_missing: bool = False) -> int:
+    """Every result's job.txt (the bin included) whose first line has `key=<match>` gets `key=<new>` instead.
+    Returns how many were changed."""
+    root = setting_path("px_output")
+    n = 0
+    if not root.is_dir():
+        return n
+    for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt", ".bin/*/job.txt", ".bin/*/*/job.txt"):
+        for jt in root.glob(pattern):
+            try:
+                text = jt.read_text(errors="replace")
+            except OSError:
+                continue
+            first, sep, rest = text.partition("\n")
+            fixed = re.sub(rf"(?<!\S){re.escape(key)}={re.escape(match)}(?=\s|$)", f"{key}={new}", first)
+            if fixed != first:
+                tmp = jt.with_name(jt.name + ".tmp")
+                tmp.write_text(fixed + sep + rest)
+                tmp.replace(jt)
+                n += 1
+    return n
+
+
+def busy_with(pred) -> bool:
+    """Is a queued or running job one `pred(job)` says is about the thing being renamed?"""
+    return any(j["status"] in ("queued", "running") and pred(j) for j in list(JOBS.jobs.values()))
+
+
+def adopt_legacy_refs(f: Path) -> None:
+    """Before a LoRA file is renamed: gives the id to the older results (job.txt with only `lora=<name>`) and
+    gallery items (name and content hash) that point at it, so they follow the file afterwards."""
+    lid = lora_id(f.name)
+    root = setting_path("px_output")
+    if root.is_dir():
+        for pattern in ("*/job.txt", "*/*/job.txt", "*/*/*/job.txt", ".bin/*/job.txt", ".bin/*/*/job.txt"):
+            for jt in root.glob(pattern):
+                try:
+                    with open(jt, errors="replace") as fh:
+                        head = fh.readline()
+                    if re.search(rf"\blora={re.escape(f.name)}(\s|$)", head) and "lora_id=" not in head:
+                        _rewrite_head(jt, lid)
+                except OSError:
+                    continue
+    sha = ""
+    for m in gallery_metas():
+        if m.get("lora_id"):
+            continue
+        if m.get("lora_sha"):
+            sha = sha or file_sha(f)
+            hit = m["lora_sha"] == sha
+        else:
+            hit = m.get("lora") == f.name
+        if hit:
+            m["lora_id"] = lid
+            _gallery_write(m["id"], m)
+
+
+def archive_lora(f: Path) -> Path:
+    """Renames a LoRA file that is about to be replaced to `<name>_<unix time>.safetensors` (its install record
+    follows) so that nothing a new install does can change an old file; returns the new path."""
+    stamp = int(f.stat().st_mtime)
+    new = f.with_name(f"{f.stem}_{stamp}.safetensors")
+    n = 0
+    while new.exists():
+        n += 1
+        new = f.with_name(f"{f.stem}_{stamp}_{n}.safetensors")
+    with _lock:
+        f.rename(new)
+        rec = _load("installed.json", {})
+        if f.name in rec:
+            rec[new.name] = rec.pop(f.name)
+            _save("installed.json", rec)
+    move_lora_id(f.name, new.name)
+    return new
+
+
+_sha_cache: dict[tuple[str, int, int], str] = {}
+
+
+def file_sha(f: Path) -> str:
+    """SHA-256 of a (large) file, kept while its size and time stay the same."""
+    st = f.stat()
+    key = (str(f), st.st_size, int(st.st_mtime))
+    if key not in _sha_cache:
+        h = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        _sha_cache[key] = h.hexdigest()
+    return _sha_cache[key]
+
+
+def lora_references(f: Path, scan: dict[str, int] | None = None) -> dict[str, int]:
+    """What still needs this LoRA file: result folders rendered with it (every user's) and gallery items saved
+    with it. They point at the file's id; older ones that have only the name (or name and content hash) are
+    matched by that until the file is renamed, which gives them the id."""
+    counts = scan if scan is not None else _count_lora_results(setting_path("px_output"))
+    lid = lora_id(f.name)
+    results = counts.get(lid, 0) + counts.get(f.name, 0)
+    sha = ""
+    n = 0
+    for m in gallery_metas():
+        if m.get("lora_id"):
+            n += m["lora_id"] == lid
+        elif m.get("lora_sha"):
+            sha = sha or file_sha(f)
+            n += m["lora_sha"] == sha
+        else:
+            n += m.get("lora") == f.name
+    return {"results": results, "gallery": n}
+
+
 def install_lora(src: Path, name: str, model: str, meta: dict | None = None) -> dict:
     """Copies a LoRA file into ComfyUI's loras folder as `name` and records where it came from
     (`meta` overrides what is read from the source's own name)."""
     lora_dir().mkdir(parents=True, exist_ok=True)
     dst = lora_dir() / name
+    if dst.exists():
+        archive_lora(dst)  # (never overwritten: results and gallery items made with it stay reproducible)
     shutil.copy2(src, dst)
     m = re.search(r"-(\d+)$", src.stem)
     entry = {
         "model": model,
+        "model_id": ACCOUNTS.uid("model", model) if model else "",
         "checkpoint": src.name,
         "epoch": int(m.group(1)) if m else None,
         "final": not m,
@@ -2376,6 +2579,15 @@ def install_lora(src: Path, name: str, model: str, meta: dict | None = None) -> 
         rec[name] = entry
         _save("installed.json", rec)
     return entry
+
+
+def lora_in_use_message(name: str, refs: dict[str, int], what: str) -> str:
+    bits = []
+    if refs["results"]:
+        bits.append(f"{refs['results']} result{'s' if refs['results'] != 1 else ''}")
+    if refs["gallery"]:
+        bits.append(f"{refs['gallery']} gallery image{'s' if refs['gallery'] != 1 else ''}")
+    return f"{name} cannot be {what}: {' and '.join(bits)} still use it. Delete them first (a gallery image keeps its LoRA). Renaming is always possible."
 
 
 def lora_filename(s: str) -> str:
@@ -2419,7 +2631,7 @@ _lora_count_cache: dict[str, Any] = {"at": 0.0, "root": "", "data": {}}
 
 
 def lora_results_count() -> dict[str, int]:
-    """How many result folders were rendered with each LoRA file (the `lora=` of every job.txt). Reading them all
+    """How many result folders were rendered with each LoRA file (by `lora_id=`, else `lora=`, of every job.txt). Reading them all
     is slow with thousands of results, so the answer is kept for 20 seconds."""
     root = setting_path("px_output")
     c = _lora_count_cache
@@ -2443,8 +2655,8 @@ def _count_lora_results(root: Path) -> dict[str, int]:
                     head = fh.readline()
             except OSError:
                 continue
-            m = re.search(r"\blora=(\S+)", head)
-            if m:
+            m = re.search(r"\blora_id=([0-9a-f]{32})\b", head) or re.search(r"\blora=(\S+)", head)
+            if m:  # (by id when the result has one, else by file name)
                 counts[m.group(1)] = counts.get(m.group(1), 0) + 1
     return counts
 
@@ -2479,6 +2691,12 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
     for mid, m in models.items():
         defaults[m["trigger"] + ".safetensors"] = (mid, "SD 1.5")
         defaults[m["trigger"] + "_xl.safetensors"] = (mid, "SDXL")
+    gal: dict[str, int] = {}
+    ids = ACCOUNTS._ids().get("lora", {})
+    by_id = {i: n for n, i in ids.items()}
+    for m in gallery_metas():  # (by id, else by name; the file's content is checked when deleting)
+        k = by_id.get(m.get("lora_id", ""), m.get("lora", ""))
+        gal[k] = gal.get(k, 0) + 1
     rows = []
     for f in sorted(lora_dir().glob("*.safetensors")) if lora_dir().is_dir() else []:
         info = lora_info(f.name, rec)
@@ -2506,7 +2724,9 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
                 "checkpoint": info.get("checkpoint"),
                 "in_use": d[1] if d else "",
                 "in_use_model": d[0] if d else "",
-                "results": used.get(f.name, 0),
+                "uid": lora_id(f.name),
+                "results": used.get(ids.get(f.name, ""), 0) + used.get(f.name, 0),
+                "gallery": gal.get(f.name, 0),
                 **ACCOUNTS.tag("model", model or "-"),
             }
         )
@@ -2571,12 +2791,14 @@ async def api_loras_rename(request: Request):
         raise HTTPException(400, "That name is a model's own: use the Use button to install a LoRA as the one in use.")
     if dst.exists():
         raise HTTPException(400, f"{dst.name} already exists")
+    adopt_legacy_refs(src)  # (results and gallery items follow the id from now on)
     with _lock:
         src.rename(dst)
         rec = _load("installed.json", {})
         if src.name in rec:
             rec[dst.name] = rec.pop(src.name)
             _save("installed.json", rec)
+    move_lora_id(src.name, dst.name)
     return {"renamed": dst.name}
 
 
@@ -2586,18 +2808,31 @@ async def api_loras_delete(request: Request):
     names = [str(n) for n in b.get("names") or []]
     if not names:
         raise HTTPException(400, "nothing to delete")
-    done = []
+    done, kept, todo = [], [], []
+    scan = _count_lora_results(setting_path("px_output"))  # (once, and outside the lock: it reads every result)
+    for n in names:
+        f = existing_lora(n)
+        if f is None:
+            continue
+        lora_file(f.name)  # (refused when it is not the user's)
+        refs = lora_references(f, scan)
+        if refs["results"] or refs["gallery"]:
+            kept.append(lora_in_use_message(f.name, refs, "deleted"))
+        else:
+            todo.append(f)
     with _lock:
         rec = _load("installed.json", {})
-        for n in names:
-            f = existing_lora(n)
-            if f is not None:
-                lora_file(f.name)  # (refused when it is not the user's)
+        for f in todo:
+            with contextlib.suppress(FileNotFoundError):
                 f.unlink()
-                done.append(f.name)
-                rec.pop(f.name, None)
+            done.append(f.name)
+            rec.pop(f.name, None)
         _save("installed.json", rec)
-    return {"deleted": done}
+        for f in todo:
+            ACCOUNTS.forget_id("lora", f.name)
+    if kept and not done:
+        raise HTTPException(409, " ".join(kept))
+    return {"deleted": done, "kept": kept}
 
 
 # ---- models (pxmodel.py): groups, kinds, sprites
@@ -2986,6 +3221,48 @@ def api_model_delete(mid: str):
     return {"moved_to": str(dst)}
 
 
+@app.post("/api/models/{mid}/rename")
+async def api_model_rename(mid: str, request: Request):
+    """Gives a model another id ({"to": new}): its folder, sprites and training move with it. Its owner, shares,
+    LoRA files, results and gallery images follow by id."""
+    model_cfg(mid)  # (first: someone else's model does not exist for you)
+    b = await request.json()
+    new = str(b.get("to") or "").strip()
+    if not re.fullmatch(r"[a-z0-9_]{1,40}", new):
+        raise HTTPException(400, "a model id is lowercase letters, digits and _ (40 at most)")
+    if new == mid:
+        return api_model(mid)
+    p = pm()
+    src, dst = Path(p.model_dir(mid)), Path(p.model_dir(new))
+    if not src.exists():
+        raise HTTPException(400, "this built-in model has nothing saved to rename")
+    if dst.exists() or ACCOUNTS.entry("model", new):
+        raise HTTPException(400, f"a model {new} exists already")
+    if busy_with(
+        lambda j: (
+            mid in (j["meta"].get("category"), j["meta"].get("model"), (j["meta"].get("request") or {}).get("model"))
+        )
+    ):
+        raise HTTPException(409, "a job for this model is queued or running: rename it when the job is done")
+    uid = ACCOUNTS.uid("model", mid)
+    with _lock:
+        shutil.move(str(src), str(dst))
+        m = p.load(new)
+        p.save(m)  # (its id is written as the new one)
+        rec = _load("installed.json", {})
+        for r in rec.values():
+            if r.get("model") == mid:
+                r["model"], r["model_id"] = new, uid
+        _save("installed.json", rec)
+    ACCOUNTS.rename("model", mid, new)
+    rewrite_job_heads(mid, "model", new)
+    for g in gallery_metas():
+        if g.get("model_id") == uid or (not g.get("model_id") and g.get("model") == mid):
+            g["model"], g["model_id"] = new, uid
+            _gallery_write(g["id"], g)
+    return api_model(new)
+
+
 @app.post("/api/models/{mid}/upload")
 async def api_model_upload(mid: str, request: Request):
     m = model_cfg(mid)
@@ -3074,6 +3351,29 @@ async def api_model_sprites(mid: str, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/models/{mid}/duplicates")
+async def api_model_duplicates(mid: str, request: Request):
+    """Sprites that are the same image under different names. {"remove": false} (default) only lists them;
+    {"remove": true} moves all but one of each set to sprites/.trash."""
+    m = model_cfg(mid)
+    b = await request.json()
+    groups = pm().find_duplicates(m)
+    removed: list[str] = []
+    if b.get("remove"):
+        folder = Path(pm().sprites_dir(mid))
+        trash = folder / ".trash"
+        trash.mkdir(exist_ok=True)
+        for names in groups:
+            for n in names[1:]:
+                f = folder / n
+                if f.is_file():
+                    shutil.move(str(f), str(trash / f.name))
+                    removed.append(n)
+                m["sprites"].pop(n, None)
+        pm().save(m)
+    return {"groups": groups, "removed": removed}
+
+
 @app.delete("/api/models/{mid}/sprites")
 async def api_model_sprites_delete(mid: str, request: Request):
     m = model_cfg(mid)
@@ -3109,6 +3409,48 @@ async def api_results_delete(request: Request):
         raise HTTPException(400, "nothing to delete")
     done = [delete_result(x) for x in dict.fromkeys(paths)]
     return {"deleted": done, "bin": bin_info()}
+
+
+RESERVED_RESULTS = ("uploads", "picked", "recoloured")
+
+
+@app.post("/api/results/rename")
+async def api_results_rename(request: Request):
+    """Renames a result folder ({"name": old, "to": new}). It keeps its id, owner and shares; its stars and the
+    gallery images saved from it follow."""
+    b = await request.json()
+    old = str(b.get("name") or "")
+    root = setting_path("px_output")
+    if not old or old.startswith(".") or old in RESERVED_RESULTS or "/" in old or not (root / old).is_dir():
+        raise HTTPException(404, "no such result")
+    need("result", old, True)
+    new = name_ok(b.get("to") or "")
+    if new.startswith(".") or new in RESERVED_RESULTS:
+        raise HTTPException(400, "choose another name")
+    if new == old:
+        return {"renamed": old}
+    if (root / new).exists() or ACCOUNTS.entry("result", new):
+        raise HTTPException(400, f"{new} exists already")
+    src, dst = root / old, root / new
+    if busy_with(lambda j: str(j.get("out") or "").startswith(str(src))):
+        raise HTTPException(409, "a job is still writing to this result: rename it when the job is done")
+    with _lock:
+        src.rename(dst)
+        d = picks_load()
+        for picks in d["users"].values():
+            for k in [k for k in picks if k == str(src) or k.startswith(str(src) + "/")]:
+                picks[str(dst) + k[len(str(src)) :]] = picks.pop(k)
+        _save("picks.json", d)
+        for j in JOBS.jobs.values():
+            if str(j.get("out") or "").startswith(str(src)):
+                j["out"] = str(dst) + j["out"][len(str(src)) :]
+        JOBS.persist()
+    for m in gallery_metas():  # (the copy in the gallery remembers where it came from)
+        if str(m.get("source", "")).startswith(str(src) + "/"):
+            m["source"] = str(dst) + m["source"][len(str(src)) :]
+            _gallery_write(m["id"], m)
+    ACCOUNTS.rename("result", old, new)
+    return {"renamed": new}
 
 
 def bin_owner_key(d: Path) -> str:
@@ -3327,6 +3669,39 @@ async def api_palette_save(pid: str, request: Request):
     out = save_palette(clean_palette(await request.json(), pid))
     claim("palette", pid)
     return out
+
+
+@app.post("/api/palettes/{pid}/rename")
+async def api_palette_rename(pid: str, request: Request):
+    """Gives a palette another id ({"to": new}); the groups that use it, its owner and its shares follow."""
+    pal = read_palette(pid)
+    need("palette", pid, True)
+    new = (await request.json()).get("to") or ""
+    if not PAL_ID.fullmatch(new):
+        raise HTTPException(400, "a palette id is lowercase letters, digits and _")
+    if new == pid:
+        return pal
+    if (pal_dir() / f"{new}.json").exists() or ACCOUNTS.entry("palette", new):
+        raise HTTPException(400, f"a palette {new} exists already")
+    with _lock:
+        data = json.loads((pal_dir() / f"{pid}.json").read_text())
+        data["id"] = new
+        if data.get("label") in (pid, None, ""):
+            data["label"] = new
+        save_palette(data)
+        (pal_dir() / f"{pid}.json").unlink()
+        for mid in pm().list_models():  # (every model's groups: a rename must not leave a dangling palette)
+            try:
+                m = pm().load(mid)
+            except SystemExit:
+                continue
+            if any(g.get("palette") == pid for g in m["groups"]):
+                for g in m["groups"]:
+                    if g.get("palette") == pid:
+                        g["palette"] = new
+                pm().save(m)
+    ACCOUNTS.rename("palette", pid, new)
+    return read_palette(new)
 
 
 @app.delete("/api/palettes/{pid}")
@@ -3833,6 +4208,300 @@ def api_picks_export():
     return {"folder": str(dest), "files": sorted(done)}
 
 
+# ---- gallery: sprites a user keeps, with the recipe that made them
+
+GALLERY_ID = re.compile(r"[0-9a-f]{16}")
+MAX_GALLERY_EXPORT = 2000
+_gallery_cache: dict[str, Any] = {"stamp": None, "root": "", "data": []}
+
+
+def gallery_dir() -> Path:
+    """Hidden under the results folder (no result list, bin or share ever sees it); every image is served by
+    /api/gallery, so nobody reaches it by path."""
+    return setting_path("px_output") / ".gallery"
+
+
+def gallery_metas() -> list[dict]:
+    """Every item's meta.json (cached until an item is added or removed; edits of name, folder or tags are read
+    from disk by the gallery pages themselves)."""
+    root = gallery_dir()
+    try:
+        stamp = root.stat().st_mtime_ns
+    except OSError:
+        return []
+    c = _gallery_cache
+    if c["stamp"] == stamp and c["root"] == str(root):
+        return c["data"]
+    out = []
+    for d in root.iterdir():
+        if GALLERY_ID.fullmatch(d.name) and (d / "meta.json").is_file():
+            with contextlib.suppress(OSError, ValueError):
+                out.append(json.loads((d / "meta.json").read_text()))
+    c.update(stamp=stamp, root=str(root), data=out)
+    return out
+
+
+def gallery_meta(gid: str, write: bool = False) -> dict:
+    if not GALLERY_ID.fullmatch(gid or ""):
+        raise HTTPException(404, "not found")
+    need("gallery", gid, write)
+    f = gallery_dir() / gid / "meta.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        raise HTTPException(404, "not found") from None
+
+
+def _gallery_write(gid: str, meta: dict) -> None:
+    f = gallery_dir() / gid / "meta.json"
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, indent=1))
+    tmp.replace(f)
+
+
+def gallery_label(s: Any, limit: int = 40) -> str:
+    """A folder or a tag: short, plain text (letters, digits, space, - _ .)."""
+    return re.sub(r"[^\w .-]+", "_", str(s or "")).strip(" .")[:limit]
+
+
+def gallery_tags(v: Any) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    out: list[str] = []
+    for t in v:
+        t = gallery_label(t, 24).lower()
+        if t and t not in out:
+            out.append(t)
+    return out[:12]
+
+
+def gallery_row(m: dict) -> dict:
+    row = {
+        k: m.get(k)
+        for k in ("id", "name", "created", "folder", "tags", "note", "seed", "model", "group", "kind", "lora", "w", "h")
+    }
+    row["epoch"] = (m.get("lora_info") or {}).get("epoch")
+    if m.get("model_id"):  # (the model's id is what is kept; its name can change)
+        row["model"] = ACCOUNTS.name_of_uid("model", m["model_id"]) or m.get("model")
+    if m.get("lora_id"):  # (the file may have been renamed since it was saved)
+        row["lora"] = lora_name_of(m["lora_id"]) or m.get("lora")
+    return tagged("gallery", m["id"], row)
+
+
+@app.get("/api/gallery")
+def api_gallery():
+    """The gallery items this user may see: their own and the ones shared with them."""
+    rows = []
+    for m in gallery_metas():
+        if can("gallery", m["id"]):
+            try:  # (the item itself: a rename, a folder or a tag may be newer than the cached list)
+                m = json.loads((gallery_dir() / m["id"] / "meta.json").read_text())
+            except (OSError, ValueError):
+                continue
+            rows.append(gallery_row(m))
+    rows.sort(key=lambda r: -(r["created"] or 0))
+    return {"items": rows}
+
+
+@app.post("/api/gallery")
+async def api_gallery_add(request: Request):
+    """Keeps a generated sprite: a copy of the image and the recipe it was made with (LoRA, seed, epoch...). It stays
+    when the result is deleted, and the LoRA it was made with can no longer be deleted while it is here."""
+    b = await request.json()
+    src = safe_path(str(b.get("path", "")), write=False)
+    if (
+        src.suffix.lower() != ".png"
+        or not src.is_file()
+        or not is_variant(src)
+        or not (src.parent / "job.txt").exists()
+    ):
+        raise HTTPException(400, "choose a sprite generated in Results")
+    me = who_now()
+    owner = me.id if me else ""
+    for m in gallery_metas():  # saving the same sprite twice gives the first one back
+        if m.get("source") == str(src) and m.get("owner") == owner and can("gallery", m["id"], True):
+            return {**gallery_row(m), "already": True}
+    r = result_set(src.parent)
+    params = r["params"]
+    seed = next((v["seed"] for v in r["variants"] if v["path"] == str(src)), "")
+    wh = png_size(src) or (0, 0)
+    lora = params.get("lora", "")
+    info: dict[str, Any] = {}
+    sha = ""
+    lid = params.get("lora_id") or ""
+    lf = lora_dir() / lora if lora and lora == Path(lora).name else None
+    if lf is not None and lf.is_file():
+        li = lora_info(lora)
+        lid = lid or lora_id(lora)
+        info = {k: li.get(k) for k in ("model", "checkpoint", "epoch", "final", "trained", "installed_at", "size")}
+        with contextlib.suppress(OSError):
+            sha = file_sha(lf)
+    gid = secrets.token_hex(8)
+    meta = {
+        "id": gid,
+        "owner": owner,
+        "name": name_ok(b.get("name") or src.stem),
+        "created": time.time(),
+        "folder": gallery_label(b.get("folder")),
+        "tags": gallery_tags(b.get("tags")),
+        "note": str(b.get("note") or "")[:500],
+        "source": str(src),
+        "seed": seed,
+        "model": params.get("model", ""),
+        "model_id": ACCOUNTS.uid("model", params["model"]) if params.get("model") else "",
+        "group": params.get("group", ""),
+        "kind": params.get("kind", ""),
+        "lora": lora,
+        "lora_id": lid,
+        "lora_sha": sha,
+        "lora_info": info,
+        "params": params,
+        "prompt": r["prompt"],
+        "what": r["what"],
+        "w": wh[0],
+        "h": wh[1],
+    }
+    d = gallery_dir() / gid
+    d.mkdir(parents=True)
+    shutil.copy2(src, d / "image.png")
+    _gallery_write(gid, meta)
+    claim("gallery", gid)
+    return {**gallery_row(meta), "already": False}
+
+
+@app.get("/api/gallery/{gid}")
+def api_gallery_get(gid: str):
+    m = gallery_meta(gid)
+    return {**gallery_row(m), **{k: m.get(k) for k in ("params", "prompt", "what", "lora_sha", "lora_info", "source")}}
+
+
+@app.get("/api/gallery/{gid}/image")
+def api_gallery_image(gid: str):
+    gallery_meta(gid)
+    return FileResponse(gallery_dir() / gid / "image.png", headers={"Cache-Control": "private, no-cache"})
+
+
+@app.patch("/api/gallery/{gid}")
+async def api_gallery_patch(gid: str, request: Request):
+    """Only the name, the folder, the tags and the note can change: the recipe stays as it was."""
+    b = await request.json()
+    with _lock:
+        m = gallery_meta(gid, write=True)
+        if "name" in b:
+            m["name"] = name_ok(str(b["name"]))
+        if "folder" in b:
+            m["folder"] = gallery_label(b["folder"])
+        if "tags" in b:
+            m["tags"] = gallery_tags(b["tags"])
+        if "note" in b:
+            m["note"] = str(b["note"] or "")[:500]
+        _gallery_write(gid, m)
+    return gallery_row(m)
+
+
+@app.post("/api/gallery/bulk")
+async def api_gallery_bulk(request: Request):
+    """The same change for several items: a folder ("" takes them out of any), tags to add or remove."""
+    b = await request.json()
+    ids = [str(i) for i in b.get("ids") or []][:MAX_GALLERY_EXPORT]
+    add, drop = gallery_tags(b.get("add_tags")), set(gallery_tags(b.get("remove_tags")))
+    done = 0
+    with _lock:
+        for gid in ids:
+            if not GALLERY_ID.fullmatch(gid) or not can("gallery", gid, True):
+                continue
+            try:
+                m = json.loads((gallery_dir() / gid / "meta.json").read_text())
+            except (OSError, ValueError):
+                continue
+            if "folder" in b:
+                m["folder"] = gallery_label(b["folder"])
+            m["tags"] = gallery_tags([t for t in m.get("tags", []) if t not in drop] + add)
+            _gallery_write(gid, m)
+            done += 1
+    return {"changed": done}
+
+
+@app.post("/api/gallery/delete")
+async def api_gallery_delete(request: Request):
+    """Removes images from the gallery (their owner, or an administrator). The LoRAs they needed are free again
+    once nothing else uses them."""
+    b = await request.json()
+    done = 0
+    for gid in [str(i) for i in b.get("ids") or []][:MAX_GALLERY_EXPORT]:
+        if not GALLERY_ID.fullmatch(gid) or not can("gallery", gid, True):
+            continue
+        shutil.rmtree(gallery_dir() / gid, ignore_errors=True)
+        ACCOUNTS.forget("gallery", gid)
+        done += 1
+    return {"deleted": done}
+
+
+@app.post("/api/gallery/export")
+async def api_gallery_export(request: Request):
+    """A zip of the chosen images (the ones the user may see), named after the sprites, with manifest.json holding
+    each recipe. `folders` keeps the gallery folders as folders in the zip."""
+    import zipfile
+
+    b = await request.json()
+    ids = [str(i) for i in b.get("ids") or []][:MAX_GALLERY_EXPORT]
+    keep = bool(b.get("folders"))
+    buf = io.BytesIO()
+    used: set[str] = set()
+    manifest = []
+    total = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        for gid in ids:
+            if not GALLERY_ID.fullmatch(gid) or not can("gallery", gid):
+                continue
+            try:
+                m = json.loads((gallery_dir() / gid / "meta.json").read_text())
+                data = (gallery_dir() / gid / "image.png").read_bytes()
+            except (OSError, ValueError):
+                continue
+            total += len(data)
+            if total > MAX_ZIP_TOTAL:
+                raise HTTPException(400, f"too much to export at once (at most {MAX_ZIP_TOTAL // 1_000_000} MB)")
+            base = (m.get("folder") + "/" if keep and m.get("folder") else "") + m["name"]
+            arc, n = base + ".png", 1
+            while arc.lower() in used:
+                n += 1
+                arc = f"{base}_{n}.png"
+            used.add(arc.lower())
+            z.writestr(arc, data)
+            manifest.append(
+                {
+                    "file": arc,
+                    **{
+                        k: m.get(k)
+                        for k in (
+                            "name",
+                            "folder",
+                            "tags",
+                            "seed",
+                            "model",
+                            "group",
+                            "kind",
+                            "lora",
+                            "lora_info",
+                            "params",
+                            "prompt",
+                            "what",
+                            "created",
+                        )
+                    },
+                }
+            )
+        z.writestr("manifest.json", json.dumps(manifest, indent=1))
+    if not manifest:
+        raise HTTPException(400, "nothing to export")
+    return Response(
+        buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="gallery.zip"', "Cache-Control": "private, no-store"},
+    )
+
+
 # ---- settings
 
 
@@ -3892,6 +4561,8 @@ def resource_exists(kind: str, key: str) -> bool:
         return not key.startswith(".") and (setting_path("px_output") / key).is_dir()
     if kind == "palette":
         return bool(PAL_ID.fullmatch(key)) and (pal_dir() / f"{key}.json").is_file()
+    if kind == "gallery":
+        return bool(GALLERY_ID.fullmatch(key)) and (gallery_dir() / key / "meta.json").is_file()
     return False
 
 

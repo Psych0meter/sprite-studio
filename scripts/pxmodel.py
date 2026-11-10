@@ -386,6 +386,26 @@ def sprites(m):
     return out
 
 
+def find_duplicates(m):
+    """Groups of sprites whose pixels are identical (the same image added more than once, under other names):
+    [[keep, duplicate, ...], ...]. In each group the one kept is the one with settings made by hand, else the
+    shortest name, else the first alphabetically."""
+    import hashlib
+
+    by = {}
+    for f in sorted(glob.glob(os.path.join(sprites_dir(m["id"]), "*.png"))):
+        with Image.open(f) as im:
+            rgba = im.convert("RGBA")
+            key = hashlib.sha256(repr(rgba.size).encode() + rgba.tobytes()).hexdigest()
+        by.setdefault(key, []).append(os.path.basename(f))
+    out = []
+    for names in by.values():
+        if len(names) > 1:
+            names.sort(key=lambda n: (not m["sprites"].get(n), len(n), n))
+            out.append(names)
+    return sorted(out)
+
+
 def caption(m, group, kind, own_words, colours, extra=""):
     parts = [m["trigger"]]
     if group:

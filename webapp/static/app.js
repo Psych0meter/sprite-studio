@@ -175,6 +175,7 @@ const ICONS = {
   brush: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M13.5 2.5 7 9M7 9c-1.5-1-3.5 0-3.5 2 0 1-.5 2-1.5 2.5 2.5.5 5 0 5-2.5"/></svg>',
   tune: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M2 4.5h12M2 11.5h12"/><circle cx="10.5" cy="4.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/><circle cx="5.5" cy="11.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/></svg>',
   redo: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M12.5 6.5A5 5 0 1 0 13 10M12.8 2.5v4h-4"/></svg>',
+  gallery: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.3" d="M3.5 1.8h9v12.4L8 11.3l-4.5 2.9z"/></svg>',
   download: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg>',
   x: '<svg viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.5" d="M4 4l8 8M12 4l-8 8"/></svg>',
 };
@@ -546,6 +547,12 @@ function tile(v, opts = {}) {
       await attempt(async () => { S.picks = await api("/picks", { body: { path: v.path, picked: !picked, as: opts.pickAs } }); });
       opts.refresh && opts.refresh();
     }, picked));
+  }
+  if (!opts.orig && opts.pickAs !== undefined && v.path) {
+    tools.append(iconBtn("gallery", "Keep in your gallery, with the recipe that made it", async () => {
+      const r = await attempt(() => api("/gallery", { body: { path: v.path } }));
+      if (r) toast(r.already ? "Already in your gallery" : "Kept in your gallery: its LoRA can no longer be deleted while it is there");
+    }));
   }
   tools.append(iconBtn("compare", inTray ? "In the comparison: click to remove" : "Add to the comparison", () => {
     setTray(inTray ? S.tray.filter((t) => t.path !== v.path) : [...S.tray, { path: v.path, w: v.w, h: v.h, label: v.label || v.name }]);
@@ -1294,7 +1301,7 @@ routes.results = async (main, _parts, params) => {
             h("div", { class: "s" }, i.type === "batch" ? h("span", { class: "tag amber" }, "batch") : i.type === "matrix" ? h("span", { class: "tag" }, "LoRA test") : null,
               i.empty ? [" ", h("span", { class: "tag bad", title: "Nothing was rendered: see the job's log on the Jobs page" }, "empty")] : null,
               i.busy ? [" ", h("span", { class: "tag" }, "running")] : null,
-              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
+              " ", i.type === "matrix" ? `${i.count} subjects` : i.type === "batch" ? `${i.count} of ${i.planned || i.tried} sprites` : `${i.count} variants`, ", ", ago(i.mtime)),
             ownerBadge(i) || i.access === "write" ? h("div", { class: "row", style: { gap: "6px", marginTop: "3px" } }, ownerBadge(i),
               i.access === "write" ? h("button", { class: "btn sm ghost", type: "button", style: { padding: "0 6px", minHeight: "20px" },
                 onclick: (e) => { e.stopPropagation(); shareDialog("result", i.path.split("/").pop(), i.title, async () => { items = await api("/results"); drawItems(); }); } }, "Share") : null) : null)));
@@ -1316,8 +1323,22 @@ routes.results = async (main, _parts, params) => {
     try { d = await api(detailUrl); } catch (e) { view.append(h("div", { class: "note bad" }, e.message)); return; }
     const body = h("div", {});
     const item = items.find((i) => i.path === d.path) || {};
-    const delBtn = (path, label, small) => item.busy ? null : h("button", { class: "btn sm ghost danger", title: "Move to the bin",
-      onclick: () => removeResults({ paths: [path] }, label) }, small ? "Delete" : "Delete " + (d.type === "batch" ? "batch" : d.type === "matrix" ? "test" : "result"));
+    const renameBtn = (path) => item.busy || item.path !== path || item.access === "read" ? null : h("button", { class: "btn sm ghost", title: "Give this result folder another name (its stars and gallery images follow)",
+      onclick: async () => {
+        const cur = path.split("/").pop();
+        const to = await askText("Rename the result", { input: "New name", value: cur, ok: "Rename" });
+        if (!to || to === cur) return;
+        const r = await attempt(() => api("/results/rename", { body: { name: cur, to } }), "Renamed");
+        if (!r) return;
+        current = path.slice(0, path.length - cur.length) + r.renamed;
+        history.replaceState(null, "", "#/results?path=" + encodeURIComponent(current));
+        await loadPicks();
+        items = await api("/results");
+        drawList();
+        drawView();
+      } }, "Rename");
+    const delBtn = (path, label, small) => item.busy ? null : h("span", { class: "row", style: { gap: "6px" } }, small ? null : renameBtn(path), h("button", { class: "btn sm ghost danger", title: "Move to the bin",
+      onclick: () => removeResults({ paths: [path] }, label) }, small ? "Delete" : "Delete " + (d.type === "batch" ? "batch" : d.type === "matrix" ? "test" : "result")));
     const redraw = () => { body.innerHTML = ""; drawBody(); bar.replaceWith(bar = makeBar()); };
     const makeBar = () => viewBar(redraw, [h("label", { class: "check small" }, h("input", { type: "checkbox", checked: S.view.raw, onchange: (e) => { S.view.raw = e.target.checked; saveView(); redraw(); } }), "Raw renders")]);
     let bar = makeBar();
@@ -1997,6 +2018,157 @@ routes.loras = async (main) => {
       : h("p", { class: "muted" }, "None yet.")));
 };
 
+// ---------------------------------------------------------------- Gallery
+//
+// The sprites a user keeps: a copy of the image and the recipe (LoRA, epoch, seed, prompt...) that made it. It stays
+// when its result is deleted; while it is here the LoRA it was made with cannot be deleted.
+
+async function downloadGalleryZip(ids, folders) {
+  try {
+    const r = await fetch("/api/gallery/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids, folders }) });
+    if (!r.ok) { let m = r.statusText; try { const d = await r.json(); m = d.detail || d.error || m; } catch (_) { /* not JSON */ } throw new Error(m); }
+    const url = URL.createObjectURL(await r.blob());
+    const a = h("a", { href: url, download: "gallery.zip" });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast(`${ids.length} sprite${ids.length === 1 ? "" : "s"} exported (gallery.zip, with manifest.json)`);
+  } catch (e) { toast(String(e.message || e), true); }
+}
+
+function galleryDialog(id, folders, onChange) {
+  api(`/gallery/${id}`).then((g) => {
+    const mine = g.access === "write";
+    const li = g.lora_info || {};
+    const p = g.params || {};
+    const layer = h("div", { class: "modal dialog-layer" });
+    const done = (changed) => { layer.remove(); document.removeEventListener("keydown", onKey, true); if (changed) onChange(); };
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); done(false); } };
+    const name = h("input", { type: "text", value: g.name, disabled: !mine });
+    const folder = h("input", { type: "text", value: g.folder || "", list: "g-folders", disabled: !mine, placeholder: "no folder" });
+    const tags = h("input", { type: "text", value: (g.tags || []).join(", "), disabled: !mine, placeholder: "comma separated" });
+    const note = h("textarea", { rows: 2, disabled: !mine, placeholder: "a note" }, g.note || "");
+    const row = (k, v) => v === "" || v == null ? null : h("tr", {}, h("td", { class: "muted small" }, k), h("td", { class: "small" }, v));
+    const save = async () => {
+      const r = await attempt(() => api(`/gallery/${id}`, { method: "PATCH", body: { name: name.value, folder: folder.value, tags: tags.value.split(","), note: note.value } }), "Saved");
+      if (r) done(true);
+    };
+    const img = h("img", { class: "px", src: `/api/gallery/${id}/image`, alt: g.name, style: { maxWidth: "100%", maxHeight: "300px", minWidth: "128px", objectFit: "contain", background: "var(--panel)" } });
+    layer.append(h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true", style: { maxWidth: "720px", width: "92vw", maxHeight: "90vh", overflow: "auto" } },
+      h("h2", {}, g.name),
+      h("div", { class: "row", style: { alignItems: "flex-start", gap: "18px", flexWrap: "wrap" } },
+        h("div", {}, img, h("div", { class: "small muted", style: { marginTop: "6px" } }, `${g.w} × ${g.h} px`)),
+        h("div", { style: { flex: "1 1 280px" } },
+          h("table", {}, h("tbody", {},
+            row("LoRA", g.lora ? [g.lora, li.epoch != null ? ` · epoch ${li.epoch}` : li.final ? " · last epoch" : ""] : "none recorded"),
+            row("Checkpoint", li.checkpoint), row("Trained", li.trained ? fmtTime(li.trained) : ""),
+            row("Seed", g.seed ? h("span", { class: "seed", title: "Click to copy", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(String(g.seed)); toast("Seed copied"); } }, String(g.seed)) : ""),
+            row("Model", g.model), row("Group", g.group), row("Kind", g.kind),
+            row("Settings", Object.entries(p).filter(([k]) => !["name", "model", "group", "kind", "lora"].includes(k)).map(([k, v]) => `${k}=${v}`).join("  ")),
+            row("Prompt", g.prompt), row("Extra", g.what), row("Saved", fmtTime(g.created)), row("Owner", g.owner))),
+          h("p", { class: "hint" }, "The recipe cannot be changed. The LoRA file cannot be deleted while this image is in the gallery (renaming it is fine)."))),
+      h("div", { class: "stack", style: { gap: "8px", marginTop: "12px" } },
+        h("label", {}, "Name", name), h("label", {}, "Folder", folder), h("label", {}, "Tags", tags), h("label", {}, "Note", note)),
+      h("div", { class: "row", style: { marginTop: "16px", justifyContent: "space-between", flexWrap: "wrap" } },
+        h("div", { class: "row" },
+          shareButton("gallery", id, g, g.name, () => done(true)),
+          h("a", { class: "btn sm ghost", href: `/api/gallery/${id}/image`, download: g.name + ".png" }, "Download"),
+          mine ? h("button", { class: "btn sm danger", type: "button", onclick: async () => {
+            if (await askConfirm(`Remove ${g.name} from the gallery? The image and its recipe are erased.`, { danger: true, ok: "Remove", title: "Remove from the gallery" })) {
+              const r = await attempt(() => api("/gallery/delete", { body: { ids: [id] } }), "Removed"); if (r) done(true);
+            } } }, "Remove") : null),
+        h("div", { class: "row" }, h("button", { class: "btn ghost", type: "button", onclick: () => done(false) }, mine ? "Cancel" : "Close"),
+          mine ? h("button", { class: "btn primary", type: "button", onclick: save }, "Save") : null))));
+    layer.addEventListener("click", (e) => { if (e.target === layer) done(false); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(layer);
+  }).catch((e) => toast(String(e.message || e), true));
+}
+
+routes.gallery = async (main) => {
+  const state = Object.assign({ find: "", folder: "*", tag: "", who: "all" }, store.get("gallery", {}));
+  const keep = () => store.set("gallery", state);
+  const sel = new Set();
+  let items = [];
+  main.append(head("Gallery", "The sprites you keep, each with the recipe that made it (LoRA, epoch, seed, prompt). They stay here when their results are deleted, and the LoRA they were made with cannot be deleted while they do. Keep one with the bookmark button in Results."));
+  const body = h("div", {});
+  main.append(body);
+  const load = async () => { items = (await api("/gallery")).items; draw(); };
+  const count = (list, f) => { const m = new Map(); list.forEach((i) => f(i).forEach((k) => m.set(k, (m.get(k) || 0) + 1))); return m; };
+  const filtered = () => {
+    const q = state.find.trim().toLowerCase();
+    return items.filter((i) =>
+      (state.folder === "*" || (i.folder || "") === state.folder) && (!state.tag || (i.tags || []).includes(state.tag)) &&
+      (state.who === "all" || (state.who === "mine" ? i.owner === ME.username : i.owner !== ME.username)) &&
+      (!q || [i.name, i.lora, i.model, i.group, i.kind, String(i.seed), i.folder, ...(i.tags || [])].join(" ").toLowerCase().includes(q))); 
+  };
+  const draw = () => {
+    for (const id of [...sel]) if (!items.some((i) => i.id === id)) sel.delete(id);
+    const folders = count(items, (i) => [i.folder || ""]);
+    const tagCounts = count(items, (i) => i.tags || []);
+    const shown = filtered();
+    const names = [...folders.keys()].filter(Boolean).sort();
+    const chip = (label, on, fn, title) => h("button", { class: "chip" + (on ? " on" : ""), type: "button", title, onclick: fn }, label);
+    const ids = shown.map((i) => i.id);
+    const writable = [...sel].filter((id) => (items.find((i) => i.id === id) || {}).access === "write");
+    body.replaceChildren(
+      h("datalist", { id: "g-folders" }, names.map((n) => h("option", { value: n }))),
+      h("div", { class: "panel" },
+        h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
+          h("input", { type: "search", placeholder: "Search name, LoRA, seed, tag…", value: state.find, style: { maxWidth: "260px" }, oninput: (e) => { state.find = e.target.value; keep(); drawGrid(); } }),
+          chip("All", state.who === "all", () => { state.who = "all"; keep(); draw(); }), chip("Mine", state.who === "mine", () => { state.who = "mine"; keep(); draw(); }),
+          chip("Shared with me", state.who === "shared", () => { state.who = "shared"; keep(); draw(); })),
+        h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Folders"),
+          chip(`All (${items.length})`, state.folder === "*", () => { state.folder = "*"; keep(); draw(); }),
+          folders.has("") ? chip(`No folder (${folders.get("")})`, state.folder === "", () => { state.folder = ""; keep(); draw(); }) : null,
+          names.map((n) => chip(`${n} (${folders.get(n)})`, state.folder === n, () => { state.folder = n; keep(); draw(); }))),
+        tagCounts.size ? h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Tags"),
+          [...tagCounts.keys()].sort().map((t) => chip(`${t} (${tagCounts.get(t)})`, state.tag === t, () => { state.tag = state.tag === t ? "" : t; keep(); draw(); }))) : null),
+      h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", margin: "12px 0" } },
+        h("label", { class: "row", style: { gap: "6px" } }, h("input", { type: "checkbox", checked: ids.length > 0 && ids.every((id) => sel.has(id)),
+          onchange: (e) => { ids.forEach((id) => (e.target.checked ? sel.add(id) : sel.delete(id))); draw(); } }), `Select all shown (${shown.length})`),
+        sel.size ? [
+          h("span", { class: "muted small" }, `${sel.size} selected`),
+          h("button", { class: "btn sm", onclick: () => downloadGalleryZip([...sel], false) }, "Export zip"),
+          h("button", { class: "btn sm", title: "Gallery folders become folders in the zip", onclick: () => downloadGalleryZip([...sel], true) }, "Export zip with folders"),
+          writable.length ? [
+            h("button", { class: "btn sm", onclick: async () => {
+              const f = await askText("Move to a folder", { input: "Folder name (empty: no folder)", value: "", ok: "Move" });
+              if (f !== null) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, folder: f } }), "Moved"); load(); }
+            } }, "Move to folder"),
+            h("button", { class: "btn sm", onclick: async () => {
+              const t = await askText("Add tags", { input: "Tags, comma separated", value: "", ok: "Add" });
+              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, add_tags: t.split(",") } }), "Tags added"); load(); }
+            } }, "Add tags"),
+            h("button", { class: "btn sm", onclick: async () => {
+              const t = await askText("Remove tags", { input: "Tags, comma separated", value: "", ok: "Remove" });
+              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, remove_tags: t.split(",") } }), "Tags removed"); load(); }
+            } }, "Remove tags"),
+            h("button", { class: "btn sm danger", onclick: async () => {
+              if (await askConfirm(`Remove ${writable.length} image${writable.length === 1 ? "" : "s"} from the gallery? The images and their recipes are erased; their LoRAs are free to delete again if nothing else uses them.`, { danger: true, ok: "Remove", title: "Remove from the gallery" })) {
+                await attempt(() => api("/gallery/delete", { body: { ids: writable } }), "Removed"); sel.clear(); load();
+              }
+            } }, "Remove from gallery")] : null,
+          h("button", { class: "btn sm ghost", onclick: () => { sel.clear(); draw(); } }, "Clear")] : null),
+      grid);
+    drawGrid();
+  };
+  const grid = h("div", { class: "gallery-grid" });
+  const drawGrid = () => {
+    const shown = filtered();
+    grid.replaceChildren(...(shown.length ? shown.map((i) => h("div", { class: "tile g-card" + (sel.has(i.id) ? " picked" : "") },
+      h("label", { class: "g-check" }, h("input", { type: "checkbox", checked: sel.has(i.id), "aria-label": "Select " + i.name,
+        onchange: (e) => { if (e.target.checked) sel.add(i.id); else sel.delete(i.id); draw(); } })),
+      h("div", { class: "stage " + ltClass(), title: "Open: recipe, folder, tags, sharing", onclick: () => galleryDialog(i.id, [], load) },
+        h("img", { class: "px g-img", src: `/api/gallery/${i.id}/image`, alt: i.name, loading: "lazy" })),
+      h("div", { class: "cap" }, h("div", { class: "cap-text" },
+        h("div", { class: "name", title: i.name }, i.name),
+        h("div", { class: "secs" }, [i.seed ? "seed " + i.seed : "", i.epoch != null ? "epoch " + i.epoch : ""].filter(Boolean).join(" · ")),
+        i.folder || (i.tags || []).length ? h("div", { class: "secs" }, [i.folder ? "📁 " + i.folder : "", ...(i.tags || []).map((t) => "#" + t)].filter(Boolean).join(" ")) : null),
+        ownerBadge(i)))) : [h("p", { class: "muted" }, items.length ? "Nothing matches." : "Nothing here yet: use the bookmark button on a sprite in Results to keep it.")]));
+  };
+  await load();
+};
+
 // ---------------------------------------------------------------- LoRA files
 
 routes.lorafiles = async (main) => {
@@ -2079,24 +2251,24 @@ routes.lorafiles = async (main) => {
         h("td", {}, f.epoch != null ? "epoch " + f.epoch : f.final ? "last epoch" : h("span", { class: "muted", title: "Copied outside the app, and the name has no epoch" }, "?")),
         h("td", {}, h("span", { class: "small", title: f.known ? `Trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)}` : "File date" }, fmtTime(f.known && f.trained ? f.trained : f.mtime))),
         h("td", {}, h("span", { class: "muted small" }, fmtMB(f.size))),
-        h("td", {}, f.results ? h("span", { class: "small" }, String(f.results)) : h("span", { class: "muted" }, "0")),
+        h("td", {}, f.results || f.gallery ? h("span", { class: "small", title: "Results rendered with it, and gallery images kept with it" }, String(f.results) + (f.gallery ? ` + ${f.gallery} in gallery` : "")) : h("span", { class: "muted" }, "0")),
         h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end", flexWrap: "nowrap" } },
           f.model && !f.in_use ? h("button", { class: "btn sm primary", title: `Install as the ${f.base} LoRA that ${f.model_label} generates with`,
             onclick: () => act(() => api("/loras/use", { body: { name: f.name } }), "Installed as the one in use") }, "Use") : null,
-          h("button", { class: "btn sm", disabled: !!f.in_use, title: f.in_use ? "The LoRA a model generates with keeps its name" : "Rename",
+          h("button", { class: "btn sm", disabled: !!f.in_use, title: f.in_use ? "The LoRA a model generates with keeps its name" : "Rename (results and gallery images follow)",
             onclick: async () => {
               const cur = f.name.replace(/\.safetensors$/, "");
               const to = await askText("Rename the LoRA", { input: "New name", value: cur, ok: "Rename" });
               if (to && to !== cur) act(() => api("/loras/rename", { body: { name: f.name, to } }), "Renamed");
             } }, "Rename"),
-          h("button", { class: "btn sm danger", title: "Delete this file",
+          h("button", { class: "btn sm danger", disabled: !!f.results || !!f.gallery, title: f.results || f.gallery ? "Results or gallery images still use it: delete them first" : "Delete this file",
             onclick: async () => {
               const msg = `Delete ${f.name} from ComfyUI? ${fmtMB(f.size)} are freed.` + (f.in_use ? ` It is what ${f.model_label} generates with: install another one afterwards.` : "");
               if (await askConfirm(msg, { danger: true, ok: "Delete", title: "Delete a LoRA file" })) { picked.delete(f.name); act(() => api("/loras/delete", { body: { names: [f.name] } }), "Deleted"); }
             } }, "Delete")))))))));
     const pgr = pager(shown.length, paging, () => { store.set("lorafiles_size", paging.size); load(); });
     if (pgr) body.append(pgr);
-    body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes: renaming a file does not change old ones."));
+    body.append(h("p", { class: "hint" }, "Use copies a file as the one its model generates with (the SDXL file stays separate from the SD 1.5 one). Results counts the result folders rendered with the file, from their job notes, and the gallery images kept with it. A LoRA that results or gallery images still use cannot be deleted (renaming is fine: they follow the file), and installing a new LoRA over a name keeps the old file as name_<time>.safetensors."));
   };
   await load();
 };
@@ -2355,6 +2527,15 @@ async function modelEditor(main, mid, tab) {
         h("div", { class: "row" },
           h("input", { type: "text", placeholder: "Filter by name", value: search, style: { width: "180px" }, oninput: (e) => { search = e.target.value; drawSprites(); setTimeout(() => { const i = body.querySelector("input[placeholder='Filter by name']"); if (i) { i.focus(); i.setSelectionRange(search.length, search.length); } }); } }),
           h("button", { class: "btn sm ghost", onclick: () => { shown.forEach((s) => selected.add(s.name)); drawSprites(); } }, "Select all shown"),
+          h("button", { class: "btn sm ghost", title: "Finds the sprites that are the same image under different names and keeps one of each", onclick: async () => {
+            const r = await attempt(() => api(`/models/${mid}/duplicates`, { body: {} }));
+            if (!r) return;
+            const extra = r.groups.reduce((n, g) => n + g.length - 1, 0);
+            if (!extra) return toast("No duplicates: every sprite is a different image");
+            const list = r.groups.slice(0, 6).map((g) => g.join(" = ")).join("\n") + (r.groups.length > 6 ? `\n… and ${r.groups.length - 6} more` : "");
+            if (!(await askConfirm(`${extra} duplicate sprite(s) in ${r.groups.length} set(s). The first name of each set is kept, the others go to sprites/.trash.\n\n${list}`, { danger: true, ok: "Remove duplicates", title: "Remove duplicates" }))) return;
+            if (await attempt(() => api(`/models/${mid}/duplicates`, { body: { remove: true } }), "Duplicates removed")) { selected.clear(); await reload(); draw(); }
+          } }, "Remove duplicates"),
           h("button", { class: "btn sm ghost", title: "Selects the sprites whose shading is brighter at the bottom than at the top", onclick: async () => {
             const r = await attempt(() => api(`/models/${mid}/lighting`));
             if (!r) return;
@@ -2555,6 +2736,12 @@ async function modelEditor(main, mid, tab) {
           h("p", { class: "small muted" }, "A file with this model's groups, kinds, words and settings (no sprites), to import on another machine or as a template for another game (Models → Import a model file)."),
           h("a", { class: "btn", href: `/api/models/${mid}/export`, download: `${mid}.json` }, "Export the model")),
         h("div", { class: "panel", hidden: d.access === "read" }, h("h2", {}, "Folder"), d.dir ? h("p", { class: "small mono muted" }, d.dir) : null,
+          h("button", { class: "btn", style: { marginRight: "8px" }, title: "Change the model's id (its folder moves with it; results, LoRAs and the gallery follow)", onclick: async () => {
+            const to = await askText("Rename the model", { input: "New id", value: mid, hint: "Lowercase letters, digits and _. Not while a job for it is queued or running.", ok: "Rename" });
+            if (!to || to === mid) return;
+            const r = await attempt(() => api(`/models/${mid}/rename`, { body: { to } }), "Renamed");
+            if (r) { await loadCatalog(); location.hash = "#/models/" + to; }
+          } }, "Rename this model"),
           h("button", { class: "btn danger", onclick: async () => {
             if (!(await askConfirm(`Delete the model ${m.label}? Its folder (sprites, training sets, checkpoints) is moved to .deleted, not erased.`, { danger: true, ok: "Delete", title: "Delete the model" }))) return;
             const r = await attempt(() => api("/models/" + mid, { method: "DELETE" }), "Model deleted");
@@ -2895,6 +3082,12 @@ routes.palettes = async (main, parts) => {
             const r = await attempt(() => api("/palettes/" + id, { method: "PUT", body: Object.assign({}, edit, { id }) }), "Copy made");
             if (r) { current = id; dirty = false; await loadPalettes(); drawList(); drawEditor(); }
           } }, "Make my own copy") : saveBtn,
+          p.access === "read" ? null : h("button", { class: "btn ghost", title: "Change the palette's id (the groups using it follow)", onclick: async () => {
+            const to = await askText("Rename the palette", { input: "New id", value: p.id, hint: "Lowercase letters, digits and _. The groups using it follow.", ok: "Rename" });
+            if (!to || to === p.id) return;
+            const r = await attempt(() => api("/palettes/" + p.id + "/rename", { body: { to } }), "Renamed");
+            if (r) { current = r.id; dirty = false; await loadPalettes(); await loadCatalog(); drawList(); drawEditor(); }
+          } }, "Rename id"),
           p.access === "read" ? null : h("button", { class: "btn ghost danger", onclick: async () => {
             if (!(await askConfirm(`Delete the palette ${p.label}?` + (p.used_by.length ? ` The groups using it (${p.used_by.join(", ")}) go back to no palette.` : ""), { danger: true, ok: "Delete", title: "Delete the palette" }))) return;
             if (await attempt(() => api("/palettes/" + p.id, { method: "DELETE" }), "Palette deleted")) { current = ""; dirty = false; await loadPalettes(); await loadCatalog(); current = (S.palettes[0] || {}).id || ""; drawList(); drawEditor(); }
@@ -2948,7 +3141,7 @@ routes.jobs = async (main, parts) => {
         h("td", {}, statusLabel(j)),
         h("td", { style: { width: "220px" } }, j.status === "running" ? [progressBar(j), h("div", { class: "small muted" }, (j.progress && j.progress.text) || "")] : null),
         h("td", { class: "small muted nowrap" }, fmtTime(j.started || j.created)),
-        h("td", { class: "small muted nowrap" }, j.started ? fmtDur((j.ended || Date.now() / 1000) - j.started) : ""),
+        h("td", { class: "small muted nowrap" }, j.started && j.ended ? fmtDur(j.ended - j.started) : ""),
         h("td", { class: "nowrap" }, j.foreign ? null : ["running", "queued"].includes(j.status)
           ? h("button", { class: "btn sm danger", onclick: (e) => { e.stopPropagation(); attempt(() => api(`/jobs/${j.id}/cancel`, { body: {} }), "Cancelled").then(() => loop.poll({ force: true })); } }, "Cancel")
           : ["failed", "cancelled", "interrupted"].includes(j.status)
@@ -2959,7 +3152,7 @@ routes.jobs = async (main, parts) => {
   const busy = (jobs) => jobs.some((j) => ["running", "queued"].includes(j.status));
   const loop = autoRefresh({
     fetch: () => api("/jobs"),
-    // the page shown: its rows' status and progress (the elapsed time of a running job moves with it)
+    // the page shown: its rows' status and progress
     signature: (jobs) => JSON.stringify([jobs.length, paging.page, paging.size, pageOf(jobs, paging).rows.map((j) => [j.id, j.status, j.position, j.progress && j.progress.text, j.progress && j.progress.fraction, j.ended])]),
     rebuild: draw,
     every: (jobs) => (busy(jobs) ? 3000 : 15000),  // idle: a slow look, for jobs started from elsewhere

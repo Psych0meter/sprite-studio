@@ -246,10 +246,12 @@ def test_lora_files_with_odd_names_can_be_renamed_and_deleted(client, env):
         "renamed": "mine.safetensors"
     }
     assert client.post("/api/loras/delete", json={"names": ["second one.safetensors"]}).json() == {
-        "deleted": ["second one.safetensors"]
+        "deleted": ["second one.safetensors"],
+        "kept": [],
     }
     assert client.post("/api/loras/delete", json={"names": ["../x", "gone"]}).json() == {
-        "deleted": []
+        "deleted": [],
+        "kept": [],
     }  # nothing outside the folder
     assert [r["name"] for r in client.get("/api/loras").json()["files"]] == ["mine.safetensors"]
 

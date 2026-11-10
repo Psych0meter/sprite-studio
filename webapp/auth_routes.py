@@ -163,6 +163,7 @@ def make_router(
 
     # ---- sharing
     def checked(kind: str, key: str) -> dict:
+        key = accounts.name_of_uid(kind, key) or key  # (the route takes the stable id as well as the name)
         if kind not in acc.KINDS or not resource_kinds(kind, key):
             raise HTTPException(404, "not found")
         w = current()
@@ -178,10 +179,13 @@ def make_router(
     async def acl_put(kind: str, key: str, request: Request):
         w = current()
         checked(kind, key)
+        key = accounts.name_of_uid(kind, key) or key
         b = await body(request)
         users_ = b.get("users", [])
-        if not isinstance(users_, list):
+        if not isinstance(users_, list) or not all(isinstance(u, str) for u in users_):
             raise HTTPException(400, "users is a list of user names")
+        if b.get("owner") is not None and not isinstance(b["owner"], str):
+            raise HTTPException(400, "owner is a user name")
         known = accounts.users()
         unknown = [u for u in users_ if u not in known]
         if unknown:

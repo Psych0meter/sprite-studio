@@ -60,7 +60,7 @@ scripts/
 | `$PX_OUTPUT/matrix-<tag>/` | a LoRA comparison |
 | `$PX_OUTPUT/.bin/` | deleted results (each with `.origin`) |
 | `$PX_OUTPUT/uploads/<id>/`, `picked/<id>/`, `recoloured/<id>/` (`<id>` is the user's id, `U-...`) | what a user sends for a generation, exports as picks, or recolours from a source they only read |
-| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `projects.json` (projects with no model yet) |
+| `$SG_WEB_STATE/` | `users.json`, `sessions.json`, `acl.json`, `setup_code`, `auth.log` (accounts, below; mode 0600), `settings.json`, `jobs.json` (each job has its `owner`, a user id), `logs/`, `picks.json` (`{"users": {name: {path: {as, time}}}}`; a flat file from before accounts is read as the administrator's), `projects.json` (`{"entries": [[owner, name]]}`; the old `{"names": [...]}` is migrated), `installed.json` (which checkpoint each installed LoRA is; follows a rename, dropped on delete), `ids.json` (`{kind: {name: uuid}}` for `model`, `palette`, `result`, `project`, `lora`: the stable id of every resource, made the first time it is needed and moved by a rename; `lora_ids.json` of the 0.3.3 development builds is folded into it), `projects.json` (projects with no model yet) |
 
 ## 4. Formats
 
@@ -146,8 +146,8 @@ it when the run finishes (`follow_up`). `GET /api/train/<model>` reports
 `previews_todo`, `previews_by_epoch` and `final_epoch`.
 `GET /api/loras` lists ComfyUI's LoRA files (model from `installed.json`, else from the
 trigger the name starts with; epoch; the number of results whose `job.txt` names the file);
-`POST /api/loras/use|rename|delete` change them (a model's own `<trigger>[_xl].safetensors`
-cannot be renamed or a rename target).
+`POST /api/models/{id}/rename`, `/api/palettes/{id}/rename` and `/api/results/rename` move a resource to a new name (the registry id, and so the owner and shares, stay; `rewrite_job_heads` fixes `model=` in every `job.txt`; picks, gallery sources, installed-LoRA records and the groups' palettes are rewritten; a queued or running job on the thing refuses with 409). `POST /api/loras/use|rename|delete` change them (a model's own `<trigger>[_xl].safetensors`
+cannot be renamed or a rename target; a rename keeps the file's id).
 `GET /api/models/<id>/prompt?group=&kind=` returns the prompt the model builds
 for a group and a kind; the Preview prompts editor uses it to start a row.
 The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
@@ -171,9 +171,9 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   control, updates, SDXL download, users) answer 403 to anyone else; the
   last administrator cannot be removed, demoted or disabled. `auth.log` has
   one line for each sign-in, refusal, password change and account change.
-- **Ownership and sharing** (`acl.json`): three kinds of resource, `model`
+- **Ownership and sharing** (`acl.json`): four kinds of resource, `model`
   (its id; its LoRA files follow it), `result` (the top folder of
-  `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id),
+  `$PX_OUTPUT`: a run, `batch-<tag>`, `matrix-<tag>`) and `palette` (its id) and `gallery` (an item's id),
   each with an `owner`, `users` and `all`. **Accounts are identified by an id**
   (`U-` and 32 hex digits, made when the account is created, in `users.json`;
   a name starts with a lowercase letter or digit, so it can never be mistaken for
@@ -228,20 +228,55 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   - **Sprite Studio** (`studio_update`): refused on a git checkout (the
     installation made by `install.sh` is a copy). The release is cloned, its tag
     must be on the default branch and its `VERSION` must equal the tag, its
-    Python files must compile; the running files are copied to
-    `<state>/backups/app-<version>-<time>` (the last three are kept), the new
-    ones copied over (`scripts`, `webapp`, `docs`, `README.md`, `CHANGELOG.md`,
-    `VERSION`) and a marker `<state>/update_pending/` (`boots`, `backup`,
-    `from`, `to`) written. When the job ends the app re-executes itself. Two
-    safeguards undo an update that does not work: `webapp/run.sh` calls
-    `pxupdate.py studio-guard` at each start (the marker's `boots` counter
-    reaches 3 without a confirmation: the backup is copied back), and the
+    Python files must compile, and its `pyproject.toml` must be readable
+    (everything above happens before any installed file changes). The running
+    files are copied to `<state>/backups/app-<version>-<time>` (the last three
+    are kept) and the web environment's packages are saved
+    (`pip freeze --local`, `<state>/update/studio-freeze.txt`). Then the marker
+    `<state>/update_pending/` (`boots`, `backup`, `from`, `to`, `freeze`, and
+    `phase` = `applying`) is written, atomically (a folder renamed into
+    place), *before* the new files are copied over (`scripts`, `webapp`,
+    `docs`, `README.md`, `CHANGELOG.md`, `VERSION`) and FastAPI and uvicorn
+    installed; `phase` becomes `installed` when both are done. When the job
+    ends the app re-executes itself. Safeguards: `webapp/run.sh` calls
+    `pxupdate.py studio-guard` at each start: a marker still `applying` means
+    the update was cut short (power loss, a kill) and is rolled back at once;
+    otherwise its `boots` counter reaching 3 without a confirmation copies the
+    backup back (files and packages). The
     new process probes `/api/auth/state` after 25 s (answers: marker removed,
     `last_update.json` says `ok`; no answer: `studio-rollback` and restart).
     `studio-rollback` (the *Go back* button) copies the newest backup back and
     records `last_update.json` (`rolled back`). Limit: the guard is the new
     version's own `run.sh`, so a release whose `run.sh` is broken is only
     caught by systemd restarting it into the 25 s probe, not by the guard.
+- **Gallery**: `<PX_OUTPUT>/.gallery/<id>/` (`id` = 16 hex digits) holds
+  `image.png` (a copy of a variant) and `meta.json`: owner, name, folder, tags,
+  note, `source` (the result path, informational), `seed`, `model`, `group`,
+  `kind`, `lora`, `lora_sha` (SHA-256 of the LoRA file when it was kept),
+  `lora_info` (epoch, checkpoint, trained...), the whole `job.txt` head as
+  `params`, `prompt`, `what`, size. The folder is hidden, so no result list,
+  bin or share sees it, and images are served only by the API with the `gallery`
+  ACL (shared items read-only). Routes: `GET/POST /api/gallery` (POST takes a
+  result variant's `path`; the same sprite twice answers the first item),
+  `GET/PATCH /api/gallery/{id}` (only name, folder, tags, note change),
+  `/image`, `POST /api/gallery/bulk` (folder, `add_tags`, `remove_tags`),
+  `/delete`, `/export` (a zip of PNGs named after the sprites plus
+  `manifest.json`; `folders` keeps the gallery folders). Folders and tags are
+  labels on the item, not directories. Items outlive their results (they are
+  copies). Links to a LoRA are by id, never by file name: the ids registry (`ids.json`, `lora_id(name)` makes one on first use, rename and
+  archive move it with the file, delete drops it) gives each file a UUID; `pxmake.sh`
+  writes it as `lora_id=` (from `PX_LORA_ID`) after `lora=` in `job.txt`, and a
+  gallery item stores `lora_id`. `lora_references(file)` counts the result
+  folders (every user's) and gallery items with that id; older ones that have
+  only a name (or name plus content hash) are matched by that, and
+  `adopt_legacy_refs` stamps them with the id just before a rename (rewriting
+  the first line of their `job.txt`, the bin included). The name shown comes from
+  the id (`lora_name_of`), so a rename changes nothing for them. While a count
+  is non-zero `/api/loras/delete` answers 409; `/rename` is always allowed. `install_lora` never
+  overwrites: an existing file is first renamed `<stem>_<mtime>.safetensors`
+  with its install record (`archive_lora`); `train_lora.sh` does the same for
+  `install`, and moves the last run's checkpoints and previews to
+  `<output>/previous/<time>/` when a new training starts.
 - **Picks to model**: `POST /api/picks/to-model` copies the picked sprites into
   a model's `sprites/` (a new model from `{"new": ...}`), numbering names that
   exist, with optional group / kind overrides.
@@ -265,7 +300,10 @@ The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
   pixels and 25 MB each; a base64 file is size-checked before it is decoded; a zip may hold 5000
   files and `SG_MAX_ZIP_MB` (250) unpacked; `/api/info` analyses images up to
   16 million pixels; `/api/file` serves text files up to 10 MB. At most
-  `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429). The
+  `SG_MAX_QUEUED` jobs wait for the GPU and 8 CPU jobs run at once (429); one
+  user may have at most `SG_MAX_QUEUED_PER_USER` (20) jobs waiting for the GPU
+  and `SG_MAX_CPU_JOBS_PER_USER` (4) CPU jobs running, so one person cannot
+  fill the queue for the others. The
   logs of jobs that fell off the 300 kept are deleted after a day.
 - **Front end**: `app.js`, `accounts.js` (the account menu, Users page, Share dialog) and `palette.js`, a small `h()` element helper, one route
   function per page, in-app dialogs (`askText`, `askConfirm`); no global

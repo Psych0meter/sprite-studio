@@ -25,6 +25,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,7 @@ from typing import Any
 ID_PREFIX = "U-"  # an id starts with a capital: no user name can (names are lowercase)
 USERNAME = re.compile(r"[a-z0-9][a-z0-9_.-]{1,31}")
 ROLES = ("admin", "user")
-KINDS = ("model", "result", "palette")
+KINDS = ("model", "result", "palette", "gallery")
 MIN_PASSWORD = 10
 MAX_PASSWORD = 128
 SESSION_MAX_AGE = 14 * 86400  # however active
@@ -163,7 +164,12 @@ class Accounts:
 
     # ---- identity: resources, jobs and folders point at an id, never at a name that could be given again
     def migrate_ids(self) -> None:
-        """Gives every account an id and rewrites the names in the ownership and sharing lists to ids (once)."""
+        """Gives every account an id and rewrites the names in the ownership and sharing lists to ids (once);
+        then does the same for the resources themselves."""
+        self._migrate_user_ids()
+        self.migrate_keys()
+
+    def _migrate_user_ids(self) -> None:
         with self.lock:
             users = self.users()
             if not users:
@@ -186,6 +192,65 @@ class Accounts:
                     shared = e.get("users", [])
                     if any(not str(u).startswith(ID_PREFIX) for u in shared):
                         e["users"], changed = [ids[u] for u in shared if u in ids], True
+            if changed:
+                self._write("acl.json", acl)
+
+    # ---- identity of resources: models, palettes, results, projects and LoRA files each have a UUID (ids.json),
+    # made the first time anything needs it; a name is only a label. Ownership and sharing are kept by id.
+    def _ids(self, fresh: bool = False) -> dict:
+        return self._read("ids.json", {}, fresh)
+
+    def uid(self, kind: str, name: str, mint: bool = True) -> str:
+        """The id of the resource called `name` (made when it has none; '' when it has none and `mint` is off).
+        Gallery items are their own id."""
+        if kind == "gallery":
+            return name
+        found = self._ids().get(kind, {}).get(name, "")
+        if found or not mint:
+            return found
+        with self.lock:
+            ids = self._ids(True)
+            found = ids.setdefault(kind, {}).get(name)
+            if not found:
+                found = uuid.uuid4().hex
+                ids[kind][name] = found
+                self._write("ids.json", ids)
+        return found
+
+    def name_of_uid(self, kind: str, uid: str) -> str:
+        """The current name of the resource with this id ('' when unknown)."""
+        if kind == "gallery":
+            return uid
+        return next((n for n, i in self._ids().get(kind, {}).items() if i == uid), "")
+
+    def rename_id(self, kind: str, old: str, new: str) -> None:
+        """The resource called `old` is now called `new`: it keeps its id (and so its owner and shares)."""
+        with self.lock:
+            ids = self._ids(True)
+            u = ids.get(kind, {}).pop(old, None)
+            if u is not None:
+                ids[kind][new] = u
+                self._write("ids.json", ids)
+
+    def forget_id(self, kind: str, name: str) -> None:
+        with self.lock:
+            ids = self._ids(True)
+            if ids.get(kind, {}).pop(name, None) is not None:
+                self._write("ids.json", ids)
+
+    def migrate_keys(self) -> None:
+        """Older ownership lists were keyed by name: gives each such resource an id and keys the entry by it (once)."""
+        with self.lock:
+            acl = self._acl(True)
+            changed = False
+            for kind, items in acl.items():
+                if kind == "gallery":
+                    continue
+                known = set(self._ids().get(kind, {}).values())
+                for key in [k for k in items if k not in known]:
+                    items[self.uid(kind, key)] = items.pop(key)
+                    known = set(self._ids().get(kind, {}).values())
+                    changed = True
             if changed:
                 self._write("acl.json", acl)
 
@@ -504,7 +569,7 @@ class Accounts:
         return self._read("acl.json", {}, fresh)
 
     def entry(self, kind: str, key: str) -> dict | None:
-        return self._acl().get(kind, {}).get(key)
+        return self._acl().get(kind, {}).get(self.uid(kind, key, mint=False))
 
     def owner(self, kind: str, key: str) -> str:
         e = self.entry(kind, key)
@@ -514,6 +579,7 @@ class Accounts:
         """Records the owner of a new resource (an existing owner is kept unless `replace`)."""
         with self.lock:
             acl = self._acl(True)
+            key = self.uid(kind, key)
             e = acl.setdefault(kind, {}).get(key)
             if e and e.get("owner") and not replace:
                 return
@@ -526,16 +592,13 @@ class Accounts:
     def forget(self, kind: str, key: str) -> None:
         with self.lock:
             acl = self._acl(True)
-            if acl.get(kind, {}).pop(key, None) is not None:
+            if acl.get(kind, {}).pop(self.uid(kind, key, mint=False), None) is not None:
                 self._write("acl.json", acl)
+            self.forget_id(kind, key)
 
     def rename(self, kind: str, old: str, new: str) -> None:
-        with self.lock:
-            acl = self._acl(True)
-            e = acl.get(kind, {}).pop(old, None)
-            if e is not None:
-                acl[kind][new] = e
-                self._write("acl.json", acl)
+        """The name changes, the id (and so the owner and the shares) does not."""
+        self.rename_id(kind, old, new)
 
     def share(self, kind: str, key: str, users: list[str], everyone: bool, by: str = "") -> dict:
         if kind not in KINDS:
@@ -543,7 +606,7 @@ class Accounts:
         known = self.users()
         with self.lock:
             acl = self._acl(True)
-            e = acl.get(kind, {}).get(key)
+            e = acl.get(kind, {}).get(self.uid(kind, key, mint=False))
             if not e:
                 raise AccountError("this resource has no owner yet: an administrator can give it one", 409)
             names, ids = [], []

@@ -35,6 +35,9 @@ web app and a set of command-line tools.
   export them, recolour, clean up again from the raw render with live
   settings (colours, edge, outline, symmetry, palette), delete (with a bin
   and undo).
+- **Gallery**: keep the sprites you like with the recipe that made them
+  (LoRA, epoch, seed, prompt); they outlive their results and pin their LoRA,
+  sort into folders and tags, share with other users, export as a zip.
 - **Users**: everyone signs in; each user has their own models, results,
   palettes and jobs, can share them (read-only use) with chosen users or
   everyone, and administrators manage the accounts and see everything.
@@ -57,7 +60,7 @@ mock-ups: they show the interface, not what a trained model makes.
 
 ## Requirements
 
-- Linux (Debian 12/13 or Ubuntu 22.04+), on a machine or in a container
+- Linux (Debian 12/13 or Ubuntu 24.04+; Python 3.11 or newer), on a machine or in a container
   (an unprivileged Proxmox LXC container works).
 - An NVIDIA GPU with 8 GB of memory or more, and its driver.
 - About 35 GB of disk (50 GB with SDXL), 12 GB of RAM (16 recommended;

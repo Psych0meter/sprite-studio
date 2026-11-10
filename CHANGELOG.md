@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Models**: *Remove duplicates* in a model's Sprites tab finds sprites that are the same image under different names (for example results added to a model more than once), shows them, and moves all but one of each set to `sprites/.trash`. The one kept is the one with settings made by hand, else the shortest name.
+- **Renaming**: a model (*Settings → Rename this model*), a palette (*Rename id*) and a result (*Rename*) can be given another name. They keep their id, so the owner and the shares stay; a model's folder moves with it and its LoRA records, results and gallery images follow; the groups using a palette follow it; a result's stars and the gallery images saved from it follow. A model with a queued or running job, or a result a job is writing to, is refused until the job is done. A model that comes from a template keeps working, but "Use the template's settings" no longer finds its template after a rename.
+- **Gallery**: a page per user for the sprites you keep. The bookmark button on a result copies the image with its recipe (LoRA file and epoch, seed, model, group, kind, settings, prompt). A gallery image stays when its result is deleted, its recipe cannot be edited, and the LoRA it was made with cannot be deleted while it is there. Share an image with chosen users or everyone (read-only), organise with folders and tags, search and filter, move or tag a selection, and export a selection as a zip (PNG files plus `manifest.json`, optionally keeping the folders).
+
+### Changed
+
+- **Checks (GitHub)**: they run once per branch push instead of a second time for the pull request, they are not repeated on a tag (the release workflow already runs them), and a newer push cancels the run still going for the previous one. Branch protection must require `Checks / lint (push)` instead of `Checks / lint (pull_request)`.
+- **Identity**: every model, palette, result, project and LoRA file now has a stable UUID, made automatically for what exists already (`ids.json`). Ownership and sharing are kept by that id instead of the name (the old list is migrated on start-up; nothing is lost), rows in the API carry a `uid`, the sharing routes accept the id as well as the name, and gallery images and installed-LoRA records remember the model by id. Names are labels: a rename keeps the owner, the shares and the links. 
+
+- **LoRA files**: nothing is overwritten any more. Installing a LoRA over an existing name (*Use*, *Install*) keeps the old file as `<name>_<unix time>.safetensors`; a new training moves the last run's checkpoints and previews to `previous/<unix time>/` in the model's output folder.
+- **LoRA files**: a LoRA that results or gallery images still use cannot be deleted (the button is off, the server answers 409). Renaming is always allowed: every LoRA file has a stable id, new results and gallery images point at that id (`lora_id=` in the result's job notes), and older ones are given the id the first time their file is renamed, so nothing is lost. The table shows the gallery count next to the results.
+
+- **Install**: Python 3.11 or newer is required (the project already needed it). `install.sh` stops with a clear message on an older system before changing anything; the supported systems are Debian 12/13 and Ubuntu 24.04+ (Ubuntu 22.04 has Python 3.10). The tests run on Python 3.11, 3.12 and 3.13.
+- **Jobs**: one user can have at most 20 jobs waiting for the GPU and 4 CPU jobs running (`SG_MAX_QUEUED_PER_USER`, `SG_MAX_CPU_JOBS_PER_USER`), so one person cannot fill the queue for everyone.
+- **Security**: file responses (`/api/file`) are marked `private`, so no shared cache keeps them.
+
+### Fixed
+
+- **Sign-in**: the sign-in card is centred on wide screens (it sat to the left above 1480 px).
+- **Results**: a running batch shows how many sprites it will make (*8 of 20*), not the number started so far plus the one being drawn.
+- **Jobs**: the *Took* column stays empty while a job runs (the time so far is not a duration); it fills in when the job ends.
+- **Updates**: a Sprite Studio update that is cut short (power loss, a kill) while it replaces files is now detected and rolled back at the next start. The marker is written before the first file changes, the web packages are saved and put back with the files, and the release's `pyproject.toml` is read before anything changes.
+- **Install**: ComfyUI is started again when the training setup fails after it was stopped.
+- **Sharing**: a malformed list of users in a sharing request answers 400 instead of an error.
+
 ## [0.3.2] - 2026-11-08
 
 ### Added

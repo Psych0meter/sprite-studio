@@ -46,7 +46,8 @@
 #
 # Environment: PX_LORA_HOME (models), PX_INPUT, PX_GAME, PX_OUTPUT, and
 # pxcomfy.py's PX_COMFY_URL, PX_LORA (default <trigger>.safetensors),
-# PX_LORA_STRENGTH, PX_CKPT, PX_RES. A LoRA named *_xl.safetensors renders
+# PX_LORA_ID (the LoRA's stable id, written in job.txt), PX_LORA_STRENGTH,
+# PX_CKPT, PX_RES. A LoRA named *_xl.safetensors renders
 # at 1024 with the SDXL model.
 set -euo pipefail
 
@@ -162,7 +163,7 @@ fi
 [ -n "$seed" ] && args+=(--seed "$seed")
 
 {
-	echo "name=$name model=$model group=$group kind=${kind:-none} lora=$PX_LORA res=$PX_RES mask=${mask:-none} init=${start:-none} denoise=${denoise:-n/a} size=$size refs=$nrefs palette=${pal_file:-none} fill=${fill:-0} tile=$tile edge=${keep_edge:-0}"
+	echo "name=$name model=$model group=$group kind=${kind:-none} lora=$PX_LORA lora_id=${PX_LORA_ID:-none} res=$PX_RES mask=${mask:-none} init=${start:-none} denoise=${denoise:-n/a} size=$size refs=$nrefs palette=${pal_file:-none} fill=${fill:-0} tile=$tile edge=${keep_edge:-0}"
 	echo "prompt: $prompt"
 	echo "negative: $neg"
 	echo "extra: $extra"
