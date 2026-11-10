@@ -124,6 +124,20 @@ function ago(t) {
   return fmtTime(t);
 }
 
+// 2026-11-09, in the browser's time zone.
+function ymd(t) {
+  const d = new Date(t * 1000);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// "epoch 8, 2026-11-09": what tells one LoRA file from another in a list.
+function loraBrief(n) {
+  const x = (S.catalog.loras || []).find((l) => l.name === n);
+  if (!x) return "";
+  const e = x.final ? "last epoch" : x.epoch ? "epoch " + x.epoch : "";
+  return [e, x.created ? ymd(x.created) : ""].filter(Boolean).join(", ");
+}
+
 // The LoRA a render of model m will use (chosen: a file name, or "" for the model's default):
 // {name, ok, info}. ok is false only when ComfyUI's folder is visible and the file isn't in it.
 function loraFor(m, chosen) {
@@ -157,9 +171,9 @@ function loraOptions(m, chosen) {
   const names = [L.xl, ...(L.extra || [])].filter((x) => x && x.installed).map((x) => x.name);
   const others = (S.catalog.loras || []).map((x) => x.name).filter((n) => !names.includes(n) && n !== (L.default && L.default.name));
   const def = (L.default && L.default.name) || m.trigger + ".safetensors";
-  return [h("option", { value: "" }, `Default: ${def}` + (L.default && L.default.installed === false ? " (not installed)" : "")),
-    names.length ? h("optgroup", { label: "This model" }, names.map((n) => h("option", { value: n, selected: n === chosen }, n + (n.includes("_xl") ? " (SDXL)" : "")))) : null,
-    others.length ? h("optgroup", { label: "Other LoRAs" }, others.map((n) => h("option", { value: n, selected: n === chosen }, n))) : null];
+  return [h("option", { value: "" }, `Default: ${def}` + (L.default && L.default.installed === false ? " (not installed)" : loraBrief(def) ? ` (${loraBrief(def)})` : "")),
+    names.length ? h("optgroup", { label: "This model" }, names.map((n) => h("option", { value: n, selected: n === chosen }, n + (n.includes("_xl") ? " (SDXL)" : "") + (loraBrief(n) ? ` (${loraBrief(n)})` : "")))) : null,
+    others.length ? h("optgroup", { label: "Other LoRAs" }, others.map((n) => h("option", { value: n, selected: n === chosen }, n + (loraBrief(n) ? ` (${loraBrief(n)})` : "")))) : null];
 }
 
 const store = {
@@ -2249,7 +2263,7 @@ routes.lorafiles = async (main) => {
         h("td", {}, f.model_label ? h("a", { href: "#/train/" + f.model }, f.model_label) : h("span", { class: "muted" }, "unknown")),
         h("td", {}, f.base),
         h("td", {}, f.epoch != null ? "epoch " + f.epoch : f.final ? "last epoch" : h("span", { class: "muted", title: "Copied outside the app, and the name has no epoch" }, "?")),
-        h("td", {}, h("span", { class: "small", title: f.known ? `Trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)}` : "File date" }, fmtTime(f.known && f.trained ? f.trained : f.mtime))),
+        h("td", {}, h("span", { class: "small", title: f.known ? `Created ${fmtTime(f.created)} (trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)})` : "Created (the file's own date when the app first saw it)" }, fmtTime(f.created || f.mtime))),
         h("td", {}, h("span", { class: "muted small" }, fmtMB(f.size))),
         h("td", {}, f.results || f.gallery ? h("span", { class: "small", title: "Results rendered with it, and gallery images kept with it" }, String(f.results) + (f.gallery ? ` + ${f.gallery} in gallery` : "")) : h("span", { class: "muted" }, "0")),
         h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end", flexWrap: "nowrap" } },

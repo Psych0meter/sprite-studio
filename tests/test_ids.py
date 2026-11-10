@@ -163,3 +163,19 @@ def test_duplicate_sprites_are_found_and_removed(team, env):  # noqa: F811
     assert sorted(p.name for p in folder.glob("*.png")) == ["blue.png", "red_a_copy.png"]
     assert (folder / ".trash" / "red_a.png").exists()
     assert admin.post("/api/models/units/duplicates", json={}).json()["groups"] == []
+
+
+def test_a_lora_keeps_its_creation_date_when_touched_or_renamed(team, env):  # noqa: F811
+    import os
+    import time
+
+    admin, ann, bob = team
+    f = lora_file(env)
+    os.utime(f, (1_000_000_000, 1_000_000_000))
+    row = admin.get("/api/loras").json()["files"][0]
+    assert row["created"] == 1_000_000_000
+    os.utime(f, None)  # (a copy or an edit moves the modification time)
+    assert admin.post("/api/loras/rename", json={"name": "pxunit", "to": "moved"}).status_code == 200
+    row = admin.get("/api/loras").json()["files"][0]
+    assert row["name"] == "moved.safetensors" and row["created"] == 1_000_000_000 and row["mtime"] > time.time() - 60
+    assert admin.get("/api/catalog").json()["loras"][0]["created"] == 1_000_000_000

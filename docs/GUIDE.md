@@ -351,7 +351,7 @@ and SDXL.
 ### 5.6 Managing LoRA files
 
 **LoRA files** lists every LoRA in ComfyUI's `models/loras` folder as a
-table: name, the model it belongs to, base (SD 1.5 or SDXL), epoch, date,
+table: name, the model it belongs to, base (SD 1.5 or SDXL), epoch, creation date (kept when a file is renamed or copied),
 size, and *Results*, the number of result folders rendered with it. A tag
 shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
 

@@ -1244,6 +1244,21 @@ def lora_dir() -> Path:
     return setting_path("comfy_dir") / "models" / "loras"
 
 
+def lora_created(f: Path, rec: dict | None = None) -> float:
+    """When a LoRA file was made, as far as the app knows: noted once (by the file's id, so a rename or an archive
+    keeps it) from the install record, else from the file's birth or modification time, whichever is earlier.
+    The modification time alone moves whenever the file is copied or touched."""
+    uid = lora_id(f.name)
+    dates = _load("lora_dates.json", {})
+    if uid not in dates:
+        st = f.stat()
+        r = (rec if rec is not None else _load("installed.json", {})).get(f.name) or {}
+        birth = getattr(st, "st_birthtime", 0) or st.st_mtime
+        dates[uid] = r.get("installed") or min(st.st_mtime, birth)
+        _save("lora_dates.json", dates)
+    return dates[uid]
+
+
 def lora_info(name: str, rec: dict | None = None) -> dict:
     """One LoRA file in ComfyUI: there or not, and where it came from when the app installed it."""
     f = lora_dir() / name
@@ -1251,7 +1266,7 @@ def lora_info(name: str, rec: dict | None = None) -> dict:
     if not out["installed"]:
         return out
     st = f.stat()
-    out.update(size=st.st_size, mtime=st.st_mtime)
+    out.update(size=st.st_size, mtime=st.st_mtime, created=lora_created(f, rec))
     r = (rec if rec is not None else _load("installed.json", {})).get(name)
     if r and r.get("size") == st.st_size and abs(r.get("mtime", 0) - st.st_mtime) < 2:
         out.update(
@@ -1766,20 +1781,26 @@ def api_comfy(action: str):
 
 @app.get("/api/catalog")
 def api_catalog():
-    loras = []
-    if lora_dir().is_dir():
-        loras = [
-            {"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime}
-            for f in sorted(lora_dir().glob("*.safetensors"))
-        ]
-    lora_models = {r["name"]: r["model"] for r in lora_rows(True, counts=False)}  # (once, not once per file)
+    rows = {r["name"]: r for r in lora_rows(True, counts=False)}  # (once, not once per file)
+    loras = [
+        {
+            "name": n,
+            "size": r["size"],
+            "mtime": r["mtime"],
+            "created": r["created"],
+            "epoch": r["epoch"],
+            "final": r["final"],
+        }
+        for n, r in sorted(rows.items())
+        if lora_allowed(r["model"])
+    ]
     return {
         "models": models_summary(),
         "projects": [x["name"] for x in project_list() if x["name"]],
         "sources": sources(),
         "speed": speed(),
         "gpu_mb": gpu_memory_mb(),
-        "loras": [x for x in loras if lora_allowed(lora_models.get(x["name"], ""))],
+        "loras": loras,
         "settings": settings() if is_admin() else {},
     }
 
@@ -2713,6 +2734,7 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
                 "name": f.name,
                 "size": info["size"],
                 "mtime": info["mtime"],
+                "created": info["created"],
                 "model": model,
                 "model_label": models.get(model, {}).get("label", ""),
                 "base": "SDXL" if info["xl"] else "SD 1.5",
