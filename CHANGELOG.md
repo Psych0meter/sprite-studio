@@ -15,10 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Gallery**: filters can exclude as well as include. Click a folder or tag once to show only it, again to hide it (crossed out), a third time to clear. In the search box, a word starting with `-` hides matches (`swarm -veteran`), and several words must all match.
 - **LoRA files**: the *Date* column shows when the file was created, not when it was last modified (a copy or a touch moves the modification time). The date is noted once per file and follows it through renames.
 
 ### Fixed
 
+- **Gallery**: *Select all shown* and the selection only cover what is on screen. Sprites hidden by a filter are deselected, so "246 selected" can no longer include sprites you cannot see (and an export or removal cannot touch them).
 - **Gallery**: the counts follow the filters. "All", folder and tag chips and "Select all shown" now count what the search, owner, folder and tag filters leave, and the search box updates them as you type.
 - **Updates**: updating Sprite Studio from the web page failed at the package step (*No such file or directory*) and was rolled back. The update ran from the `scripts` folder it was replacing; it now works from a folder that stays. If your installation is on 0.3.2, update it once by hand: `cd <install folder> && sudo scripts/install.sh` (or download the 0.3.4 release), because the 0.3.2 updater still has the problem.
 - **Sign-in block**: the user name, the Password and Sign out buttons and the version in the left rail are centred.

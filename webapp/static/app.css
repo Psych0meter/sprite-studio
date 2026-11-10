@@ -148,6 +148,7 @@ input[type=checkbox] { accent-color: var(--amber); width: 15px; height: 15px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 14px; padding: 2px 10px; font: inherit; font-size: 12.5px; cursor: pointer; }
 .chip:hover { color: var(--text); border-color: var(--muted); }
+.chip.off { color: var(--red, #e5484d); border-color: currentColor; text-decoration: line-through; }
 .chip.on { color: var(--amber); border-color: var(--amber); background: var(--amber-soft); }
 
 .btn {
