@@ -439,7 +439,8 @@ the seed, model, group, kind, settings, prompt and extras. Then:
   out), a third time to clear it. *Clear all filters* (shown while any filter is on) resets the search and all filters. In the search box, several words must
   all match and a word starting with `-` excludes (`swarm -veteran`). The counts
   follow the filters. *Move to folder*, *Add tags* and *Remove tags* work on the
-  selection, which only ever holds sprites that are on screen (changing a filter
+  selection (they list the existing folders and tags to click, and you can still type
+  new names; *Remove tags* shows only the tags the selection carries), which only ever holds sprites that are on screen (changing a filter
   deselects the hidden ones). A folder is just a label: type a new name to create one.
 - **Export zip** of the selection (or *with folders*, which keeps the gallery
   folders as folders in the zip): the PNG files named after the sprites, and a

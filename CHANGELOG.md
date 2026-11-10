@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Gallery**: *Move to folder*, *Add tags* and *Remove tags* offer the existing folders and tags as buttons to click (with counts); *Remove tags* lists only the tags the selected sprites carry. New names can still be typed.
 - **Gallery**: filters can pick several and exclude. Click folders or tags to add them (several folders: any of them; several tags: all of them), click one again to hide it (crossed out), a third time to clear. In the search box, several words must all match and a word starting with `-` hides matches (`swarm -veteran`). *Clear all filters* removes the search and every filter at once.
 - **LoRA files**: the *Date* column shows when the file was created, not when it was last modified (a copy or a touch moves the modification time). The date is noted once per file and follows it through renames.
 

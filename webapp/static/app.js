@@ -517,6 +517,40 @@ function dialog({ title, text, input, value = "", placeholder = "", hint = "", o
     if (field) setTimeout(() => field.select(), 0);
   });
 }
+// A dialog to pick from what exists: chips to click (one with multi false, any number with multi true)
+// and, with `input`, a box for new names (commas separate several). Resolves to the list of names, or null.
+function pickDialog({ title, text, choices, multi = true, input = "", ok = "OK", none = "" }) {
+  return new Promise((resolve) => {
+    const layer = h("div", { class: "modal dialog-layer" });
+    const picked = new Set();
+    const field = input ? h("input", { type: "text", class: "dialog-input", placeholder: input }) : null;
+    const chips = h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", margin: "8px 0" } });
+    const paint = () => chips.replaceChildren(...choices.map((c) => h("button", { class: "chip" + (picked.has(c.value) ? " on" : ""), type: "button",
+      onclick: () => { if (picked.has(c.value)) picked.delete(c.value); else { if (!multi) picked.clear(); picked.add(c.value); } paint(); } }, c.label)));
+    const done = (v) => { layer.remove(); document.removeEventListener("keydown", onKey, true); resolve(v); };
+    const submit = () => {
+      const typed = field ? field.value.split(",").map((t) => t.trim()).filter(Boolean) : [];
+      const all = multi ? [...new Set([...picked, ...typed])] : typed.length ? [typed[0]] : [...picked];
+      if (all.length) done(all);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); done(null); }
+      else if (e.key === "Enter" && document.activeElement === field) { e.preventDefault(); submit(); }
+    };
+    paint();
+    layer.append(h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true" },
+      h("h2", {}, title), text ? h("p", { class: "dialog-text" }, text) : null,
+      choices.length ? chips : h("p", { class: "muted small" }, none || "Nothing to pick from yet."),
+      field ? h("div", { class: "field" }, field) : null,
+      h("div", { class: "row", style: { marginTop: "18px", justifyContent: "flex-end" } },
+        h("button", { class: "btn ghost", type: "button", onclick: () => done(null) }, "Cancel"),
+        h("button", { class: "btn primary", type: "button", onclick: submit }, ok))));
+    layer.addEventListener("click", (e) => { if (e.target === layer) done(null); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(layer);
+    setTimeout(() => (field || layer.querySelector(".btn.primary")).focus(), 0);
+  });
+}
 const askText = (title, opts = {}) => dialog(Object.assign({ title, input: true }, opts));
 const askConfirm = (text, opts = {}) => dialog(Object.assign({ title: opts.title || "Are you sure?", text }, opts));
 
@@ -2180,16 +2214,25 @@ routes.gallery = async (main) => {
           h("button", { class: "btn sm", title: "Copy the selected sprites into a new or existing model as training sprites", onclick: () => picksToModel({ gallery: [...sel] }) }, "Train on these…"),
           writable.length ? [
             h("button", { class: "btn sm", onclick: async () => {
-              const f = await askText("Move to a folder", { input: "Folder name (empty: no folder)", value: "", ok: "Move" });
-              if (f !== null) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, folder: f } }), "Moved"); load(); }
+              const fc = count(items, (i) => [i.folder || ""]);
+              const choices = [...fc.keys()].sort().map((n) => ({ value: n, label: n ? `${n} (${fc.get(n)})` : `No folder (${fc.get("")})` }));
+              if (!fc.has("")) choices.push({ value: "", label: "No folder" });
+              const f = await pickDialog({ title: "Move to a folder", text: `${writable.length} sprite${writable.length === 1 ? "" : "s"}: pick a folder or type a new name.`,
+                choices, multi: false, input: "New folder name", ok: "Move" });
+              if (f) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, folder: f[0] } }), "Moved"); load(); }
             } }, "Move to folder"),
             h("button", { class: "btn sm", onclick: async () => {
-              const t = await askText("Add tags", { input: "Tags, comma separated", value: "", ok: "Add" });
-              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, add_tags: t.split(",") } }), "Tags added"); load(); }
+              const tc = count(items, (i) => i.tags || []);
+              const t = await pickDialog({ title: "Add tags", text: "Pick existing tags and/or type new ones, separated by commas.",
+                choices: [...tc.keys()].sort().map((n) => ({ value: n, label: `${n} (${tc.get(n)})` })), input: "New tags, comma separated", ok: "Add" });
+              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, add_tags: t } }), "Tags added"); load(); }
             } }, "Add tags"),
             h("button", { class: "btn sm", onclick: async () => {
-              const t = await askText("Remove tags", { input: "Tags, comma separated", value: "", ok: "Remove" });
-              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, remove_tags: t.split(",") } }), "Tags removed"); load(); }
+              const own = items.filter((i) => writable.includes(i.id));
+              const tc = count(own, (i) => i.tags || []);
+              const t = await pickDialog({ title: "Remove tags", text: "The tags the selected sprites carry (with how many have each):",
+                choices: [...tc.keys()].sort().map((n) => ({ value: n, label: `${n} (${tc.get(n)})` })), none: "The selected sprites have no tags.", ok: "Remove" });
+              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, remove_tags: t } }), "Tags removed"); load(); }
             } }, "Remove tags"),
             h("button", { class: "btn sm danger", onclick: async () => {
               if (await askConfirm(`Remove ${writable.length} image${writable.length === 1 ? "" : "s"} from the gallery? The images and their recipes are erased; their LoRAs are free to delete again if nothing else uses them.`, { danger: true, ok: "Remove", title: "Remove from the gallery" })) {
