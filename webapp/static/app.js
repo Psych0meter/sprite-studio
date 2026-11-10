@@ -2105,7 +2105,10 @@ function galleryDialog(id, folders, onChange) {
 }
 
 routes.gallery = async (main) => {
-  const state = Object.assign({ find: "", folder: "*", tag: "", noFolder: [], noTag: [], who: "all" }, store.get("gallery", {}));
+  const state = Object.assign({ find: "", folders: [], tags: [], noFolder: [], noTag: [], who: "all" }, store.get("gallery", {}));
+  // (older saved filters held one folder and one tag)
+  if (state.folder !== undefined) { if (state.folder !== "*") state.folders = [state.folder]; delete state.folder; }
+  if (state.tag !== undefined) { if (state.tag) state.tags = [state.tag]; delete state.tag; }
   const keep = () => store.set("gallery", state);
   const sel = new Set();
   let items = [];
@@ -2121,8 +2124,8 @@ routes.gallery = async (main) => {
     const want = words.filter((w) => w[0] !== "-");
     const nope = words.filter((w) => w[0] === "-" && w.length > 1).map((w) => w.slice(1));
     return items.filter((i) =>
-      (skip === "folder" || ((state.folder === "*" || (i.folder || "") === state.folder) && !state.noFolder.includes(i.folder || ""))) &&
-      (skip === "tag" || ((!state.tag || (i.tags || []).includes(state.tag)) && !(i.tags || []).some((t) => state.noTag.includes(t)))) &&
+      (skip === "folder" || ((!state.folders.length || state.folders.includes(i.folder || "")) && !state.noFolder.includes(i.folder || ""))) &&
+      (skip === "tag" || (state.tags.every((t) => (i.tags || []).includes(t)) && !(i.tags || []).some((t) => state.noTag.includes(t)))) &&
       (state.who === "all" || (state.who === "mine" ? i.owner === ME.username : i.owner !== ME.username)) &&
       ((txt) => want.every((w) => txt.includes(w)) && !nope.some((w) => txt.includes(w)))(
         [i.name, i.lora, i.model, i.group, i.kind, String(i.seed), i.folder, ...(i.tags || [])].join(" ").toLowerCase()));
@@ -2134,16 +2137,16 @@ routes.gallery = async (main) => {
     const allFolders = [...new Set(items.map((i) => i.folder || ""))];
     const shown = filtered();
     for (const id of [...sel]) if (!shown.some((i) => i.id === id)) sel.delete(id);  // only what is on screen stays selected
-    const names = [...new Set([...allFolders, ...state.noFolder])].filter(Boolean).sort();
+    const names = [...new Set([...allFolders, ...state.folders, ...state.noFolder])].filter(Boolean).sort();
     const chip = (label, on, fn, title, off) => h("button", { class: "chip" + (on ? " on" : "") + (off ? " off" : ""), type: "button", title, onclick: fn }, off ? "not " + label : label);
-    // Click: show only this one; click again: hide it; once more: back to normal.
+    // Click: add it to what is shown; click again: hide it instead; once more: clear it. Folders: any of the chosen; tags: all of them.
     const cycle = (key, noKey, v) => () => {
-      if (state[key] === v) { state[key] = key === "folder" ? "*" : ""; state[noKey] = [...state[noKey], v]; }
+      if (state[key].includes(v)) { state[key] = state[key].filter((x) => x !== v); state[noKey] = [...state[noKey], v]; }
       else if (state[noKey].includes(v)) state[noKey] = state[noKey].filter((x) => x !== v);
-      else { state[key] = v; state[noKey] = state[noKey].filter((x) => x !== v); }
+      else state[key] = [...state[key], v];
       keep(); draw();
     };
-    const hint = "Click: only this. Click again: hide it. Click a third time: clear.";
+    const hint = "Click: show it (click several: folders any of them, tags all of them). Click again: hide it. A third time: clear.";
     const ids = shown.map((i) => i.id);
     const writable = [...sel].filter((id) => (items.find((i) => i.id === id) || {}).access === "write");
     body.replaceChildren(
@@ -2158,11 +2161,11 @@ routes.gallery = async (main) => {
           chip("All", state.who === "all", () => { state.who = "all"; keep(); draw(); }), chip("Mine", state.who === "mine", () => { state.who = "mine"; keep(); draw(); }),
           chip("Shared with me", state.who === "shared", () => { state.who = "shared"; keep(); draw(); })),
         h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Folders"),
-          chip(`All (${filtered("folder").length})`, state.folder === "*", () => { state.folder = "*"; keep(); draw(); }),
-          folders.has("") || state.folder === "" || state.noFolder.includes("") ? chip(`No folder (${folders.get("") || 0})`, state.folder === "", cycle("folder", "noFolder", ""), hint, state.noFolder.includes("")) : null,
-          names.map((n) => chip(`${n} (${folders.get(n) || 0})`, state.folder === n, cycle("folder", "noFolder", n), hint, state.noFolder.includes(n)))),
-        tagCounts.size || state.noTag.length ? h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Tags"),
-          [...new Set([...tagCounts.keys(), ...(state.tag ? [state.tag] : []), ...state.noTag])].sort().map((t) => chip(`${t} (${tagCounts.get(t) || 0})`, state.tag === t, cycle("tag", "noTag", t), hint, state.noTag.includes(t)))) : null),
+          chip(`All (${filtered("folder").length})`, !state.folders.length && !state.noFolder.length, () => { state.folders = []; state.noFolder = []; keep(); draw(); }),
+          folders.has("") || state.folders.includes("") || state.noFolder.includes("") ? chip(`No folder (${folders.get("") || 0})`, state.folders.includes(""), cycle("folders", "noFolder", ""), hint, state.noFolder.includes("")) : null,
+          names.map((n) => chip(`${n} (${folders.get(n) || 0})`, state.folders.includes(n), cycle("folders", "noFolder", n), hint, state.noFolder.includes(n)))),
+        tagCounts.size || state.tags.length || state.noTag.length ? h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Tags"),
+          [...new Set([...tagCounts.keys(), ...state.tags, ...state.noTag])].sort().map((t) => chip(`${t} (${tagCounts.get(t) || 0})`, state.tags.includes(t), cycle("tags", "noTag", t), hint, state.noTag.includes(t)))) : null),
       h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", margin: "12px 0" } },
         h("label", { class: "row", style: { gap: "6px" } }, h("input", { type: "checkbox", checked: ids.length > 0 && ids.every((id) => sel.has(id)),
           onchange: (e) => { ids.forEach((id) => (e.target.checked ? sel.add(id) : sel.delete(id))); draw(); } }), `Select all shown (${shown.length})`),

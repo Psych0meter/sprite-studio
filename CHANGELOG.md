@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Gallery**: filters can exclude as well as include. Click a folder or tag once to show only it, again to hide it (crossed out), a third time to clear. In the search box, a word starting with `-` hides matches (`swarm -veteran`), and several words must all match.
+- **Gallery**: filters can pick several and exclude. Click folders or tags to add them (several folders: any of them; several tags: all of them), click one again to hide it (crossed out), a third time to clear. In the search box, several words must all match and a word starting with `-` hides matches (`swarm -veteran`).
 - **LoRA files**: the *Date* column shows when the file was created, not when it was last modified (a copy or a touch moves the modification time). The date is noted once per file and follows it through renames.
 
 ### Fixed

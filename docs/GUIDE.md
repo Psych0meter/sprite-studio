@@ -434,8 +434,9 @@ the seed, model, group, kind, settings, prompt and extras. Then:
   their own gallery.
 - **Folders and tags**: give an image one folder (an album) and any tags (up to 12), then filter
   by folder, tag, owner (*Mine* / *Shared with me*) or text (name, LoRA, seed,
-  model...). Click a folder or tag once to show only it, again to **hide** it
-  (crossed out), a third time to clear. In the search box, several words must
+  model...). Click folders and tags to add them (several folders: any
+  of them; several tags: all of them), click one again to **hide** it (crossed
+  out), a third time to clear it. In the search box, several words must
   all match and a word starting with `-` excludes (`swarm -veteran`). The counts
   follow the filters. *Move to folder*, *Add tags* and *Remove tags* work on the
   selection, which only ever holds sprites that are on screen (changing a filter
