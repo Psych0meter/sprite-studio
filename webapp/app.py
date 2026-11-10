@@ -4135,16 +4135,34 @@ async def api_pick(request: Request):
 async def api_picks_to_model(request: Request):
     """Copies the picked sprites into a model's sprites: an existing one ({"model": id}) or a new one ({"new":
     {"id", "label", "trigger", "project"}}), all in one group / kind if given. {"paths": [...]} limits it to some picks.
+    {"gallery": [ids]} takes gallery images instead of the picks.
     Everything is checked before anything is created or copied, so a refused request leaves no trace."""
     b = await request.json()
     if not isinstance(b, dict):
         raise HTTPException(400, "send a JSON object")
-    with _lock:
-        picks = dict(picks_mine(picks_load()))
-    if isinstance(b.get("paths"), list):
-        wanted = {str(safe_path(x, write=False)) for x in b["paths"]}
-        picks = {k: v for k, v in picks.items() if k in wanted}
     ready, skipped = [], []  # (source, base name) of the sprites that are real PNG images
+    if isinstance(b.get("gallery"), list):  # the sprites come from the gallery (the user's own and shared ones)
+        picks = {}
+        for gid in b["gallery"]:
+            try:
+                m = gallery_meta(str(gid))  # (404 for an image that does not exist or is not yours to see)
+            except HTTPException:
+                continue
+            if m:
+                src = gallery_dir() / m["id"] / "image.png"
+                base = re.sub(r"\.png$", "", name_ok(m.get("name") or src.stem), flags=re.I)
+                try:
+                    check_image(src.read_bytes(), "PNG")
+                except (OSError, HTTPException) as e:
+                    skipped.append(f"{base} ({getattr(e, 'detail', e)})")
+                    continue
+                ready.append((src, base))
+    else:
+        with _lock:
+            picks = dict(picks_mine(picks_load()))
+        if isinstance(b.get("paths"), list):
+            wanted = {str(safe_path(x, write=False)) for x in b["paths"]}
+            picks = {k: v for k, v in picks.items() if k in wanted}
     for k, v in picks.items():
         src = Path(k)
         if not src.is_file():
@@ -4161,7 +4179,11 @@ async def api_picks_to_model(request: Request):
     if not ready:
         raise HTTPException(
             400,
-            "Nothing picked yet: star the variants you want first."
+            (
+                "Nothing chosen."
+                if isinstance(b.get("gallery"), list)
+                else "Nothing picked yet: star the variants you want first."
+            )
             if not skipped
             else "None of the picks is a usable PNG: " + "; ".join(skipped),
         )

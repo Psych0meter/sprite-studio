@@ -1489,8 +1489,8 @@ routes.results = async (main, _parts, params) => {
 };
 
 // The starred sprites become training sprites of a new model, or are added to an existing one.
-async function picksToModel() {
-  const n = Object.keys(S.picks || {}).length;
+async function picksToModel(from) {  // from: {gallery: [ids]} to use gallery images instead of the starred ones
+  const n = from ? from.gallery.length : Object.keys(S.picks || {}).length;
   if (!n) { toast("Nothing picked yet: star the variants you want first.", true); return; }
   await loadCatalog();
   const models = S.catalog.models;
@@ -1512,8 +1512,8 @@ async function picksToModel() {
   const draw = () => {
     box.innerHTML = "";
     const opt = (v, l, cur) => h("option", { value: v, selected: v === cur }, l);
-    box.append(h("h2", {}, "Train on picks"),
-      h("p", { class: "dialog-text" }, `${n === 1 ? "The starred sprite is" : `The ${n} starred sprites are`} copied (the originals stay in Results) into a model's sprites, named after their pick name. Then train that model on the Train page.`),
+    box.append(h("h2", {}, from ? "Train on gallery sprites" : "Train on picks"),
+      h("p", { class: "dialog-text" }, `${n === 1 ? (from ? "The selected sprite is" : "The starred sprite is") : `The ${n} ${from ? "selected" : "starred"} sprites are`} copied (the originals stay ${from ? "in the gallery" : "in Results"}) into a model's sprites, named after their pick name. Then train that model on the Train page.`),
       h("div", { class: "field", style: { marginTop: "14px" } }, seg([{ id: "existing", label: "Existing model" }, { id: "new", label: "New model" }].filter((o) => o.id === "new" || models.length), f.mode,
         async (v) => { f.mode = v; await loadDetail(); draw(); })),
       f.mode === "existing"
@@ -1524,11 +1524,12 @@ async function picksToModel() {
       detail ? h("div", { class: "inline-fields" },
         h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { f.group = e.target.value; } }, opt("", "Automatic (by file name)", f.group), detail.groups.map((g) => opt(g.id, g.label, f.group)))),
         detail.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { f.kind = e.target.value; } }, opt("", "Automatic (by file name)", f.kind), detail.kinds.map((k) => opt(k.id, k.label, f.kind)))) : null) : null,
-      h("label", { class: "row", style: { gap: "8px", margin: "10px 0" } }, h("input", { type: "checkbox", checked: f.unpick, onchange: (e) => { f.unpick = e.target.checked; } }), h("span", { class: "small" }, "Remove the stars afterwards")),
+      from ? null : h("label", { class: "row", style: { gap: "8px", margin: "10px 0" } }, h("input", { type: "checkbox", checked: f.unpick, onchange: (e) => { f.unpick = e.target.checked; } }), h("span", { class: "small" }, "Remove the stars afterwards")),
       h("div", { class: "row", style: { marginTop: "18px", justifyContent: "flex-end" } },
         h("button", { class: "btn ghost", onclick: close }, "Cancel"),
         h("button", { class: "btn primary", onclick: async () => {
-          const body = { group: f.group || null, kind: f.kind || null, unpick: f.unpick };
+          const body = { group: f.group || null, kind: f.kind || null, unpick: !from && f.unpick };
+          if (from) body.gallery = from.gallery;
           if (f.mode === "new") {
             if (!f.label.trim()) { toast("Give the new model a name", true); return; }
             body.new = { id: slug(f.label), label: f.label.trim(), trigger: f.trigger.trim() };
@@ -1536,7 +1537,7 @@ async function picksToModel() {
           const r = await attempt(() => api("/picks/to-model", { body }));
           if (!r) return;
           close();
-          if (f.unpick) S.picks = await api("/picks");
+          if (!from && f.unpick) S.picks = await api("/picks");
           toast(`${r.saved.length} sprite${r.saved.length === 1 ? "" : "s"} added to ${r.model}` + (r.skipped.length ? `, ${r.skipped.length} skipped` : ""), !r.saved.length);
           location.hash = "#/models/" + r.model;
         } }, "Add to the model")));
@@ -2149,6 +2150,7 @@ routes.gallery = async (main) => {
           h("span", { class: "muted small" }, `${sel.size} selected`),
           h("button", { class: "btn sm", onclick: () => downloadGalleryZip([...sel], false) }, "Export zip"),
           h("button", { class: "btn sm", title: "Gallery folders become folders in the zip", onclick: () => downloadGalleryZip([...sel], true) }, "Export zip with folders"),
+          h("button", { class: "btn sm", title: "Copy the selected sprites into a new or existing model as training sprites", onclick: () => picksToModel({ gallery: [...sel] }) }, "Train on these…"),
           writable.length ? [
             h("button", { class: "btn sm", onclick: async () => {
               const f = await askText("Move to a folder", { input: "Folder name (empty: no folder)", value: "", ok: "Move" });

@@ -439,6 +439,10 @@ the seed, model, group, kind, settings, prompt and extras. Then:
 - **Export zip** of the selection (or *with folders*, which keeps the gallery
   folders as folders in the zip): the PNG files named after the sprites, and a
   `manifest.json` with each recipe.
+- **Train on these…** copies the selected sprites into a new model or an existing
+  one (pick the group and kind if you like) as training sprites, named after the
+  gallery names. The gallery images stay; sprites the model already has are never
+  overwritten.
 
 Same recipe, same picture? Generating again with the **same LoRA file, seed,
 prompt, settings, starting sprite and base model** gives the same image on the

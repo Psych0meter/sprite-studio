@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **LoRA lists**: the LoRA choice in Generate and Batch shows the epoch and the creation date (`epoch 8, 2026-11-09`) next to each name, so similar files can be told apart.
 - **Results**: the bookmark of a sprite already in your gallery is filled and says so, instead of looking the same as the others.
+- **Gallery**: *Train on these…* copies the selected gallery sprites into a new or an existing model as training sprites (the same dialog as *Train on picks*; the gallery images stay where they are).
 
 ### Changed
 
@@ -19,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Updates**: updating Sprite Studio from the web page failed at the package step (*No such file or directory*) and was rolled back. The update ran from the `scripts` folder it was replacing; it now works from a folder that stays. If your installation is on 0.3.2, update it once by hand: `cd <install folder> && sudo scripts/install.sh` (or download the 0.3.4 release), because the 0.3.2 updater still has the problem.
+- **Sign-in block**: the user name, the Password and Sign out buttons and the version in the left rail are centred.
 
 ## [0.3.3] - 2026-11-10
 

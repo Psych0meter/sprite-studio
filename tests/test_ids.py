@@ -190,3 +190,24 @@ def test_kept_sprites_are_listed_for_the_results_page(team, env):  # noqa: F811
     assert admin.get("/api/gallery/kept").json() == {"sources": {str(d / "red_small_1_s11.png"): gid}}
     admin.post("/api/gallery/delete", json={"ids": [gid]})
     assert admin.get("/api/gallery/kept").json() == {"sources": {}}
+
+
+def test_gallery_sprites_can_become_training_sprites(team, env):  # noqa: F811
+    from test_accounts import make_model
+
+    admin, ann, bob = team
+    make_model(admin)
+    lora_file(env)
+    d = make_result(env)
+    gid = admin.post("/api/gallery", json={"path": str(d / "red_small_1_s11.png"), "name": "Nice one"}).json()["id"]
+    r = admin.post("/api/picks/to-model", json={"model": "units", "gallery": [gid, "0" * 16]})
+    assert r.status_code == 200, r.text
+    assert r.json()["saved"] == ["Nice_one.png"] or len(r.json()["saved"]) == 1  # (the unknown id is ignored)
+    assert (Path(env["lora"]) / "units" / "sprites" / r.json()["saved"][0]).is_file()
+    r = admin.post(
+        "/api/picks/to-model", json={"new": {"id": "fresh", "label": "Fresh", "trigger": "pxfresh"}, "gallery": [gid]}
+    )
+    assert r.status_code == 200 and r.json()["model"] == "fresh" and len(r.json()["saved"]) == 1
+    assert admin.post("/api/picks/to-model", json={"model": "units", "gallery": []}).status_code == 400
+    # a gallery image you cannot see is not used (and nothing is created for it)
+    assert ann.post("/api/picks/to-model", json={"model": "units", "gallery": [gid]}).status_code in (400, 403, 404)

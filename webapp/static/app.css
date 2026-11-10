@@ -379,7 +379,10 @@ th.sortable:hover { color: var(--text, inherit); }
 /* ---- account block in the rail */
 .account { margin-top: auto; padding: 10px; border-top: 1px solid var(--line-soft); font-size: 13px; }
 .account:empty { display: none; }
-.account + .rail-version { margin-top: 0; }
+.account { text-align: center; }
+.account-name { display: flex; align-items: center; justify-content: center; }
+.account .row { justify-content: center; }
+.account + .rail-version { margin-top: 0; text-align: center; }
 .rail [hidden] { display: none; }
 [hidden] { display: none !important; }
 
