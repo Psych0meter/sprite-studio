@@ -1,10 +1,10 @@
 name: Checks
 
 # Branch pushes only: a pull request shows the checks of its head commit, so running them again for the
-# pull request would repeat the same code. Tags are checked by release.yml.
+# pull request would repeat the same code.
 on:
   push:
-    tags-ignore: ["**"]
+    branches: ["**"]  # (naming only branches also leaves tags out: release.yml checks those)
 
 # A newer push to the same branch makes the run of the previous one pointless.
 concurrency:
