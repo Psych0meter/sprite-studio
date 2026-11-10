@@ -2527,6 +2527,15 @@ async function modelEditor(main, mid, tab) {
         h("div", { class: "row" },
           h("input", { type: "text", placeholder: "Filter by name", value: search, style: { width: "180px" }, oninput: (e) => { search = e.target.value; drawSprites(); setTimeout(() => { const i = body.querySelector("input[placeholder='Filter by name']"); if (i) { i.focus(); i.setSelectionRange(search.length, search.length); } }); } }),
           h("button", { class: "btn sm ghost", onclick: () => { shown.forEach((s) => selected.add(s.name)); drawSprites(); } }, "Select all shown"),
+          h("button", { class: "btn sm ghost", title: "Finds the sprites that are the same image under different names and keeps one of each", onclick: async () => {
+            const r = await attempt(() => api(`/models/${mid}/duplicates`, { body: {} }));
+            if (!r) return;
+            const extra = r.groups.reduce((n, g) => n + g.length - 1, 0);
+            if (!extra) return toast("No duplicates: every sprite is a different image");
+            const list = r.groups.slice(0, 6).map((g) => g.join(" = ")).join("\n") + (r.groups.length > 6 ? `\n… and ${r.groups.length - 6} more` : "");
+            if (!(await askConfirm(`${extra} duplicate sprite(s) in ${r.groups.length} set(s). The first name of each set is kept, the others go to sprites/.trash.\n\n${list}`, { danger: true, ok: "Remove duplicates", title: "Remove duplicates" }))) return;
+            if (await attempt(() => api(`/models/${mid}/duplicates`, { body: { remove: true } }), "Duplicates removed")) { selected.clear(); await reload(); draw(); }
+          } }, "Remove duplicates"),
           h("button", { class: "btn sm ghost", title: "Selects the sprites whose shading is brighter at the bottom than at the top", onclick: async () => {
             const r = await attempt(() => api(`/models/${mid}/lighting`));
             if (!r) return;

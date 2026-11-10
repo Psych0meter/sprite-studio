@@ -3351,6 +3351,29 @@ async def api_model_sprites(mid: str, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/models/{mid}/duplicates")
+async def api_model_duplicates(mid: str, request: Request):
+    """Sprites that are the same image under different names. {"remove": false} (default) only lists them;
+    {"remove": true} moves all but one of each set to sprites/.trash."""
+    m = model_cfg(mid)
+    b = await request.json()
+    groups = pm().find_duplicates(m)
+    removed: list[str] = []
+    if b.get("remove"):
+        folder = Path(pm().sprites_dir(mid))
+        trash = folder / ".trash"
+        trash.mkdir(exist_ok=True)
+        for names in groups:
+            for n in names[1:]:
+                f = folder / n
+                if f.is_file():
+                    shutil.move(str(f), str(trash / f.name))
+                    removed.append(n)
+                m["sprites"].pop(n, None)
+        pm().save(m)
+    return {"groups": groups, "removed": removed}
+
+
 @app.delete("/api/models/{mid}/sprites")
 async def api_model_sprites_delete(mid: str, request: Request):
     m = model_cfg(mid)

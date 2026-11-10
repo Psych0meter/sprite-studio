@@ -93,6 +93,9 @@ On a model's **Sprites** tab:
   *import rules* (Settings tab) repeat it.
 - **Select** sprites to set their group, kind or own words by hand, leave
   them out of training, or remove them (moved to `sprites/.trash/`).
+  **Remove duplicates** finds sprites that are the same image under different names
+  (a result added twice, say), lists them, and keeps one of each: the one you set by
+  hand, else the shortest name.
 
 ### 3.3 Groups and kinds
 

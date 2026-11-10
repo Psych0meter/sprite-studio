@@ -138,3 +138,28 @@ def test_a_running_batch_shows_its_planned_total(client, env):
         assert "planned" not in row  # finished: what was made is the answer
     finally:
         webapp.JOBS.jobs.pop("t1", None)
+
+
+def test_duplicate_sprites_are_found_and_removed(team, env):  # noqa: F811
+    from PIL import Image
+    from test_accounts import make_model
+
+    admin, ann, bob = team
+    make_model(admin)
+    folder = Path(env["lora"]) / "units" / "sprites"
+    folder.mkdir(parents=True, exist_ok=True)
+    same = Image.new("RGBA", (16, 16), (200, 30, 30, 255))
+    for n in ("red_a.png", "red_a_copy.png", "red_a_copy_2.png"):
+        same.save(folder / n)
+    Image.new("RGBA", (16, 16), (30, 30, 200, 255)).save(folder / "blue.png")
+    admin.post("/api/models/units/sprites", json={"names": ["red_a_copy.png"], "words": "by hand"})
+    r = admin.post("/api/models/units/duplicates", json={}).json()
+    assert (
+        r["groups"] == [["red_a_copy.png", "red_a.png", "red_a_copy_2.png"]] and r["removed"] == []
+    )  # (the hand-set one is kept)
+    assert (folder / "red_a.png").exists()  # listing changes nothing
+    r = admin.post("/api/models/units/duplicates", json={"remove": True}).json()
+    assert sorted(r["removed"]) == ["red_a.png", "red_a_copy_2.png"]
+    assert sorted(p.name for p in folder.glob("*.png")) == ["blue.png", "red_a_copy.png"]
+    assert (folder / ".trash" / "red_a.png").exists()
+    assert admin.post("/api/models/units/duplicates", json={}).json()["groups"] == []
