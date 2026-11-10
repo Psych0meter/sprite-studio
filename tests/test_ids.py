@@ -179,3 +179,14 @@ def test_a_lora_keeps_its_creation_date_when_touched_or_renamed(team, env):  # n
     row = admin.get("/api/loras").json()["files"][0]
     assert row["name"] == "moved.safetensors" and row["created"] == 1_000_000_000 and row["mtime"] > time.time() - 60
     assert admin.get("/api/catalog").json()["loras"][0]["created"] == 1_000_000_000
+
+
+def test_kept_sprites_are_listed_for_the_results_page(team, env):  # noqa: F811
+    admin, ann, bob = team
+    lora_file(env)
+    d = make_result(env)
+    assert admin.get("/api/gallery/kept").json() == {"sources": {}}
+    gid = admin.post("/api/gallery", json={"path": str(d / "red_small_1_s11.png")}).json()["id"]
+    assert admin.get("/api/gallery/kept").json() == {"sources": {str(d / "red_small_1_s11.png"): gid}}
+    admin.post("/api/gallery/delete", json={"ids": [gid]})
+    assert admin.get("/api/gallery/kept").json() == {"sources": {}}

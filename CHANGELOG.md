@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **LoRA lists**: the LoRA choice in Generate and Batch shows the epoch and the creation date (`epoch 8, 2026-11-09`) next to each name, so similar files can be told apart.
+- **Results**: the bookmark of a sprite already in your gallery is filled and says so, instead of looking the same as the others.
 
 ### Changed
 

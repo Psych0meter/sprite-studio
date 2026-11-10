@@ -190,6 +190,7 @@ const ICONS = {
   tune: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M2 4.5h12M2 11.5h12"/><circle cx="10.5" cy="4.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/><circle cx="5.5" cy="11.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/></svg>',
   redo: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M12.5 6.5A5 5 0 1 0 13 10M12.8 2.5v4h-4"/></svg>',
   gallery: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.3" d="M3.5 1.8h9v12.4L8 11.3l-4.5 2.9z"/></svg>',
+  galleryOn: '<svg viewBox="0 0 16 16"><path fill="currentColor" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M3.5 1.8h9v12.4L8 11.3l-4.5 2.9z"/></svg>',
   download: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg>',
   x: '<svg viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.5" d="M4 4l8 8M12 4l-8 8"/></svg>',
 };
@@ -287,7 +288,7 @@ function drawProjectPicker() {
     h("option", { value: "" }, "All projects"), ps.map((p) => h("option", { value: p, selected: p === S.project },
       p + (S.catalog.models.some((m) => (m.project || "No project") === p) ? "" : " (no model yet)")))));
 }
-async function loadPicks() { S.picks = await api("/picks"); return S.picks; }
+async function loadPicks() { S.kept = (await api("/gallery/kept")).sources; S.picks = await api("/picks"); return S.picks; }  // (also which sprites are in the gallery)
 
 // ---------------------------------------------------------------- status bar
 
@@ -563,10 +564,14 @@ function tile(v, opts = {}) {
     }, picked));
   }
   if (!opts.orig && opts.pickAs !== undefined && v.path) {
-    tools.append(iconBtn("gallery", "Keep in your gallery, with the recipe that made it", async () => {
+    const kept = !!(S.kept && S.kept[v.path]);
+    tools.append(iconBtn(kept ? "galleryOn" : "gallery", kept ? "In your gallery (manage it on the Gallery page)" : "Keep in your gallery, with the recipe that made it", async () => {
       const r = await attempt(() => api("/gallery", { body: { path: v.path } }));
-      if (r) toast(r.already ? "Already in your gallery" : "Kept in your gallery: its LoRA can no longer be deleted while it is there");
-    }));
+      if (!r) return;
+      toast(r.already ? "Already in your gallery" : "Kept in your gallery: its LoRA can no longer be deleted while it is there");
+      S.kept = Object.assign(S.kept || {}, { [v.path]: r.id });
+      opts.refresh && opts.refresh();
+    }, kept));
   }
   tools.append(iconBtn("compare", inTray ? "In the comparison: click to remove" : "Add to the comparison", () => {
     setTray(inTray ? S.tray.filter((t) => t.path !== v.path) : [...S.tray, { path: v.path, w: v.w, h: v.h, label: v.label || v.name }]);

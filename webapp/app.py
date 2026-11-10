@@ -4310,6 +4310,14 @@ def gallery_row(m: dict) -> dict:
     return tagged("gallery", m["id"], row)
 
 
+@app.get("/api/gallery/kept")
+def api_gallery_kept():
+    """{source sprite path: gallery id} of the images this user has kept (the Results page marks them)."""
+    me = who_now()
+    owner = me.id if me else ""
+    return {"sources": {m["source"]: m["id"] for m in gallery_metas() if m.get("source") and m.get("owner") == owner}}
+
+
 @app.get("/api/gallery")
 def api_gallery():
     """The gallery items this user may see: their own and the ones shared with them."""
