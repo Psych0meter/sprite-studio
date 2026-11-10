@@ -519,17 +519,23 @@ function dialog({ title, text, input, value = "", placeholder = "", hint = "", o
 }
 // A dialog to pick from what exists: chips to click (one with multi false, any number with multi true)
 // and, with `input`, a box for new names (commas separate several). Resolves to the list of names, or null.
-function pickDialog({ title, text, choices, multi = true, input = "", ok = "OK", none = "" }) {
+function pickDialog({ title, text, choices, multi = true, input = "", ok = "OK", none = "", create = true }) {
   return new Promise((resolve) => {
     const layer = h("div", { class: "modal dialog-layer" });
     const picked = new Set();
-    const field = input ? h("input", { type: "text", class: "dialog-input", placeholder: input }) : null;
+    const field = input ? h("input", { type: "text", class: "dialog-input", placeholder: input, oninput: () => paint() }) : null;
     const chips = h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", margin: "8px 0" } });
-    const paint = () => chips.replaceChildren(...choices.map((c) => h("button", { class: "chip" + (picked.has(c.value) ? " on" : ""), type: "button",
-      onclick: () => { if (picked.has(c.value)) picked.delete(c.value); else { if (!multi) picked.clear(); picked.add(c.value); } paint(); } }, c.label)));
+    // What is being typed (the part after the last comma) narrows the buttons; the ones already picked stay.
+    const paint = () => {
+      const q = field ? field.value.split(",").pop().trim().toLowerCase() : "";
+      const list = choices.filter((c) => picked.has(c.value) || !q || c.value.toLowerCase().includes(q));
+      chips.replaceChildren(...(list.length ? list.map((c) => h("button", { class: "chip" + (picked.has(c.value) ? " on" : ""), type: "button",
+        onclick: () => { if (picked.has(c.value)) picked.delete(c.value); else { if (!multi) picked.clear(); picked.add(c.value); } paint(); } }, c.label))
+        : [h("span", { class: "muted small" }, create ? "No match: Enter creates it." : "No match.")]));
+    };
     const done = (v) => { layer.remove(); document.removeEventListener("keydown", onKey, true); resolve(v); };
     const submit = () => {
-      const typed = field ? field.value.split(",").map((t) => t.trim()).filter(Boolean) : [];
+      const typed = field && create ? field.value.split(",").map((t) => t.trim()).filter(Boolean) : [];
       const all = multi ? [...new Set([...picked, ...typed])] : typed.length ? [typed[0]] : [...picked];
       if (all.length) done(all);
     };
@@ -2233,7 +2239,8 @@ routes.gallery = async (main) => {
               const own = items.filter((i) => writable.includes(i.id));
               const tc = count(own, (i) => i.tags || []);
               const t = await pickDialog({ title: "Remove tags", text: "The tags the selected sprites carry (with how many have each):",
-                choices: [...tc.keys()].sort().map((n) => ({ value: n, label: `${n} (${tc.get(n)})` })), none: "The selected sprites have no tags.", ok: "Remove" });
+                choices: [...tc.keys()].sort().map((n) => ({ value: n, label: `${n} (${tc.get(n)})` })), input: "Type to filter the tags", create: false,
+                none: "The selected sprites have no tags.", ok: "Remove" });
               if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, remove_tags: t } }), "Tags removed"); load(); }
             } }, "Remove tags"),
             h("button", { class: "btn sm danger", onclick: async () => {
