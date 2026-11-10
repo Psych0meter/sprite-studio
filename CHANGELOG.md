@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-10
+
 ### Added
 
 - **LoRA lists**: the LoRA choice in Generate and Batch shows the epoch and the creation date (`epoch 8, 2026-11-09`) next to each name, so similar files can be told apart.
@@ -22,8 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Gallery**: *Select all shown* and the selection only cover what is on screen. Sprites hidden by a filter are deselected, so "246 selected" can no longer include sprites you cannot see (and an export or removal cannot touch them).
-- **Gallery**: the counts follow the filters, tags included: each tag shows how many of the sprites currently shown carry it, and a line says how many sprites are shown out of the total.
-- **Gallery**: the counts follow the filters. "All", folder and tag chips and "Select all shown" now count what the search, owner, folder and tag filters leave, and the search box updates them as you type.
+- **Gallery**: the counts follow the filters. "All", folder and tag chips and "Select all shown" count what the search, owner, folder and tag filters leave (each tag counts the sprites currently shown), the search box updates them as you type, and a line says how many sprites are shown out of the total.
 - **Updates**: updating Sprite Studio from the web page failed at the package step (*No such file or directory*) and was rolled back. The update ran from the `scripts` folder it was replacing; it now works from a folder that stays. If your installation is on 0.3.2, update it once by hand: `cd <install folder> && sudo scripts/install.sh` (or download the 0.3.4 release), because the 0.3.2 updater still has the problem.
 - **Sign-in block**: the user name, the Password and Sign out buttons and the version in the left rail are centred.
 
@@ -286,7 +287,8 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...v0.3.1
