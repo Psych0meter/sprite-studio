@@ -1244,6 +1244,21 @@ def lora_dir() -> Path:
     return setting_path("comfy_dir") / "models" / "loras"
 
 
+def lora_created(f: Path, rec: dict | None = None) -> float:
+    """When a LoRA file was made, as far as the app knows: noted once (by the file's id, so a rename or an archive
+    keeps it) from the install record, else from the file's birth or modification time, whichever is earlier.
+    The modification time alone moves whenever the file is copied or touched."""
+    uid = lora_id(f.name)
+    dates = _load("lora_dates.json", {})
+    if uid not in dates:
+        st = f.stat()
+        r = (rec if rec is not None else _load("installed.json", {})).get(f.name) or {}
+        birth = getattr(st, "st_birthtime", 0) or st.st_mtime
+        dates[uid] = r.get("installed") or min(st.st_mtime, birth)
+        _save("lora_dates.json", dates)
+    return dates[uid]
+
+
 def lora_info(name: str, rec: dict | None = None) -> dict:
     """One LoRA file in ComfyUI: there or not, and where it came from when the app installed it."""
     f = lora_dir() / name
@@ -1251,7 +1266,7 @@ def lora_info(name: str, rec: dict | None = None) -> dict:
     if not out["installed"]:
         return out
     st = f.stat()
-    out.update(size=st.st_size, mtime=st.st_mtime)
+    out.update(size=st.st_size, mtime=st.st_mtime, created=lora_created(f, rec))
     r = (rec if rec is not None else _load("installed.json", {})).get(name)
     if r and r.get("size") == st.st_size and abs(r.get("mtime", 0) - st.st_mtime) < 2:
         out.update(
@@ -1766,20 +1781,26 @@ def api_comfy(action: str):
 
 @app.get("/api/catalog")
 def api_catalog():
-    loras = []
-    if lora_dir().is_dir():
-        loras = [
-            {"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime}
-            for f in sorted(lora_dir().glob("*.safetensors"))
-        ]
-    lora_models = {r["name"]: r["model"] for r in lora_rows(True, counts=False)}  # (once, not once per file)
+    rows = {r["name"]: r for r in lora_rows(True, counts=False)}  # (once, not once per file)
+    loras = [
+        {
+            "name": n,
+            "size": r["size"],
+            "mtime": r["mtime"],
+            "created": r["created"],
+            "epoch": r["epoch"],
+            "final": r["final"],
+        }
+        for n, r in sorted(rows.items())
+        if lora_allowed(r["model"])
+    ]
     return {
         "models": models_summary(),
         "projects": [x["name"] for x in project_list() if x["name"]],
         "sources": sources(),
         "speed": speed(),
         "gpu_mb": gpu_memory_mb(),
-        "loras": [x for x in loras if lora_allowed(lora_models.get(x["name"], ""))],
+        "loras": loras,
         "settings": settings() if is_admin() else {},
     }
 
@@ -2713,6 +2734,7 @@ def lora_rows(everything: bool = False, counts: bool = True) -> list[dict]:
                 "name": f.name,
                 "size": info["size"],
                 "mtime": info["mtime"],
+                "created": info["created"],
                 "model": model,
                 "model_label": models.get(model, {}).get("label", ""),
                 "base": "SDXL" if info["xl"] else "SD 1.5",
@@ -4113,16 +4135,34 @@ async def api_pick(request: Request):
 async def api_picks_to_model(request: Request):
     """Copies the picked sprites into a model's sprites: an existing one ({"model": id}) or a new one ({"new":
     {"id", "label", "trigger", "project"}}), all in one group / kind if given. {"paths": [...]} limits it to some picks.
+    {"gallery": [ids]} takes gallery images instead of the picks.
     Everything is checked before anything is created or copied, so a refused request leaves no trace."""
     b = await request.json()
     if not isinstance(b, dict):
         raise HTTPException(400, "send a JSON object")
-    with _lock:
-        picks = dict(picks_mine(picks_load()))
-    if isinstance(b.get("paths"), list):
-        wanted = {str(safe_path(x, write=False)) for x in b["paths"]}
-        picks = {k: v for k, v in picks.items() if k in wanted}
     ready, skipped = [], []  # (source, base name) of the sprites that are real PNG images
+    if isinstance(b.get("gallery"), list):  # the sprites come from the gallery (the user's own and shared ones)
+        picks = {}
+        for gid in b["gallery"]:
+            try:
+                m = gallery_meta(str(gid))  # (404 for an image that does not exist or is not yours to see)
+            except HTTPException:
+                continue
+            if m:
+                src = gallery_dir() / m["id"] / "image.png"
+                base = re.sub(r"\.png$", "", name_ok(m.get("name") or src.stem), flags=re.I)
+                try:
+                    check_image(src.read_bytes(), "PNG")
+                except (OSError, HTTPException) as e:
+                    skipped.append(f"{base} ({getattr(e, 'detail', e)})")
+                    continue
+                ready.append((src, base))
+    else:
+        with _lock:
+            picks = dict(picks_mine(picks_load()))
+        if isinstance(b.get("paths"), list):
+            wanted = {str(safe_path(x, write=False)) for x in b["paths"]}
+            picks = {k: v for k, v in picks.items() if k in wanted}
     for k, v in picks.items():
         src = Path(k)
         if not src.is_file():
@@ -4139,7 +4179,11 @@ async def api_picks_to_model(request: Request):
     if not ready:
         raise HTTPException(
             400,
-            "Nothing picked yet: star the variants you want first."
+            (
+                "Nothing chosen."
+                if isinstance(b.get("gallery"), list)
+                else "Nothing picked yet: star the variants you want first."
+            )
             if not skipped
             else "None of the picks is a usable PNG: " + "; ".join(skipped),
         )
@@ -4286,6 +4330,14 @@ def gallery_row(m: dict) -> dict:
     if m.get("lora_id"):  # (the file may have been renamed since it was saved)
         row["lora"] = lora_name_of(m["lora_id"]) or m.get("lora")
     return tagged("gallery", m["id"], row)
+
+
+@app.get("/api/gallery/kept")
+def api_gallery_kept():
+    """{source sprite path: gallery id} of the images this user has kept (the Results page marks them)."""
+    me = who_now()
+    owner = me.id if me else ""
+    return {"sources": {m["source"]: m["id"] for m in gallery_metas() if m.get("source") and m.get("owner") == owner}}
 
 
 @app.get("/api/gallery")

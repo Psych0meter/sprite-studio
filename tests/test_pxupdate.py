@@ -38,10 +38,10 @@ def upstream(tmp_path):
     return up
 
 
-def run(args, env, check=False):
+def run(args, env, check=False, cwd=None):
     e = {"PATH": os.environ["PATH"], "HOME": str(env["home"]), "SG_WEB_STATE": str(env["home"] / "state")}
     e.update({k: str(v) for k, v in env.items() if k != "home"})
-    return subprocess.run([sys.executable, str(SCRIPT), *args], env=e, capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(SCRIPT), *args], env=e, capture_output=True, text=True, cwd=cwd)
 
 
 def test_the_latest_release_is_the_highest_stable_tag(upstream):
@@ -225,3 +225,19 @@ def test_a_release_without_readable_dependencies_is_refused_before_anything_chan
     assert r.returncode == 1 and "refused" in r.stderr
     assert (studio["app"] / "VERSION").read_text().strip() == "1.0.0"
     assert not (studio["home"] / "state" / "update_pending").exists()
+
+
+def test_the_package_install_does_not_depend_on_the_folder_the_update_started_in(studio):
+    # the web app starts the update from scripts/, which the update replaces: pip must not run from a deleted folder
+    app = studio["app"]
+    venv = app / "webapp" / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    pip = venv / "pip"
+    pip.write_text(
+        '#!/bin/sh\nif [ "$1" = freeze ]; then echo "fastapi==0.1"; exit 0; fi\n'
+        'python3 -c "import os; os.getcwd()" || { echo "No such file or directory (cwd)" >&2; exit 7; }\nexit 0\n'
+    )
+    pip.chmod(0o755)
+    r = run(["studio"], studio, cwd=app / "scripts")
+    assert r.returncode == 0, r.stderr
+    assert (app / "VERSION").read_text().strip() == "1.1.0"

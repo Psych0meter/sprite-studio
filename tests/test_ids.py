@@ -163,3 +163,51 @@ def test_duplicate_sprites_are_found_and_removed(team, env):  # noqa: F811
     assert sorted(p.name for p in folder.glob("*.png")) == ["blue.png", "red_a_copy.png"]
     assert (folder / ".trash" / "red_a.png").exists()
     assert admin.post("/api/models/units/duplicates", json={}).json()["groups"] == []
+
+
+def test_a_lora_keeps_its_creation_date_when_touched_or_renamed(team, env):  # noqa: F811
+    import os
+    import time
+
+    admin, ann, bob = team
+    f = lora_file(env)
+    os.utime(f, (1_000_000_000, 1_000_000_000))
+    row = admin.get("/api/loras").json()["files"][0]
+    assert row["created"] == 1_000_000_000
+    os.utime(f, None)  # (a copy or an edit moves the modification time)
+    assert admin.post("/api/loras/rename", json={"name": "pxunit", "to": "moved"}).status_code == 200
+    row = admin.get("/api/loras").json()["files"][0]
+    assert row["name"] == "moved.safetensors" and row["created"] == 1_000_000_000 and row["mtime"] > time.time() - 60
+    assert admin.get("/api/catalog").json()["loras"][0]["created"] == 1_000_000_000
+
+
+def test_kept_sprites_are_listed_for_the_results_page(team, env):  # noqa: F811
+    admin, ann, bob = team
+    lora_file(env)
+    d = make_result(env)
+    assert admin.get("/api/gallery/kept").json() == {"sources": {}}
+    gid = admin.post("/api/gallery", json={"path": str(d / "red_small_1_s11.png")}).json()["id"]
+    assert admin.get("/api/gallery/kept").json() == {"sources": {str(d / "red_small_1_s11.png"): gid}}
+    admin.post("/api/gallery/delete", json={"ids": [gid]})
+    assert admin.get("/api/gallery/kept").json() == {"sources": {}}
+
+
+def test_gallery_sprites_can_become_training_sprites(team, env):  # noqa: F811
+    from test_accounts import make_model
+
+    admin, ann, bob = team
+    make_model(admin)
+    lora_file(env)
+    d = make_result(env)
+    gid = admin.post("/api/gallery", json={"path": str(d / "red_small_1_s11.png"), "name": "Nice one"}).json()["id"]
+    r = admin.post("/api/picks/to-model", json={"model": "units", "gallery": [gid, "0" * 16]})
+    assert r.status_code == 200, r.text
+    assert r.json()["saved"] == ["Nice_one.png"] or len(r.json()["saved"]) == 1  # (the unknown id is ignored)
+    assert (Path(env["lora"]) / "units" / "sprites" / r.json()["saved"][0]).is_file()
+    r = admin.post(
+        "/api/picks/to-model", json={"new": {"id": "fresh", "label": "Fresh", "trigger": "pxfresh"}, "gallery": [gid]}
+    )
+    assert r.status_code == 200 and r.json()["model"] == "fresh" and len(r.json()["saved"]) == 1
+    assert admin.post("/api/picks/to-model", json={"model": "units", "gallery": []}).status_code == 400
+    # a gallery image you cannot see is not used (and nothing is created for it)
+    assert ann.post("/api/picks/to-model", json={"model": "units", "gallery": [gid]}).status_code in (400, 403, 404)

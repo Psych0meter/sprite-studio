@@ -351,7 +351,7 @@ and SDXL.
 ### 5.6 Managing LoRA files
 
 **LoRA files** lists every LoRA in ComfyUI's `models/loras` folder as a
-table: name, the model it belongs to, base (SD 1.5 or SDXL), epoch, date,
+table: name, the model it belongs to, base (SD 1.5 or SDXL), epoch, creation date (kept when a file is renamed or copied),
 size, and *Results*, the number of result folders rendered with it. A tag
 shows the file each model generates with (*in use, SD 1.5* or *SDXL*).
 
@@ -434,11 +434,21 @@ the seed, model, group, kind, settings, prompt and extras. Then:
   their own gallery.
 - **Folders and tags**: give an image one folder (an album) and any tags (up to 12), then filter
   by folder, tag, owner (*Mine* / *Shared with me*) or text (name, LoRA, seed,
-  model...). *Move to folder*, *Add tags* and *Remove tags* work on a
-  selection. A folder is just a label: type a new name to create one.
+  model...). Click folders and tags to add them (several folders: any
+  of them; several tags: all of them), click one again to **hide** it (crossed
+  out), a third time to clear it. *Clear all filters* (shown while any filter is on) resets the search and all filters. In the search box, several words must
+  all match and a word starting with `-` excludes (`swarm -veteran`). The counts
+  follow the filters. *Move to folder*, *Add tags* and *Remove tags* work on the
+  selection (they list the existing folders and tags to click, and you can still type
+  new names; *Remove tags* shows only the tags the selection carries), which only ever holds sprites that are on screen (changing a filter
+  deselects the hidden ones). A folder is just a label: type a new name to create one.
 - **Export zip** of the selection (or *with folders*, which keeps the gallery
   folders as folders in the zip): the PNG files named after the sprites, and a
   `manifest.json` with each recipe.
+- **Train on these…** copies the selected sprites into a new model or an existing
+  one (pick the group and kind if you like) as training sprites, named after the
+  gallery names. The gallery images stay; sprites the model already has are never
+  overwritten.
 
 Same recipe, same picture? Generating again with the **same LoRA file, seed,
 prompt, settings, starting sprite and base model** gives the same image on the

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-10
+
+### Added
+
+- **LoRA lists**: the LoRA choice in Generate and Batch shows the epoch and the creation date (`epoch 8, 2026-11-09`) next to each name, so similar files can be told apart.
+- **Results**: the bookmark of a sprite already in your gallery is filled and says so, instead of looking the same as the others.
+- **Gallery**: *Train on these…* copies the selected gallery sprites into a new or an existing model as training sprites (the same dialog as *Train on picks*; the gallery images stay where they are).
+
+### Changed
+
+- **Gallery**: *Move to folder*, *Add tags* and *Remove tags* offer the existing folders and tags as buttons to click (with counts); *Remove tags* lists only the tags the selected sprites carry. New names can still be typed. Typing narrows the buttons to the matching names; *Remove tags* has a filter box for the same.
+- **Gallery**: filters can pick several and exclude. Click folders or tags to add them (several folders: any of them; several tags: all of them), click one again to hide it (crossed out), a third time to clear. In the search box, several words must all match and a word starting with `-` hides matches (`swarm -veteran`). *Clear all filters* removes the search and every filter at once.
+- **LoRA files**: the *Date* column shows when the file was created, not when it was last modified (a copy or a touch moves the modification time). The date is noted once per file and follows it through renames.
+
+### Fixed
+
+- **Gallery**: *Select all shown* and the selection only cover what is on screen. Sprites hidden by a filter are deselected, so "246 selected" can no longer include sprites you cannot see (and an export or removal cannot touch them).
+- **Gallery**: the counts follow the filters. "All", folder and tag chips and "Select all shown" count what the search, owner, folder and tag filters leave (each tag counts the sprites currently shown), the search box updates them as you type, and a line says how many sprites are shown out of the total.
+- **Updates**: updating Sprite Studio from the web page failed at the package step (*No such file or directory*) and was rolled back. The update ran from the `scripts` folder it was replacing; it now works from a folder that stays. If your installation is on 0.3.2, update it once by hand: `cd <install folder> && sudo scripts/install.sh` (or download the 0.3.4 release), because the 0.3.2 updater still has the problem.
+- **Sign-in block**: the user name, the Password and Sign out buttons and the version in the left rail are centred.
+
 ## [0.3.3] - 2026-11-10
 
 ### Added
@@ -266,7 +287,8 @@ repository: models, LoRAs, palettes, results and settings are kept.
 - `pxgen.sh` and `pxart.sh` (use `pxmake.sh`), and the one-off migration
   script `backup_old.sh`.
 
-[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Psych0meter/sprite-studio/compare/v0.3.0...v0.3.1

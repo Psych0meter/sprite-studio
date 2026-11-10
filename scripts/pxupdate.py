@@ -223,6 +223,9 @@ def studio_update() -> None:
         raise UpdateError("this is a git checkout, not an installation: update it with git")
     if marker().exists():
         raise UpdateError("the previous update is not confirmed yet: wait a minute, or roll it back")
+    # The web app starts this from scripts/, which the update replaces: a process left in a deleted folder makes
+    # every later command (pip first) fail with "No such file or directory". Work from a folder that stays.
+    os.chdir(tempfile.gettempdir())
     repo = os.environ.get("SG_UPDATE_REPO", STUDIO_REPO)
     tag = latest_release(repo)
     if not tag:

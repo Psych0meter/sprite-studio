@@ -124,6 +124,20 @@ function ago(t) {
   return fmtTime(t);
 }
 
+// 2026-11-09, in the browser's time zone.
+function ymd(t) {
+  const d = new Date(t * 1000);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// "epoch 8, 2026-11-09": what tells one LoRA file from another in a list.
+function loraBrief(n) {
+  const x = (S.catalog.loras || []).find((l) => l.name === n);
+  if (!x) return "";
+  const e = x.final ? "last epoch" : x.epoch ? "epoch " + x.epoch : "";
+  return [e, x.created ? ymd(x.created) : ""].filter(Boolean).join(", ");
+}
+
 // The LoRA a render of model m will use (chosen: a file name, or "" for the model's default):
 // {name, ok, info}. ok is false only when ComfyUI's folder is visible and the file isn't in it.
 function loraFor(m, chosen) {
@@ -157,9 +171,9 @@ function loraOptions(m, chosen) {
   const names = [L.xl, ...(L.extra || [])].filter((x) => x && x.installed).map((x) => x.name);
   const others = (S.catalog.loras || []).map((x) => x.name).filter((n) => !names.includes(n) && n !== (L.default && L.default.name));
   const def = (L.default && L.default.name) || m.trigger + ".safetensors";
-  return [h("option", { value: "" }, `Default: ${def}` + (L.default && L.default.installed === false ? " (not installed)" : "")),
-    names.length ? h("optgroup", { label: "This model" }, names.map((n) => h("option", { value: n, selected: n === chosen }, n + (n.includes("_xl") ? " (SDXL)" : "")))) : null,
-    others.length ? h("optgroup", { label: "Other LoRAs" }, others.map((n) => h("option", { value: n, selected: n === chosen }, n))) : null];
+  return [h("option", { value: "" }, `Default: ${def}` + (L.default && L.default.installed === false ? " (not installed)" : loraBrief(def) ? ` (${loraBrief(def)})` : "")),
+    names.length ? h("optgroup", { label: "This model" }, names.map((n) => h("option", { value: n, selected: n === chosen }, n + (n.includes("_xl") ? " (SDXL)" : "") + (loraBrief(n) ? ` (${loraBrief(n)})` : "")))) : null,
+    others.length ? h("optgroup", { label: "Other LoRAs" }, others.map((n) => h("option", { value: n, selected: n === chosen }, n + (loraBrief(n) ? ` (${loraBrief(n)})` : "")))) : null];
 }
 
 const store = {
@@ -176,6 +190,7 @@ const ICONS = {
   tune: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M2 4.5h12M2 11.5h12"/><circle cx="10.5" cy="4.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/><circle cx="5.5" cy="11.5" r="1.8" fill="var(--panel, #222)" stroke="currentColor" stroke-width="1.4"/></svg>',
   redo: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M12.5 6.5A5 5 0 1 0 13 10M12.8 2.5v4h-4"/></svg>',
   gallery: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.3" d="M3.5 1.8h9v12.4L8 11.3l-4.5 2.9z"/></svg>',
+  galleryOn: '<svg viewBox="0 0 16 16"><path fill="currentColor" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" d="M3.5 1.8h9v12.4L8 11.3l-4.5 2.9z"/></svg>',
   download: '<svg viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.4" d="M8 2v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg>',
   x: '<svg viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.5" d="M4 4l8 8M12 4l-8 8"/></svg>',
 };
@@ -273,7 +288,7 @@ function drawProjectPicker() {
     h("option", { value: "" }, "All projects"), ps.map((p) => h("option", { value: p, selected: p === S.project },
       p + (S.catalog.models.some((m) => (m.project || "No project") === p) ? "" : " (no model yet)")))));
 }
-async function loadPicks() { S.picks = await api("/picks"); return S.picks; }
+async function loadPicks() { S.kept = (await api("/gallery/kept")).sources; S.picks = await api("/picks"); return S.picks; }  // (also which sprites are in the gallery)
 
 // ---------------------------------------------------------------- status bar
 
@@ -502,6 +517,46 @@ function dialog({ title, text, input, value = "", placeholder = "", hint = "", o
     if (field) setTimeout(() => field.select(), 0);
   });
 }
+// A dialog to pick from what exists: chips to click (one with multi false, any number with multi true)
+// and, with `input`, a box for new names (commas separate several). Resolves to the list of names, or null.
+function pickDialog({ title, text, choices, multi = true, input = "", ok = "OK", none = "", create = true }) {
+  return new Promise((resolve) => {
+    const layer = h("div", { class: "modal dialog-layer" });
+    const picked = new Set();
+    const field = input ? h("input", { type: "text", class: "dialog-input", placeholder: input, oninput: () => paint() }) : null;
+    const chips = h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", margin: "8px 0" } });
+    // What is being typed (the part after the last comma) narrows the buttons; the ones already picked stay.
+    const paint = () => {
+      const q = field ? field.value.split(",").pop().trim().toLowerCase() : "";
+      const list = choices.filter((c) => picked.has(c.value) || !q || c.value.toLowerCase().includes(q));
+      chips.replaceChildren(...(list.length ? list.map((c) => h("button", { class: "chip" + (picked.has(c.value) ? " on" : ""), type: "button",
+        onclick: () => { if (picked.has(c.value)) picked.delete(c.value); else { if (!multi) picked.clear(); picked.add(c.value); } paint(); } }, c.label))
+        : [h("span", { class: "muted small" }, create ? "No match: Enter creates it." : "No match.")]));
+    };
+    const done = (v) => { layer.remove(); document.removeEventListener("keydown", onKey, true); resolve(v); };
+    const submit = () => {
+      const typed = field && create ? field.value.split(",").map((t) => t.trim()).filter(Boolean) : [];
+      const all = multi ? [...new Set([...picked, ...typed])] : typed.length ? [typed[0]] : [...picked];
+      if (all.length) done(all);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); done(null); }
+      else if (e.key === "Enter" && document.activeElement === field) { e.preventDefault(); submit(); }
+    };
+    paint();
+    layer.append(h("div", { class: "modal-box dialog-box", role: "dialog", "aria-modal": "true" },
+      h("h2", {}, title), text ? h("p", { class: "dialog-text" }, text) : null,
+      choices.length ? chips : h("p", { class: "muted small" }, none || "Nothing to pick from yet."),
+      field ? h("div", { class: "field" }, field) : null,
+      h("div", { class: "row", style: { marginTop: "18px", justifyContent: "flex-end" } },
+        h("button", { class: "btn ghost", type: "button", onclick: () => done(null) }, "Cancel"),
+        h("button", { class: "btn primary", type: "button", onclick: submit }, ok))));
+    layer.addEventListener("click", (e) => { if (e.target === layer) done(null); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(layer);
+    setTimeout(() => (field || layer.querySelector(".btn.primary")).focus(), 0);
+  });
+}
 const askText = (title, opts = {}) => dialog(Object.assign({ title, input: true }, opts));
 const askConfirm = (text, opts = {}) => dialog(Object.assign({ title: opts.title || "Are you sure?", text }, opts));
 
@@ -549,10 +604,14 @@ function tile(v, opts = {}) {
     }, picked));
   }
   if (!opts.orig && opts.pickAs !== undefined && v.path) {
-    tools.append(iconBtn("gallery", "Keep in your gallery, with the recipe that made it", async () => {
+    const kept = !!(S.kept && S.kept[v.path]);
+    tools.append(iconBtn(kept ? "galleryOn" : "gallery", kept ? "In your gallery (manage it on the Gallery page)" : "Keep in your gallery, with the recipe that made it", async () => {
       const r = await attempt(() => api("/gallery", { body: { path: v.path } }));
-      if (r) toast(r.already ? "Already in your gallery" : "Kept in your gallery: its LoRA can no longer be deleted while it is there");
-    }));
+      if (!r) return;
+      toast(r.already ? "Already in your gallery" : "Kept in your gallery: its LoRA can no longer be deleted while it is there");
+      S.kept = Object.assign(S.kept || {}, { [v.path]: r.id });
+      opts.refresh && opts.refresh();
+    }, kept));
   }
   tools.append(iconBtn("compare", inTray ? "In the comparison: click to remove" : "Add to the comparison", () => {
     setTray(inTray ? S.tray.filter((t) => t.path !== v.path) : [...S.tray, { path: v.path, w: v.w, h: v.h, label: v.label || v.name }]);
@@ -1470,8 +1529,8 @@ routes.results = async (main, _parts, params) => {
 };
 
 // The starred sprites become training sprites of a new model, or are added to an existing one.
-async function picksToModel() {
-  const n = Object.keys(S.picks || {}).length;
+async function picksToModel(from) {  // from: {gallery: [ids]} to use gallery images instead of the starred ones
+  const n = from ? from.gallery.length : Object.keys(S.picks || {}).length;
   if (!n) { toast("Nothing picked yet: star the variants you want first.", true); return; }
   await loadCatalog();
   const models = S.catalog.models;
@@ -1493,8 +1552,8 @@ async function picksToModel() {
   const draw = () => {
     box.innerHTML = "";
     const opt = (v, l, cur) => h("option", { value: v, selected: v === cur }, l);
-    box.append(h("h2", {}, "Train on picks"),
-      h("p", { class: "dialog-text" }, `${n === 1 ? "The starred sprite is" : `The ${n} starred sprites are`} copied (the originals stay in Results) into a model's sprites, named after their pick name. Then train that model on the Train page.`),
+    box.append(h("h2", {}, from ? "Train on gallery sprites" : "Train on picks"),
+      h("p", { class: "dialog-text" }, `${n === 1 ? (from ? "The selected sprite is" : "The starred sprite is") : `The ${n} ${from ? "selected" : "starred"} sprites are`} copied (the originals stay ${from ? "in the gallery" : "in Results"}) into a model's sprites, named after their pick name. Then train that model on the Train page.`),
       h("div", { class: "field", style: { marginTop: "14px" } }, seg([{ id: "existing", label: "Existing model" }, { id: "new", label: "New model" }].filter((o) => o.id === "new" || models.length), f.mode,
         async (v) => { f.mode = v; await loadDetail(); draw(); })),
       f.mode === "existing"
@@ -1505,11 +1564,12 @@ async function picksToModel() {
       detail ? h("div", { class: "inline-fields" },
         h("div", { class: "field" }, h("label", {}, "Group"), h("select", { onchange: (e) => { f.group = e.target.value; } }, opt("", "Automatic (by file name)", f.group), detail.groups.map((g) => opt(g.id, g.label, f.group)))),
         detail.kinds.length ? h("div", { class: "field" }, h("label", {}, "Kind"), h("select", { onchange: (e) => { f.kind = e.target.value; } }, opt("", "Automatic (by file name)", f.kind), detail.kinds.map((k) => opt(k.id, k.label, f.kind)))) : null) : null,
-      h("label", { class: "row", style: { gap: "8px", margin: "10px 0" } }, h("input", { type: "checkbox", checked: f.unpick, onchange: (e) => { f.unpick = e.target.checked; } }), h("span", { class: "small" }, "Remove the stars afterwards")),
+      from ? null : h("label", { class: "row", style: { gap: "8px", margin: "10px 0" } }, h("input", { type: "checkbox", checked: f.unpick, onchange: (e) => { f.unpick = e.target.checked; } }), h("span", { class: "small" }, "Remove the stars afterwards")),
       h("div", { class: "row", style: { marginTop: "18px", justifyContent: "flex-end" } },
         h("button", { class: "btn ghost", onclick: close }, "Cancel"),
         h("button", { class: "btn primary", onclick: async () => {
-          const body = { group: f.group || null, kind: f.kind || null, unpick: f.unpick };
+          const body = { group: f.group || null, kind: f.kind || null, unpick: !from && f.unpick };
+          if (from) body.gallery = from.gallery;
           if (f.mode === "new") {
             if (!f.label.trim()) { toast("Give the new model a name", true); return; }
             body.new = { id: slug(f.label), label: f.label.trim(), trigger: f.trigger.trim() };
@@ -1517,7 +1577,7 @@ async function picksToModel() {
           const r = await attempt(() => api("/picks/to-model", { body }));
           if (!r) return;
           close();
-          if (f.unpick) S.picks = await api("/picks");
+          if (!from && f.unpick) S.picks = await api("/picks");
           toast(`${r.saved.length} sprite${r.saved.length === 1 ? "" : "s"} added to ${r.model}` + (r.skipped.length ? `, ${r.skipped.length} skipped` : ""), !r.saved.length);
           location.hash = "#/models/" + r.model;
         } }, "Add to the model")));
@@ -2085,7 +2145,10 @@ function galleryDialog(id, folders, onChange) {
 }
 
 routes.gallery = async (main) => {
-  const state = Object.assign({ find: "", folder: "*", tag: "", who: "all" }, store.get("gallery", {}));
+  const state = Object.assign({ find: "", folders: [], tags: [], noFolder: [], noTag: [], who: "all" }, store.get("gallery", {}));
+  // (older saved filters held one folder and one tag)
+  if (state.folder !== undefined) { if (state.folder !== "*") state.folders = [state.folder]; delete state.folder; }
+  if (state.tag !== undefined) { if (state.tag) state.tags = [state.tag]; delete state.tag; }
   const keep = () => store.set("gallery", state);
   const sel = new Set();
   let items = [];
@@ -2094,54 +2157,91 @@ routes.gallery = async (main) => {
   main.append(body);
   const load = async () => { items = (await api("/gallery")).items; draw(); };
   const count = (list, f) => { const m = new Map(); list.forEach((i) => f(i).forEach((k) => m.set(k, (m.get(k) || 0) + 1))); return m; };
-  const filtered = () => {
-    const q = state.find.trim().toLowerCase();
+  // The items the filters keep; `skip` leaves one filter out ("folder" or "tag"), so a chip counts what it would show.
+  const filtered = (skip) => {
+    // Search words all have to match; a word starting with "-" must not match.
+    const words = state.find.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const want = words.filter((w) => w[0] !== "-");
+    const nope = words.filter((w) => w[0] === "-" && w.length > 1).map((w) => w.slice(1));
     return items.filter((i) =>
-      (state.folder === "*" || (i.folder || "") === state.folder) && (!state.tag || (i.tags || []).includes(state.tag)) &&
+      (skip === "folder" || ((!state.folders.length || state.folders.includes(i.folder || "")) && !state.noFolder.includes(i.folder || ""))) &&
+      (skip === "tag" || (state.tags.every((t) => (i.tags || []).includes(t)) && !(i.tags || []).some((t) => state.noTag.includes(t)))) &&
       (state.who === "all" || (state.who === "mine" ? i.owner === ME.username : i.owner !== ME.username)) &&
-      (!q || [i.name, i.lora, i.model, i.group, i.kind, String(i.seed), i.folder, ...(i.tags || [])].join(" ").toLowerCase().includes(q))); 
+      ((txt) => want.every((w) => txt.includes(w)) && !nope.some((w) => txt.includes(w)))(
+        [i.name, i.lora, i.model, i.group, i.kind, String(i.seed), i.folder, ...(i.tags || [])].join(" ").toLowerCase()));
   };
   const draw = () => {
     for (const id of [...sel]) if (!items.some((i) => i.id === id)) sel.delete(id);
-    const folders = count(items, (i) => [i.folder || ""]);
-    const tagCounts = count(items, (i) => i.tags || []);
+    const shown0 = filtered();
+    const folders = count(filtered("folder"), (i) => [i.folder || ""]);
+    const tagCounts = count(shown0, (i) => i.tags || []);  // what each tag leaves of what is shown now
+    const allFolders = [...new Set(items.map((i) => i.folder || ""))];
     const shown = filtered();
-    const names = [...folders.keys()].filter(Boolean).sort();
-    const chip = (label, on, fn, title) => h("button", { class: "chip" + (on ? " on" : ""), type: "button", title, onclick: fn }, label);
+    for (const id of [...sel]) if (!shown.some((i) => i.id === id)) sel.delete(id);  // only what is on screen stays selected
+    const names = [...new Set([...allFolders, ...state.folders, ...state.noFolder])].filter(Boolean).sort();
+    const chip = (label, on, fn, title, off) => h("button", { class: "chip" + (on ? " on" : "") + (off ? " off" : ""), type: "button", title, onclick: fn }, off ? "not " + label : label);
+    // Click: add it to what is shown; click again: hide it instead; once more: clear it. Folders: any of the chosen; tags: all of them.
+    const cycle = (key, noKey, v) => () => {
+      if (state[key].includes(v)) { state[key] = state[key].filter((x) => x !== v); state[noKey] = [...state[noKey], v]; }
+      else if (state[noKey].includes(v)) state[noKey] = state[noKey].filter((x) => x !== v);
+      else state[key] = [...state[key], v];
+      keep(); draw();
+    };
+    const hint = "Click: show it (click several: folders any of them, tags all of them). Click again: hide it. A third time: clear.";
     const ids = shown.map((i) => i.id);
     const writable = [...sel].filter((id) => (items.find((i) => i.id === id) || {}).access === "write");
     body.replaceChildren(
       h("datalist", { id: "g-folders" }, names.map((n) => h("option", { value: n }))),
       h("div", { class: "panel" },
         h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap" } },
-          h("input", { type: "search", placeholder: "Search name, LoRA, seed, tag…", value: state.find, style: { maxWidth: "260px" }, oninput: (e) => { state.find = e.target.value; keep(); drawGrid(); } }),
+          h("input", { type: "search", placeholder: "Search; -word hides matches", title: "Words must all match. A word starting with - excludes: swarm -veteran", value: state.find, style: { maxWidth: "260px" }, oninput: (e) => {  // (the counts follow the search: draw it all again, keeping the cursor in the box)
+            state.find = e.target.value; keep(); draw();
+            const box = body.querySelector("input[type=search]");
+            box.focus(); box.setSelectionRange(box.value.length, box.value.length);
+          } }),
+          (state.find.trim() || state.who !== "all" || state.folders.length || state.noFolder.length || state.tags.length || state.noTag.length)
+            ? h("button", { class: "btn sm ghost", type: "button", title: "Remove the search and every filter", onclick: () => {
+              Object.assign(state, { find: "", who: "all", folders: [], noFolder: [], tags: [], noTag: [] }); keep(); draw();
+            } }, "Clear all filters") : null,
           chip("All", state.who === "all", () => { state.who = "all"; keep(); draw(); }), chip("Mine", state.who === "mine", () => { state.who = "mine"; keep(); draw(); }),
           chip("Shared with me", state.who === "shared", () => { state.who = "shared"; keep(); draw(); })),
         h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Folders"),
-          chip(`All (${items.length})`, state.folder === "*", () => { state.folder = "*"; keep(); draw(); }),
-          folders.has("") ? chip(`No folder (${folders.get("")})`, state.folder === "", () => { state.folder = ""; keep(); draw(); }) : null,
-          names.map((n) => chip(`${n} (${folders.get(n)})`, state.folder === n, () => { state.folder = n; keep(); draw(); }))),
-        tagCounts.size ? h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Tags"),
-          [...tagCounts.keys()].sort().map((t) => chip(`${t} (${tagCounts.get(t)})`, state.tag === t, () => { state.tag = state.tag === t ? "" : t; keep(); draw(); }))) : null),
+          chip(`All (${filtered("folder").length})`, !state.folders.length && !state.noFolder.length, () => { state.folders = []; state.noFolder = []; keep(); draw(); }),
+          folders.has("") || state.folders.includes("") || state.noFolder.includes("") ? chip(`No folder (${folders.get("") || 0})`, state.folders.includes(""), cycle("folders", "noFolder", ""), hint, state.noFolder.includes("")) : null,
+          names.map((n) => chip(`${n} (${folders.get(n) || 0})`, state.folders.includes(n), cycle("folders", "noFolder", n), hint, state.noFolder.includes(n)))),
+        tagCounts.size || state.tags.length || state.noTag.length ? h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Tags"),
+          [...new Set([...tagCounts.keys(), ...state.tags, ...state.noTag])].sort().map((t) => chip(`${t} (${tagCounts.get(t) || 0})`, state.tags.includes(t), cycle("tags", "noTag", t), hint, state.noTag.includes(t)))) : null),
       h("div", { class: "row", style: { gap: "8px", flexWrap: "wrap", margin: "12px 0" } },
         h("label", { class: "row", style: { gap: "6px" } }, h("input", { type: "checkbox", checked: ids.length > 0 && ids.every((id) => sel.has(id)),
           onchange: (e) => { ids.forEach((id) => (e.target.checked ? sel.add(id) : sel.delete(id))); draw(); } }), `Select all shown (${shown.length})`),
+        h("span", { class: "muted small" }, shown.length === items.length ? `${items.length} sprites` : `${shown.length} of ${items.length} sprites`),
         sel.size ? [
           h("span", { class: "muted small" }, `${sel.size} selected`),
           h("button", { class: "btn sm", onclick: () => downloadGalleryZip([...sel], false) }, "Export zip"),
           h("button", { class: "btn sm", title: "Gallery folders become folders in the zip", onclick: () => downloadGalleryZip([...sel], true) }, "Export zip with folders"),
+          h("button", { class: "btn sm", title: "Copy the selected sprites into a new or existing model as training sprites", onclick: () => picksToModel({ gallery: [...sel] }) }, "Train on these…"),
           writable.length ? [
             h("button", { class: "btn sm", onclick: async () => {
-              const f = await askText("Move to a folder", { input: "Folder name (empty: no folder)", value: "", ok: "Move" });
-              if (f !== null) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, folder: f } }), "Moved"); load(); }
+              const fc = count(items, (i) => [i.folder || ""]);
+              const choices = [...fc.keys()].sort().map((n) => ({ value: n, label: n ? `${n} (${fc.get(n)})` : `No folder (${fc.get("")})` }));
+              if (!fc.has("")) choices.push({ value: "", label: "No folder" });
+              const f = await pickDialog({ title: "Move to a folder", text: `${writable.length} sprite${writable.length === 1 ? "" : "s"}: pick a folder or type a new name.`,
+                choices, multi: false, input: "New folder name", ok: "Move" });
+              if (f) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, folder: f[0] } }), "Moved"); load(); }
             } }, "Move to folder"),
             h("button", { class: "btn sm", onclick: async () => {
-              const t = await askText("Add tags", { input: "Tags, comma separated", value: "", ok: "Add" });
-              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, add_tags: t.split(",") } }), "Tags added"); load(); }
+              const tc = count(items, (i) => i.tags || []);
+              const t = await pickDialog({ title: "Add tags", text: "Pick existing tags and/or type new ones, separated by commas.",
+                choices: [...tc.keys()].sort().map((n) => ({ value: n, label: `${n} (${tc.get(n)})` })), input: "New tags, comma separated", ok: "Add" });
+              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, add_tags: t } }), "Tags added"); load(); }
             } }, "Add tags"),
             h("button", { class: "btn sm", onclick: async () => {
-              const t = await askText("Remove tags", { input: "Tags, comma separated", value: "", ok: "Remove" });
-              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, remove_tags: t.split(",") } }), "Tags removed"); load(); }
+              const own = items.filter((i) => writable.includes(i.id));
+              const tc = count(own, (i) => i.tags || []);
+              const t = await pickDialog({ title: "Remove tags", text: "The tags the selected sprites carry (with how many have each):",
+                choices: [...tc.keys()].sort().map((n) => ({ value: n, label: `${n} (${tc.get(n)})` })), input: "Type to filter the tags", create: false,
+                none: "The selected sprites have no tags.", ok: "Remove" });
+              if (t) { await attempt(() => api("/gallery/bulk", { body: { ids: writable, remove_tags: t } }), "Tags removed"); load(); }
             } }, "Remove tags"),
             h("button", { class: "btn sm danger", onclick: async () => {
               if (await askConfirm(`Remove ${writable.length} image${writable.length === 1 ? "" : "s"} from the gallery? The images and their recipes are erased; their LoRAs are free to delete again if nothing else uses them.`, { danger: true, ok: "Remove", title: "Remove from the gallery" })) {
@@ -2249,7 +2349,7 @@ routes.lorafiles = async (main) => {
         h("td", {}, f.model_label ? h("a", { href: "#/train/" + f.model }, f.model_label) : h("span", { class: "muted" }, "unknown")),
         h("td", {}, f.base),
         h("td", {}, f.epoch != null ? "epoch " + f.epoch : f.final ? "last epoch" : h("span", { class: "muted", title: "Copied outside the app, and the name has no epoch" }, "?")),
-        h("td", {}, h("span", { class: "small", title: f.known ? `Trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)}` : "File date" }, fmtTime(f.known && f.trained ? f.trained : f.mtime))),
+        h("td", {}, h("span", { class: "small", title: f.known ? `Created ${fmtTime(f.created)} (trained ${fmtTime(f.trained)}, installed ${fmtTime(f.installed_at)})` : "Created (the file's own date when the app first saw it)" }, fmtTime(f.created || f.mtime))),
         h("td", {}, h("span", { class: "muted small" }, fmtMB(f.size))),
         h("td", {}, f.results || f.gallery ? h("span", { class: "small", title: "Results rendered with it, and gallery images kept with it" }, String(f.results) + (f.gallery ? ` + ${f.gallery} in gallery` : "")) : h("span", { class: "muted" }, "0")),
         h("td", {}, h("div", { class: "row", style: { gap: "4px", justifyContent: "flex-end", flexWrap: "nowrap" } },
