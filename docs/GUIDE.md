@@ -436,7 +436,7 @@ the seed, model, group, kind, settings, prompt and extras. Then:
   by folder, tag, owner (*Mine* / *Shared with me*) or text (name, LoRA, seed,
   model...). Click folders and tags to add them (several folders: any
   of them; several tags: all of them), click one again to **hide** it (crossed
-  out), a third time to clear it. In the search box, several words must
+  out), a third time to clear it. *Clear all filters* (shown while any filter is on) resets the search and all filters. In the search box, several words must
   all match and a word starting with `-` excludes (`swarm -veteran`). The counts
   follow the filters. *Move to folder*, *Add tags* and *Remove tags* work on the
   selection, which only ever holds sprites that are on screen (changing a filter

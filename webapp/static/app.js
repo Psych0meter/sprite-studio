@@ -2158,6 +2158,10 @@ routes.gallery = async (main) => {
             const box = body.querySelector("input[type=search]");
             box.focus(); box.setSelectionRange(box.value.length, box.value.length);
           } }),
+          (state.find.trim() || state.who !== "all" || state.folders.length || state.noFolder.length || state.tags.length || state.noTag.length)
+            ? h("button", { class: "btn sm ghost", type: "button", title: "Remove the search and every filter", onclick: () => {
+              Object.assign(state, { find: "", who: "all", folders: [], noFolder: [], tags: [], noTag: [] }); keep(); draw();
+            } }, "Clear all filters") : null,
           chip("All", state.who === "all", () => { state.who = "all"; keep(); draw(); }), chip("Mine", state.who === "mine", () => { state.who = "mine"; keep(); draw(); }),
           chip("Shared with me", state.who === "shared", () => { state.who = "shared"; keep(); draw(); })),
         h("div", { class: "row", style: { gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, h("span", { class: "label" }, "Folders"),
