@@ -220,6 +220,7 @@ variables give the defaults (the service sets the data folders):
 | `PX_COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI's API |
 | `SG_WEB_PORT`, `SG_WEB_HOST` | `8189`, `127.0.0.1` | the app's address (a plain run listens on this machine only; the service made by `install.sh` listens on `0.0.0.0`; a port or host added to its unit is kept) |
 | `SG_ALLOWED_ORIGINS` | none | extra host names allowed to send changes (behind a reverse proxy that changes the `Host`) |
+| `PX_MESH_MAX_TRIANGLES` | `200000` | the most triangles `pxmesh.py mesh` accepts for one 3D model (the least is 100); set it to what your card and scene can draw |
 | `SG_MAX_UPLOAD_MB`, `SG_MAX_ZIP_MB`, `SG_MAX_QUEUED` | `300`, `250`, `100` | the largest request (counted as it is read, whatever its headers say), the most a zip of sprites may hold once unpacked, and how many jobs may wait for the GPU |
 | `SG_MAX_QUEUED_PER_USER`, `SG_MAX_CPU_JOBS_PER_USER` | `20`, `4` | how many jobs one user may have waiting for the GPU, and running on the CPU (administrators included) |
 | `SG_WEB_STATE` | `~/.spritegen-web` | the app's own state: accounts, jobs, logs, settings, picks |

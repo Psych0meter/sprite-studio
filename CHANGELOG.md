@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **3D models**: `pxmesh.py mesh` makes a closed low-poly 3D model (`.glb`) from a top-down sprite, textured with the sprite itself so its palette stays exact. You choose the number of triangles (100 to 200000, 5000 by default; `PX_MESH_MAX_TRIANGLES` changes the limit). See the guide, 5.9.
 - **3/4 views**: `pxmesh.py` draws a top-down sprite as seen from a tilted camera (`render`), or a whole folder at several turns (`dataset`), as ready training sprites for a 3/4-view model. It keeps the sprite's own colours and follows the sprite standard. See the guide, 5.8. A prototype: command line only for now.
 
 ## [0.3.4] - 2026-11-10

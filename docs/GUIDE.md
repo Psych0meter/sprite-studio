@@ -431,6 +431,32 @@ import the files from `sprites_34/`, and train it as usual (4.4).
 Generating from a top-down sprite with the new LoRA at a high *denoise* then
 turns it to the new view.
 
+### 5.9 A 3D model from a top-down sprite
+
+```bash
+pxmesh.py mesh ship.png ship.glb --size 128 --triangles 5000
+```
+
+makes a closed 3D model (a `.glb` file, which Godot, Blender and most game
+engines open) of the sprite. Its top follows the sprite as a rounded relief,
+and the sprite is its texture, filtered with nearest-neighbour, so your
+colours stay exactly yours. The model is flat shaded, about one unit long,
+with its nose toward -z and y up.
+
+- **triangles**: how many triangles the model has, in all. Pick it for your
+  game: 500 to 2000 for many small ships on screen, 5000 (the default) for a
+  hero ship, up to the limit of 200000 for a close-up. The limit protects
+  your card and your scene from a number that is too big;
+  `PX_MESH_MAX_TRIANGLES` changes it (see INSTALL). The least is 100. The
+  command prints the number made: a sprite has only so many pixels, so a
+  small one stops short of a very large number. Give `--size` a larger value
+  to get a finer model (the sprite is scaled up with hard pixels first).
+- **thickness**, **detail**, **base**: how tall the hull is, how much the
+  sprite's light bumps it, and the rim under it. **unlit** makes the material
+  flat colour, with no lighting, for a pixel-art look.
+- The far side and the underside are copies: the top's relief is turned over
+  flat. Thin parts that stick out of the sprite stay flat, as for 3/4 views.
+
 ## 6. Results
 
 Every run, batch and comparison of the output folder. Zoom (Fit, 1x to 8x),

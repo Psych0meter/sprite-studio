@@ -171,6 +171,29 @@ folder at several yaws (`<sprite>_yaw<n>.png`); the files are imported into
 a new model like any other sprites. Limits: one view in, so the far side
 and the underside are never drawn and parts that stick out stay flat.
 
+### 3D models (`pxmesh.py mesh`)
+
+The same relief as a closed low-poly model, a binary glTF 2.0 file written
+by hand (`write_glb`, no library). `mesh_of` finds the model's size: the
+sprite's outline is traced along its pixel edges (`_loops`) and simplified
+(`_simplify`, Douglas-Peucker, tolerance 0.5 to 5 px, the finest that fits),
+inner points are added on a grid whose step is searched (bisection) so that
+top + bottom + walls come as close as possible to `--triangles` without going
+over, and `scipy.spatial.Delaunay` triangulates them; triangles whose centre
+is outside the sprite are dropped, the rest are turned to face up
+(`_face_up`) and triangles are removed where the outline touches itself at a
+point (`_unpinch`), so that every edge of the final surface is shared by exactly two triangles. The
+bottom repeats the top flat, turned over; a wall joins each boundary edge of the top to
+the bottom. Heights come from `relief` plus a rim (`--base`). Triangles are flat shaded (three vertices each,
+a face normal), so the file holds 3 vertices per triangle. The texture is the sprite
+with transparent pixels filled from the nearest opaque one, with a nearest-neighbour sampler; the
+texture coordinates of points on the outline are moved to the nearest opaque pixel (`_uvs`).
+
+The number of triangles is checked (`check_triangles`): 100 up to
+`PX_MESH_MAX_TRIANGLES` (200000 by default). The result is as close to the
+number asked as the sprite's pixels allow (the grid cannot go finer than one
+point per pixel; a larger `--size` makes the sprite bigger first), and never above it.
+
 ## 7. Web app
 
 - **Accounts** (`accounts.py`, `auth_routes.py`; `users_cli.py` on the machine).
