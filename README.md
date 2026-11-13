@@ -98,6 +98,7 @@ in the `PATH` of the installation's user):
 | `pxmatrix.sh` | a LoRA comparison: checkpoints x strengths on fixed seeds |
 | `pxcomfy.py` | sends one job to ComfyUI's API |
 | `pxtool.py` | image tools: clean-up, pixel grid, colours, palettes, sheets |
+| `pxmesh.py` | a top-down sprite seen from a tilted camera (3/4 view), alone or as a training set |
 
 Each script prints its options with `-h` (or at the top of the file).
 

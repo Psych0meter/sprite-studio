@@ -33,6 +33,8 @@ scripts/
   pxtool.py      images: pixel grid, init images, render clean-up (post),
                  colour words, palettes (tune, relight, snap, match, extract,
                  auto-tune, export), sheets
+  pxmesh.py      a top-down sprite drawn as a relief from a tilted camera (3/4 view),
+                 cleaned up by pxtool.post; also a training set of such views
   pxcomfy.py     one ComfyUI job: workflow JSON, uploads, polling, download
   pxmake.sh      one generation: prompt from pxmodel, init image, pxcomfy,
                  post per render, job.txt
@@ -151,6 +153,23 @@ cannot be renamed or a rename target; a rename keeps the file's id).
 `GET /api/models/<id>/prompt?group=&kind=` returns the prompt the model builds
 for a group and a kind; the Preview prompts editor uses it to start a row.
 The stored `previews` list is unchanged (`"prompt --n words to avoid"`).
+
+### Three-quarter views (`pxmesh.py`)
+
+A way to get training sprites for a 3/4-view model without drawing them. It
+needs no model and no GPU. `render` reads a top-down sprite as a relief
+(`relief`: height from the distance to the silhouette's edge, a circular
+profile, plus the sprite's light as detail), turns it by `yaw` (`turn`) and
+draws it from a camera `tilt` degrees from straight above (`draw`: one
+pixel per sprite pixel at the generator's scale `512 // size`, a z-buffer, one
+pass per screen row so the sides of the hull are filled). The top keeps the
+sprite's colours, the sides are the same colours at 60 %. The picture is
+written on the key green with its grid file (`<out>_raw.png` and `.json`),
+so `pxtool.post` reads it exactly like a generator's render: pixel grid, at most
+`--max-colours` colours, outline, optional palette. `dataset` does this for a
+folder at several yaws (`<sprite>_yaw<n>.png`); the files are imported into
+a new model like any other sprites. Limits: one view in, so the far side
+and the underside are never drawn and parts that stick out stay flat.
 
 ## 7. Web app
 

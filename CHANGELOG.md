@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **3/4 views**: `pxmesh.py` draws a top-down sprite as seen from a tilted camera (`render`), or a whole folder at several turns (`dataset`), as ready training sprites for a 3/4-view model. It keeps the sprite's own colours and follows the sprite standard. See the guide, 5.8. A prototype: command line only for now.
+
 ## [0.3.4] - 2026-11-10
 
 ### Added

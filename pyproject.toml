@@ -44,7 +44,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["pxtool", "pxmodel", "pxcomfy", "app", "conftest"]
+known-first-party = ["pxtool", "pxmodel", "pxmesh", "pxcomfy", "app", "conftest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

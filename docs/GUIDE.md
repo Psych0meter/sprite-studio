@@ -403,6 +403,34 @@ run. Clean up again is not offered for tiles (nothing to tune).
 Make the kind's *final size* the tile's real size (256 for a 256 px floor),
 so the pixel grid is a whole number (2 on SD 1.5, 4 on SDXL).
 
+### 5.8 A 3/4 view from top-down sprites
+
+A model learns the view of its sprites. To get the same designs seen from
+a tilted camera, train a second model on 3/4 sprites and keep the first
+one as it is. `pxmesh.py` makes those sprites from your top-down ones, with
+no model and no GPU:
+
+```bash
+pxmesh.py render ship.png ship_34.png --size 128 --tilt 45
+pxmesh.py dataset sprites/ sprites_34/ --size 128 --yaws 0,90,180,270
+```
+
+- **tilt**: the camera's angle from straight above (0: your sprite as it is,
+  45 by default, up to 85). **yaw**: turns the ship first, so one sprite
+  gives views facing four ways. **thickness** and **detail** set how tall the
+  hull is and how much the sprite's light bumps it.
+- The result goes through the same clean-up as generated sprites: your
+  colours (the sides are darker shades of them), at most 64, one pixel per
+  pixel of the grid, an outline. `--palette` applies one of your palettes.
+- Look at a few before using them all. It guesses the shape from one view:
+  thin wings, antennas and guns come out flat, and the far side is not drawn.
+  A thickness near 0.1 to 0.15 reads best; a thick hull looks like a slab.
+
+Then make a new model (*Models*, new model, tail words such as "3/4 view"),
+import the files from `sprites_34/`, and train it as usual (4.4).
+Generating from a top-down sprite with the new LoRA at a high *denoise* then
+turns it to the new view.
+
 ## 6. Results
 
 Every run, batch and comparison of the output folder. Zoom (Fit, 1x to 8x),
